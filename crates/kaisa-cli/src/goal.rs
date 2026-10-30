@@ -20,6 +20,20 @@ const DEFAULT_EFFORT: &str = "medium";
 struct AgentChoice {
     program: Option<PathBuf>,
     args: Vec<String>,
+    /// `--agent codex`: Codex develops, observed; Claude Code (or the scripted reviewer) reviews.
+    codex: bool,
+    /// An `--agent` value Kaisa does not know.
+    unknown: Option<String>,
+}
+
+/// The Codex model a developer runs on, and its reasoning effort.
+const CODEX_MODEL: &str = "gpt-6.1-sol";
+
+/// Codex's arguments for an observed developer run.
+fn codex_args() -> Vec<String> {
+    kaisa_agents::CodexLaunch::try_new(CODEX_MODEL, kaisa_daemon::ROUTE_EFFORT)
+        .map(|launch| kaisa_agents::codex_observed_argv(&launch))
+        .unwrap_or_default()
 }
 
 /// Parsed `kaisa [--agent-program <path>] [--agent-arg <arg>]… [--reviewer-arg <arg>]…
@@ -40,6 +54,8 @@ impl GoalCommand {
         let mut agent = AgentChoice {
             program: None,
             args: Vec::new(),
+            codex: false,
+            unknown: None,
         };
         let mut goal: Vec<&str> = Vec::new();
         let mut reviewer_args: Vec<String> = Vec::new();
@@ -47,6 +63,11 @@ impl GoalCommand {
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
+                "--agent" => match words.next().map(String::as_str) {
+                    Some("codex") => agent.codex = true,
+                    Some("claude") => {}
+                    other => agent.unknown = Some(other.unwrap_or_default().to_owned()),
+                },
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
@@ -67,7 +88,25 @@ impl GoalCommand {
         })
     }
 
+    /// Codex as an observed developer: no bridge, its own workspace sandbox, the plain pack on
+    /// standard input.
+    fn codex_spec(&self) -> ProcessSpec {
+        ProcessSpec {
+            program: self
+                .agent
+                .program
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("codex")),
+            args: codex_args(),
+            working_directory: std::env::temp_dir(),
+            env: Vec::new(),
+        }
+    }
+
     fn launch_spec(&self, mcp_config: &Path) -> ProcessSpec {
+        if self.agent.codex {
+            return self.codex_spec();
+        }
         match &self.agent.program {
             Some(program) => {
                 let mut args: Vec<String> = vec![
@@ -103,6 +142,9 @@ impl GoalCommand {
     /// The agent spec for `role`: a scripted program with its role's arguments, or Claude Code
     /// on the model the router picks.
     fn role_spec(&self, role: Role, write_set: &WriteSet, mcp_config: &Path) -> ProcessSpec {
+        if self.agent.codex && role == Role::Developer {
+            return self.codex_spec();
+        }
         match &self.agent.program {
             Some(program) => {
                 let mut args: Vec<String> = vec![
@@ -161,7 +203,7 @@ impl GoalCommand {
             confine_agent: self.agent.program.is_some(),
             checks: &checks,
             policy: &policy,
-            observed: false,
+            observed: self.agent.codex,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
@@ -180,6 +222,13 @@ impl GoalCommand {
 
     /// Runs the goal in the repository containing the current directory.
     pub(crate) fn run(&self, out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
+        if let Some(unknown) = &self.agent.unknown {
+            writeln!(
+                err,
+                "kaisa: unknown agent {unknown:?}; use --agent claude or --agent codex"
+            )?;
+            return Ok(crate::EXIT_USAGE);
+        }
         let Some(repository) = repository_root() else {
             writeln!(err, "kaisa: run this inside a git repository")?;
             return Ok(crate::EXIT_USAGE);
@@ -221,7 +270,7 @@ impl GoalCommand {
             egress_hosts: &[],
             agent_writable: &[],
             local_model_port: None,
-            observed: false,
+            observed: self.agent.codex,
         }) {
             Ok(outcome) => {
                 writeln!(out, "{}", outcome.summary())?;
@@ -254,4 +303,17 @@ fn repository_root() -> Option<PathBuf> {
         .status
         .success()
         .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_args;
+
+    #[test]
+    fn the_codex_developer_launch_is_valid() {
+        assert!(
+            !codex_args().is_empty(),
+            "the built-in Codex model and effort pass launch validation, so Codex gets its argv"
+        );
+    }
 }

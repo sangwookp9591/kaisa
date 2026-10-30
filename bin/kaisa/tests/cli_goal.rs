@@ -590,3 +590,58 @@ fn watch_shows_recorded_usage_per_attempt() {
         "the attempt's tokens and cost are shown from the ledger: {view:?}"
     );
 }
+
+/// What the fake agent writes when it is started the way Codex is.
+const WRITTEN_BY_CODEX: &str = "src/written-by-codex.md";
+
+#[test]
+fn a_codex_goal_is_reported_as_observed() {
+    let bench = Workbench::new("codex");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent",
+            "codex",
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--reviewer-arg",
+            "--fake-review-require",
+            "--reviewer-arg",
+            WRITTEN_BY_CODEX,
+            GOAL,
+        ])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert!(
+        stdout
+            .lines()
+            .next()
+            .is_some_and(|_| stdout.contains("observed")),
+        "the Codex attempt is labelled observed, not brokered: {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn an_unknown_agent_is_a_usage_error() {
+    let bench = Workbench::new("unknown-agent");
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(["--agent", "nobody", GOAL])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("unknown agent"),
+        "an agent Kaisa does not know is named, not silently replaced: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

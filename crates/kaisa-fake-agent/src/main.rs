@@ -57,6 +57,9 @@ fn proxy_status_for(host: &str) -> Result<String, String> {
 /// How long a hanging agent waits: far longer than any test runs.
 const HANG: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The file the fake agent writes when it is started the way Codex is.
+const CODEX_WRITES: &str = "src/written-by-codex.md";
+
 /// The line of a review pack that names the candidate's tree.
 const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
 
@@ -102,6 +105,16 @@ fn flag_present(args: &[String], name: &str) -> bool {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Started with Codex's own arguments (`exec --json ...`), it acts as Codex would: it reads
+    // the plain pack and writes `CODEX_WRITES` into its working directory.
+    if args.first().map(String::as_str) == Some("exec") {
+        let mut pack = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut pack)
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all("src").map_err(|error| error.to_string())?;
+        return std::fs::write(CODEX_WRITES, "written by Codex\n")
+            .map_err(|error| error.to_string());
+    }
     // `--fake-observed-write <path>` acts like an observed agent (Codex): it reads the whole
     // pack as plain text and writes straight into its working directory, with no bridge.
     if let Some(path) = flag(&args, "--fake-observed-write") {
