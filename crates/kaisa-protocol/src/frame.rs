@@ -4,12 +4,16 @@
 //! a single `\n` byte is an unambiguous frame terminator.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// The byte that ends every frame.
 pub const FRAME_TERMINATOR: u8 = b'\n';
+
+/// Default upper bound on the bytes of one frame, excluding its terminator.
+pub const DEFAULT_FRAME_LIMIT: usize = 1024 * 1024;
 
 /// Why a frame could not be written or read.
 #[derive(Debug)]
@@ -19,6 +23,14 @@ pub enum FrameError {
     Io(io::Error),
     /// The value could not be encoded, or the frame is not valid JSON for the expected type.
     Malformed(serde_json::Error),
+    /// A frame exceeded the reader's byte limit. The reader stopped reading and must not be
+    /// used again, because the rest of the oversized frame is still in the stream.
+    TooLarge {
+        /// The limit that was exceeded.
+        limit: usize,
+    },
+    /// The stream ended in the middle of a frame.
+    Truncated,
 }
 
 impl fmt::Display for FrameError {
@@ -26,6 +38,8 @@ impl fmt::Display for FrameError {
         match self {
             Self::Io(error) => write!(f, "frame stream error: {error}"),
             Self::Malformed(error) => write!(f, "malformed frame: {error}"),
+            Self::TooLarge { limit } => write!(f, "frame exceeds the {limit}-byte limit"),
+            Self::Truncated => write!(f, "stream ended in the middle of a frame"),
         }
     }
 }
@@ -35,6 +49,7 @@ impl std::error::Error for FrameError {
         match self {
             Self::Io(error) => Some(error),
             Self::Malformed(error) => Some(error),
+            Self::TooLarge { .. } | Self::Truncated => None,
         }
     }
 }
@@ -57,6 +72,62 @@ pub fn write_frame<M: Serialize>(writer: &mut dyn Write, message: &M) -> Result<
     writer.write_all(&line)?;
     writer.flush()?;
     Ok(())
+}
+
+/// Reads NDJSON frames from a buffered stream, refusing frames above a byte limit.
+#[derive(Debug)]
+pub struct FrameReader<R> {
+    inner: R,
+    limit: usize,
+}
+
+impl<R: BufRead> FrameReader<R> {
+    /// Reads from `inner`, accepting frames of at most `limit` bytes before the terminator.
+    pub fn new(inner: R, limit: usize) -> Self {
+        Self { inner, limit }
+    }
+
+    /// Gives back the underlying stream.
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    /// Reads the next frame and decodes it as `M`. Returns `Ok(None)` when the stream ends
+    /// cleanly between frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::TooLarge`] as soon as the frame exceeds the limit, without reading
+    /// the rest of it; [`FrameError::Truncated`] if the stream ends inside a frame;
+    /// [`FrameError::Malformed`] if the frame is not valid JSON for `M`; [`FrameError::Io`] if
+    /// reading fails.
+    pub fn read_frame<M: DeserializeOwned>(&mut self) -> Result<Option<M>, FrameError> {
+        let mut frame: Vec<u8> = Vec::new();
+        loop {
+            let available: &[u8] = self.inner.fill_buf()?;
+            if available.is_empty() {
+                return if frame.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(FrameError::Truncated)
+                };
+            }
+            let terminator: Option<usize> =
+                available.iter().position(|byte| *byte == FRAME_TERMINATOR);
+            let body: &[u8] = &available[..terminator.unwrap_or(available.len())];
+            if frame.len() + body.len() > self.limit {
+                return Err(FrameError::TooLarge { limit: self.limit });
+            }
+            frame.extend_from_slice(body);
+            let consumed: usize = terminator.map_or(available.len(), |at| at + 1);
+            self.inner.consume(consumed);
+            if terminator.is_some() {
+                return serde_json::from_slice(&frame)
+                    .map(Some)
+                    .map_err(FrameError::Malformed);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +157,67 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A request whose note is `length` characters long, for size-limit tests.
+    pub(crate) fn status_request_with_a_note_of_length(length: usize) -> StatusRequest {
+        StatusRequest {
+            run: "run_41".to_owned(),
+            note: "n".repeat(length),
+        }
+    }
+
+    /// The number of bytes before the terminator that `message` occupies on the wire.
+    pub(crate) fn frame_body_length(message: &StatusRequest) -> usize {
+        written(message).len() - 1
+    }
+
+    /// A stream that hands out its bytes a few at a time and remembers how far it got, so tests
+    /// can see how much a reader actually pulled.
+    pub(crate) struct TrickleStream {
+        data: Vec<u8>,
+        position: usize,
+        chunk: usize,
+        handed_out: usize,
+    }
+
+    impl TrickleStream {
+        /// A stream over `data` that hands out at most `chunk` bytes per `fill_buf`.
+        pub(crate) fn new(data: Vec<u8>, chunk: usize) -> Self {
+            Self {
+                data,
+                position: 0,
+                chunk,
+                handed_out: 0,
+            }
+        }
+
+        /// The furthest byte offset the reader has been shown.
+        pub(crate) fn bytes_handed_out(&self) -> usize {
+            self.handed_out
+        }
+    }
+
+    impl std::io::Read for TrickleStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let available: &[u8] = std::io::BufRead::fill_buf(self)?;
+            let copied: usize = available.len().min(buffer.len());
+            buffer[..copied].copy_from_slice(&available[..copied]);
+            std::io::BufRead::consume(self, copied);
+            Ok(copied)
+        }
+    }
+
+    impl std::io::BufRead for TrickleStream {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            let end: usize = (self.position + self.chunk).min(self.data.len());
+            self.handed_out = self.handed_out.max(end);
+            Ok(&self.data[self.position..end])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.position += amount;
+        }
+    }
+
     /// Bytes `message` would occupy on the wire.
     pub(crate) fn written(message: &StatusRequest) -> Vec<u8> {
         let mut wire: Vec<u8> = Vec::new();
@@ -96,10 +228,21 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::FRAME_TERMINATOR;
     use super::test_support::{
-        status_request_for_run_41, status_request_with_a_two_line_note, written,
+        StatusRequest, TrickleStream, frame_body_length, status_request_for_run_41,
+        status_request_with_a_note_of_length, status_request_with_a_two_line_note, written,
     };
+    use super::{DEFAULT_FRAME_LIMIT, FRAME_TERMINATOR, FrameError, FrameReader};
+
+    /// How many bytes the trickle stream hands out per read in these tests.
+    const TRICKLE_CHUNK: usize = 16;
+
+    /// A limit small enough to exceed with a readable test message.
+    const SMALL_LIMIT: usize = 256;
+
+    fn reader_over(wire: Vec<u8>, limit: usize) -> FrameReader<TrickleStream> {
+        FrameReader::new(TrickleStream::new(wire, TRICKLE_CHUNK), limit)
+    }
 
     /// A frame is a single line.
     const TERMINATORS_PER_FRAME: usize = 1;
@@ -134,6 +277,81 @@ mod tests {
             terminators_in(&wire),
             TERMINATORS_PER_FRAME,
             "newlines inside strings are escaped, never written raw"
+        );
+    }
+
+    #[test]
+    fn a_written_frame_is_read_back_unchanged() {
+        let request: StatusRequest = status_request_with_a_two_line_note();
+        let mut reader = reader_over(written(&request), DEFAULT_FRAME_LIMIT);
+
+        let read: Option<StatusRequest> = reader.read_frame().expect("a valid frame reads");
+
+        assert_eq!(
+            read,
+            Some(request),
+            "what one side writes the other side reads"
+        );
+    }
+
+    #[test]
+    fn two_frames_written_back_to_back_are_read_as_two_messages() {
+        let first: StatusRequest = status_request_for_run_41();
+        let second: StatusRequest = status_request_with_a_two_line_note();
+        let mut wire: Vec<u8> = written(&first);
+        wire.extend(written(&second));
+        let mut reader = reader_over(wire, DEFAULT_FRAME_LIMIT);
+
+        let read_first: Option<StatusRequest> = reader.read_frame().expect("the first frame reads");
+        let read_second: Option<StatusRequest> =
+            reader.read_frame().expect("the second frame reads");
+
+        assert_eq!(read_first, Some(first), "frames are not merged");
+        assert_eq!(
+            read_second,
+            Some(second),
+            "the second frame starts after the first terminator"
+        );
+    }
+
+    #[test]
+    fn a_frame_exactly_at_the_limit_is_accepted() {
+        let request: StatusRequest = status_request_for_run_41();
+        let limit: usize = frame_body_length(&request);
+        let mut reader = reader_over(written(&request), limit);
+
+        let read: Option<StatusRequest> = reader.read_frame().expect("a frame at the limit reads");
+
+        assert_eq!(read, Some(request), "the limit itself is allowed");
+    }
+
+    #[test]
+    fn a_frame_larger_than_the_limit_is_rejected() {
+        let oversized: StatusRequest = status_request_with_a_note_of_length(SMALL_LIMIT);
+        let mut reader = reader_over(written(&oversized), SMALL_LIMIT);
+
+        let read: Result<Option<StatusRequest>, FrameError> = reader.read_frame();
+
+        assert!(
+            matches!(read, Err(FrameError::TooLarge { limit: SMALL_LIMIT })),
+            "an oversized frame must be refused, got {read:?}"
+        );
+    }
+
+    #[test]
+    fn the_reader_stops_reading_once_the_limit_is_exceeded() {
+        let oversized: StatusRequest =
+            status_request_with_a_note_of_length(SMALL_LIMIT * TRICKLE_CHUNK);
+        let wire: Vec<u8> = written(&oversized);
+        let wire_length: usize = wire.len();
+        let mut reader = reader_over(wire, SMALL_LIMIT);
+
+        let _refused = reader.read_frame::<StatusRequest>();
+
+        assert!(
+            reader.into_inner().bytes_handed_out() <= SMALL_LIMIT + TRICKLE_CHUNK,
+            "a peer must not be able to make the reader buffer a whole oversized frame \
+             (the frame was {wire_length} bytes)"
         );
     }
 }
