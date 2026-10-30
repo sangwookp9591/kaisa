@@ -284,6 +284,12 @@ impl OwnedProcess {
     }
 }
 
+/// Sends SIGKILL to the process group led by `leader`; a group that is gone is not an error.
+#[cfg(unix)]
+pub(crate) fn end_process_group(leader: u32) -> io::Result<()> {
+    unix::kill_process_group(leader)
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io;

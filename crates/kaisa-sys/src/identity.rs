@@ -32,6 +32,22 @@ impl ProcessIdentity {
         Ok(start_of(self.pid)? == Some(self.started))
     }
 
+    /// Ends the process and its process group if it is still this very process; returns
+    /// whether there was anything to end. Kaisa started the agent as a group leader, and a
+    /// group id cannot be reused while its leader lives, so the group named here is the agent's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if the process cannot be inspected or signalled.
+    #[cfg(unix)]
+    pub fn end_tree(&self) -> io::Result<bool> {
+        if !self.is_running()? {
+            return Ok(false);
+        }
+        crate::process::end_process_group(self.pid)?;
+        Ok(true)
+    }
+
     /// The identity as one line of text, for an attempt directory.
     #[must_use]
     pub fn to_line(&self) -> String {
@@ -123,6 +139,8 @@ fn start_of(_pid: u32) -> io::Result<Option<u64>> {
 mod tests {
     use super::ProcessIdentity;
 
+    /// Long enough that the agent is still running when the test ends it.
+    const AGENT_LIFETIME_SECONDS: &str = "30";
     /// A pid far above any the test runner will hand out.
     const UNUSED_PID: u32 = 999_999;
 
@@ -170,6 +188,42 @@ mod tests {
             ProcessIdentity::from_line(&identity.to_line()),
             Some(identity),
             "the identity read back after a crash is the one recorded"
+        );
+    }
+
+    #[test]
+    fn ending_a_recorded_agent_ends_it_and_nothing_else() {
+        let mut agent = crate::OwnedProcess::spawn(&crate::ProcessSpec {
+            program: std::path::PathBuf::from("/bin/sleep"),
+            args: vec![AGENT_LIFETIME_SECONDS.to_owned()],
+            working_directory: std::env::temp_dir(),
+            env: Vec::new(),
+        })
+        .expect("sleep starts");
+        let identity = ProcessIdentity::of(agent.id())
+            .expect("inspectable")
+            .expect("the agent exists");
+        let reused = ProcessIdentity {
+            started: identity.started + 1,
+            ..identity
+        };
+
+        let ended_stranger: bool = reused.end_tree().expect("inspectable");
+        let ended_agent: bool = identity.end_tree().expect("signalled");
+        let exit = agent.wait().expect("the agent is reaped");
+
+        assert!(
+            !ended_stranger,
+            "a process that only shares the pid is never signalled"
+        );
+        assert!(
+            ended_agent,
+            "the recorded agent was still running and was ended"
+        );
+        assert_eq!(
+            exit,
+            crate::ProcessExit::Terminated,
+            "the agent ended by a signal, not on its own"
         );
     }
 }
