@@ -359,3 +359,91 @@ fn a_personal_agent_is_added_from_the_cli_without_an_admin() {
         "the list shows what was accepted and nothing else: {listing:?}"
     );
 }
+
+/// The CLI arguments of a scripted verified run: a developer writing step files, a reviewer
+/// requiring the first one, and optionally the user's own check requiring it too.
+fn a_verified_run(fake_agent: &Path, with_check: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "--agent-program".to_owned(),
+        fake_agent.to_string_lossy().into_owned(),
+        "--agent-arg".to_owned(),
+        "--fake-write-next".to_owned(),
+        "--agent-arg".to_owned(),
+        "src/step".to_owned(),
+        "--reviewer-arg".to_owned(),
+        "--fake-review-require".to_owned(),
+        "--reviewer-arg".to_owned(),
+        "src/step-1.md".to_owned(),
+    ];
+    if with_check {
+        let (program, check) = if cfg!(windows) {
+            ("cmd", r"if exist src\step-1.md (exit 0) else (exit 1)")
+        } else {
+            ("sh", "test -f src/step-1.md")
+        };
+        let flag = if cfg!(windows) { "/c" } else { "-c" };
+        args.extend(
+            [
+                "--check-program",
+                program,
+                "--check-arg",
+                flag,
+                "--check-arg",
+                check,
+            ]
+            .iter()
+            .map(|arg| (*arg).to_owned()),
+        );
+    }
+    args.push(GOAL.to_owned());
+    args
+}
+
+#[test]
+fn kaisa_with_a_verified_goal_reports_verified_and_exits_zero() {
+    let bench = Workbench::new("verified");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(a_verified_run(&fake_agent, true))
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert!(
+        run.status.success() && stdout.contains("verified:"),
+        "checks passed and the review approved, so it is delivered as verified; got {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// Exit status of a goal that was not delivered (CI contract code 4).
+const NOT_DELIVERED: i32 = 4;
+
+#[test]
+fn kaisa_without_evidence_delivers_nothing_and_exits_four() {
+    let bench = Workbench::new("no-evidence");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(a_verified_run(&fake_agent, false))
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert_eq!(
+        run.status.code(),
+        Some(NOT_DELIVERED),
+        "a repository with no trusted check gives no evidence, so nothing is delivered: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("not delivered"),
+        "the user is told plainly: {stdout:?}"
+    );
+}

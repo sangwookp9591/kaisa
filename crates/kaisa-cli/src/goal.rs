@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use kaisa_agents::{ClaudeLaunch, claude_brokered_argv};
-use kaisa_daemon::{GoalOutcome, GoalRequest, run_goal, whole_repository};
+use kaisa_daemon::{
+    GoalOutcome, GoalRequest, VerifiedRequest, run_goal, run_verified_goal, whole_repository,
+};
+use kaisa_domain::{Role, WriteSet};
 use kaisa_sys::{ProcessExit, ProcessSpec};
 
 /// Default model and effort until the router (M1) chooses them.
@@ -19,10 +22,16 @@ struct AgentChoice {
     args: Vec<String>,
 }
 
-/// Parsed `kaisa [--agent-program <path>] [--agent-arg <arg>]… "<goal>"`.
+/// Parsed `kaisa [--agent-program <path>] [--agent-arg <arg>]… [--reviewer-arg <arg>]…
+/// [--check-program <path> [--check-arg <arg>]…] "<goal>"`.
 pub(crate) struct GoalCommand {
     goal: String,
     agent: AgentChoice,
+    /// Arguments that make the scripted agent act as the reviewer; with them, or with Claude
+    /// Code, the goal runs verified (T31).
+    reviewer_args: Vec<String>,
+    /// The user's own trusted check, replacing the profile's test commands.
+    check: Option<Vec<String>>,
 }
 
 impl GoalCommand {
@@ -33,17 +42,28 @@ impl GoalCommand {
             args: Vec::new(),
         };
         let mut goal: Vec<&str> = Vec::new();
+        let mut reviewer_args: Vec<String> = Vec::new();
+        let mut check: Option<Vec<String>> = None;
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
+                "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
+                "--check-program" => check = words.next().map(|program| vec![program.clone()]),
+                "--check-arg" => {
+                    if let (Some(check), Some(arg)) = (check.as_mut(), words.next()) {
+                        check.push(arg.clone());
+                    }
+                }
                 other => goal.push(other),
             }
         }
         (!goal.is_empty()).then(|| Self {
             goal: goal.join(" "),
             agent,
+            reviewer_args,
+            check,
         })
     }
 
@@ -75,6 +95,81 @@ impl GoalCommand {
         }
     }
 
+    /// True if the goal runs verified: with Claude Code, or a scripted agent given reviewer args.
+    fn verified(&self) -> bool {
+        self.agent.program.is_none() || !self.reviewer_args.is_empty()
+    }
+
+    /// The agent spec for `role`: a scripted program with its role's arguments, or Claude Code
+    /// on the model the router picks.
+    fn role_spec(&self, role: Role, write_set: &WriteSet, mcp_config: &Path) -> ProcessSpec {
+        match &self.agent.program {
+            Some(program) => {
+                let mut args: Vec<String> = vec![
+                    "--mcp-config".to_owned(),
+                    mcp_config.to_string_lossy().into_owned(),
+                ];
+                let role_args = if role == Role::Reviewer {
+                    &self.reviewer_args
+                } else {
+                    &self.agent.args
+                };
+                args.extend(role_args.iter().cloned());
+                ProcessSpec {
+                    program: program.clone(),
+                    args,
+                    working_directory: std::env::temp_dir(),
+                    env: Vec::new(),
+                }
+            }
+            None => crate::verified::claude_spec(
+                &crate::verified::routed_model(role, write_set),
+                mcp_config,
+            ),
+        }
+    }
+
+    /// Runs the goal verified and reports the gate's decision with its CI exit code.
+    fn run_verified(
+        &self,
+        repository: &Path,
+        state: &Path,
+        write_set: &WriteSet,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> io::Result<u8> {
+        let kaisa: PathBuf = std::env::current_exe()?;
+        let checks = crate::verified::trusted_checks(repository, self.check.as_deref());
+        let developer = |mcp_config: &Path| self.role_spec(Role::Developer, write_set, mcp_config);
+        let reviewer = |mcp_config: &Path| self.role_spec(Role::Reviewer, write_set, mcp_config);
+        match run_verified_goal(&VerifiedRequest {
+            repository,
+            state_directory: state,
+            goal: &self.goal,
+            write_set,
+            developer: &developer,
+            reviewer: &reviewer,
+            kaisa_executable: &kaisa,
+            // Claude Code runs reduced until a confined run is verified per OS (T16.0).
+            confine_agent: self.agent.program.is_some(),
+            checks: &checks,
+            revision_limit: crate::verified::REVISION_LIMIT,
+        }) {
+            Ok(outcome) => {
+                for attempt in &outcome.attempts {
+                    writeln!(out, "{}", attempt.summary())?;
+                }
+                let (line, status) = crate::report_delivery(&outcome.delivery);
+                writeln!(out, "{line}")?;
+                Ok(status)
+            }
+            Err(error) => {
+                writeln!(err, "kaisa: {error}")?;
+                Ok(crate::EXIT_FAILURE)
+            }
+        }
+    }
+
     /// Runs the goal in the repository containing the current directory.
     pub(crate) fn run(&self, out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         let Some(repository) = repository_root() else {
@@ -100,13 +195,16 @@ impl GoalCommand {
             Err(error) => writeln!(err, "kaisa: recovery of earlier attempts failed: {error}")?,
         }
         writeln!(out, "▶ {}", self.goal)?;
+        if self.verified() {
+            return self.run_verified(&repository, &state, &write_set, out, err);
+        }
         match run_goal(&GoalRequest {
             repository: &repository,
             goal: &self.goal,
             base: "HEAD",
             state_directory: &state,
             write_set: &write_set,
-            role: kaisa_domain::Role::Developer,
+            role: Role::Developer,
             launch: &launch,
             kaisa_executable: &kaisa,
             // Claude Code needs the network; until its confined run is verified on every OS

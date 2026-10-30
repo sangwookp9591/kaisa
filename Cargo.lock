@@ -170,6 +170,7 @@ name = "kaisa-cli"
 version = "0.0.0"
 dependencies = [
  "kaisa-agents",
+ "kaisa-context",
  "kaisa-daemon",
  "kaisa-domain",
  "kaisa-ledger",

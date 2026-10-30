@@ -9,6 +9,7 @@ use std::io::Write;
 mod agent;
 mod delivery;
 mod goal;
+mod verified;
 mod watch;
 
 pub use delivery::{EXIT_WAITING_FOR_HUMAN, report_delivery};
