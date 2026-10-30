@@ -182,7 +182,12 @@ impl GoalCommand {
     ) -> io::Result<u8> {
         let kaisa: PathBuf = std::env::current_exe()?;
         let checks = crate::verified::trusted_checks(repository, self.check.as_deref());
-        let policy = match crate::verified::default_policy().snapshot() {
+        // The personal policy (T34); a broken policy file stops the run rather than defaulting.
+        let policy = match crate::policy::load(state).and_then(|policy| {
+            policy
+                .snapshot()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        }) {
             Ok(policy) => policy,
             Err(error) => {
                 writeln!(err, "kaisa: the policy cannot govern a run: {error}")?;

@@ -771,3 +771,38 @@ fn a_light_task_runs_on_the_registered_local_model() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// The revision limit the person sets: no revisions at all.
+const NO_REVISIONS: &str = "0";
+
+#[test]
+fn a_run_uses_the_personal_policy() {
+    let bench = Workbench::new("personal-policy");
+    let state: PathBuf = bench.base.join("state");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let set: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(["policy", "set", "revision_limit", NO_REVISIONS])
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa policy runs");
+    assert!(set.status.success(), "the personal policy is saved");
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(a_verified_run(&fake_agent, true))
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+
+    let adopted = kaisa_ledger::EventStore::open(&state.join("kaisa.db"))
+        .and_then(|ledger| ledger.adopted_policies())
+        .expect("the ledger reads");
+    assert!(
+        adopted.iter().any(|policy| policy
+            .canonical
+            .contains(&format!("revision_limit={NO_REVISIONS}\n"))),
+        "the run adopted the person's policy, not the built-in default: {adopted:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

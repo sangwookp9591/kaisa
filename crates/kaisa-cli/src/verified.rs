@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use kaisa_agents::{ClaudeLaunch, claude_brokered_argv};
 use kaisa_context::{Confirmation, DetectedCommand, Language, Purpose, derive_profile};
-use kaisa_daemon::{DEFAULT_REVISION_LIMIT, ROUTE_EFFORT, decide_route};
+use kaisa_daemon::{ROUTE_EFFORT, decide_route};
 use kaisa_domain::{
     AgentEntry, AgentKind, Catalog, CatalogModel, Grade, PlannedTask, Role, TaskId, TaskSignals,
     WriteSet, grade_task,
@@ -130,21 +130,6 @@ pub(crate) fn trusted_checks(
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Revisions allowed before a person decides.
-pub(crate) const REVISION_LIMIT: u32 = DEFAULT_REVISION_LIMIT;
-
-/// The policy a run adopts until personal policy files arrive: the default revision limit,
-/// confinement on, no egress, a T3 floor for security review, and a person for changed checks.
-pub(crate) fn default_policy() -> kaisa_domain::Policy {
-    kaisa_domain::Policy {
-        revision_limit: REVISION_LIMIT,
-        allowed_egress_hosts: Vec::new(),
-        confine_agents: true,
-        min_grade_for_security_review: kaisa_domain::Grade::T3,
-        require_person_when_check_definitions_change: true,
-    }
 }
 
 #[cfg(test)]
