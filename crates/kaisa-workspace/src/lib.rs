@@ -8,6 +8,7 @@ mod inventory;
 mod preserve;
 mod receipt;
 mod secrets;
+mod settings_risk;
 mod source;
 mod status;
 #[cfg(test)]
@@ -20,6 +21,9 @@ pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 pub use secrets::{SecretKind, scan as scan_for_secrets};
+pub use settings_risk::{
+    MAX_RISK_EXCERPT_BYTES, MAX_SETTINGS_FILE_BYTES, RiskFinding, RiskRule, scan_settings,
+};
 pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
 pub use worktree::{
