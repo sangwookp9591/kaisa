@@ -3,6 +3,7 @@
 //! Design: `docs/architecture.md` §5.2, §5.4 and §7.
 
 mod attempt;
+mod attempt_codes;
 mod effect;
 mod event;
 mod grade;
