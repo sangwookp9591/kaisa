@@ -128,6 +128,9 @@ version = "0.0.0"
 [[package]]
 name = "kaisa-keeper"
 version = "0.0.0"
+dependencies = [
+ "kaisa-domain",
+]
 
 [[package]]
 name = "kaisa-ledger"
