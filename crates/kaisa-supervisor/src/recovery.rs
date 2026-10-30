@@ -14,6 +14,9 @@ pub enum Recovery {
     StillRunning,
     /// No record and no process: Kaisa no longer knows what happened.
     LostTrack,
+    /// Already `Unknown` and still without proof: a human decides. Recovery never restarts or
+    /// retries such an attempt (architecture P8), because it may still be changing things.
+    NeedsDecision,
     /// The attempt was not in flight; nothing to recover.
     Unchanged,
 }
@@ -30,6 +33,10 @@ pub fn decide_recovery(
         execution,
         Execution::Starting | Execution::Running | Execution::Stalled
     );
+    if execution == Execution::Unknown {
+        // Only an exit record is proof. A process that looks alive may be a reused PID.
+        return exit_record.map_or(Recovery::NeedsDecision, Recovery::Exited);
+    }
     if !in_flight {
         return Recovery::Unchanged;
     }
@@ -79,6 +86,26 @@ mod tests {
             decide_recovery(Execution::Running, None, ALIVE),
             Recovery::StillRunning,
             "a daemon restart must not disturb agents that are still working"
+        );
+    }
+
+    #[test]
+    fn an_unknown_attempt_is_never_restarted_by_recovery() {
+        for process_seems_alive in [ALIVE, GONE] {
+            assert_eq!(
+                decide_recovery(Execution::Unknown, None, process_seems_alive),
+                Recovery::NeedsDecision,
+                "an attempt that may still be writing is never started twice; a human decides"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exit_record_still_resolves_an_unknown_attempt() {
+        assert_eq!(
+            decide_recovery(Execution::Unknown, Some(RECORDED_FAILURE), GONE),
+            Recovery::Exited(RECORDED_FAILURE),
+            "proof that arrives late still settles the attempt"
         );
     }
 }
