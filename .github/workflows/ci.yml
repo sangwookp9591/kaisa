@@ -8,9 +8,11 @@ on:
 permissions:
   contents: read
 
+# Every commit on main gets its own group (and so its own CI result). Pull requests share a
+# group per branch, so a new push cancels the superseded run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
