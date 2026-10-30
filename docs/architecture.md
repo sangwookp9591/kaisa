@@ -651,7 +651,20 @@ ledger like every other state, so they survive restarts, can be audited and can 
   inside bounds). Nothing in knowledge can change policy, tools, egress, secrets, spend or
   concurrency; at most it changes what an agent reads.
 - Before storing, a secret scanner redacts credentials; an item that still matches is dropped.
-- Knowledge is always given to agents as quoted data, never as instructions.
+- Knowledge is always given to agents as quoted data, never as instructions. Quoting is a format, not
+  a defence, so the rules below carry the safety (v0.6.1, review M1).
+
+**Provenance is not truth (review M1).**
+- Every item records where each statement came from. A *lesson* must cite machine evidence: the
+  failing check, the diff that fixed it and the passing check on the delivered digest. Kaisa writes
+  the lesson from that evidence; free text written by an agent is attached as a note, never promoted.
+- Agent-authored and ingested text stays **quarantined**: it can be shown to a human, and it can be
+  injected only with a `tainted` mark that the context pack carries through compaction and handoff.
+- A knowledge item can never contain a command to run, a path to widen, a tool to enable or a
+  permission request. Items that look like one are dropped at proposal.
+- Coordinator journal entries are *recorded* decisions, not verified facts, and are labelled so.
+- An adversarial retrieval corpus (planted instructions, poisoned lessons, look-alike paths) runs in
+  CI; none of its items may reach an agent unmarked or change a route, a write set or a check.
 
 **Retrieval.** Hybrid by default: SQLite FTS5 (BM25) plus a local vector index, merged with maximal
 marginal relevance, then weighted by recency and by measured usefulness (below).
@@ -675,10 +688,16 @@ The pack is content-addressed and its digest is recorded on the attempt, so any 
 and audited. Agents receive it as their first message and as the MCP resource
 `kaisa://context/<attempt>`; `kaisa_knowledge` is there for anything else they want to look up.
 
-**Accountability (P19).** Every injected item is recorded with the attempt. When the attempt's result
-is decided (delivered, revised, rejected), each injected item's usefulness estimate is updated.
-Items that keep failing to help decay; items unused for a policy-set period retire. Retrieval is
-therefore tuned by outcomes, not by whether a keyword matched again.
+**Accountability (P19, v0.6.1 review M2).** Every injected item is recorded with the attempt.
+Usefulness is not credited by giving every injected item the attempt's outcome — that rewards
+bystanders and blames the wrong item. Instead:
+- a small, policy-capped share of attempts runs with one eligible item held out (an ablation), and an
+  item's usefulness is the outcome difference between attempts that had it and comparable attempts
+  that did not;
+- updates need a minimum sample, are capped per period, and near-duplicate tasks count once, so a
+  burst of trivial tasks cannot dominate;
+- delivered results that needed an override, and anything `Tampered`, never count as positive.
+Items that keep failing to help decay; items unused for a policy-set period retire.
 
 **Scope.** Per repository by default. Sharing knowledge across a team is a policy-pack setting
 (M3), because shared knowledge is shared influence over agents.
@@ -708,6 +727,16 @@ revision, delivered after revision, rejected) and weighted by actual cost from u
 router picks by expected cost per verified success, with a small, policy-capped exploration share.
 Priors are per category, so one task type's failures cannot poison another's (lesson from ruflo
 ADR-142). Priors change automatically (P15); the set of eligible options does not.
+
+**Guarding the priors (v0.6.1, review M2).**
+- The reward of an option is computed from the whole Task: the original attempt plus its revisions,
+  with their total cost; a defect found later (a reverted delivery) is charged back to it.
+- Overrides and `Tampered` verdicts are never positive rewards.
+- Priors are keyed by model version and by prompt and verifier version, so an upgrade starts from a
+  fresh, conservative prior instead of inheriting the old one.
+- Updates need a minimum sample and are capped per period; near-duplicate Tasks count once.
+- A recorded benchmark set is replayed in shadow on a schedule; if cost per verified success gets
+  worse, priors roll back to the last good snapshot and an admin is notified.
 
 **Escalation rules.**
 - A failed attempt is retried on the next option in the grade before the grade goes up; the effort
