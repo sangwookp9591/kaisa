@@ -194,6 +194,21 @@ impl OwnedProcess {
         }
     }
 
+    /// The process's standard input, if it was piped and not taken yet.
+    pub(crate) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        #[cfg(not(windows))]
+        {
+            self.child.stdin.take()
+        }
+        #[cfg(windows)]
+        {
+            match &mut self.child {
+                crate::windows_child::WindowsChild::Std(child) => child.stdin.take(),
+                crate::windows_child::WindowsChild::Created(_) => None,
+            }
+        }
+    }
+
     /// True once the process has exited, without waiting. The exit status stays available
     /// to [`wait`](Self::wait).
     pub(crate) fn has_exited(&mut self) -> io::Result<bool> {

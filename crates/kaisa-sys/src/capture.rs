@@ -37,8 +37,8 @@ pub struct CapturedRun {
     pub truncated: bool,
 }
 
-/// Runs `spec` under `confinement`, waiting at most `deadline` and keeping at most `cap` bytes of
-/// output. Output beyond the cap is read and dropped, so a chatty process cannot stall on a full
+/// Runs `spec` under `confinement` with `input` on its standard input (then closed), waiting at
+/// most `deadline` and keeping at most `cap` bytes of output. Output beyond the cap is read and dropped, so a chatty process cannot stall on a full
 /// pipe. A run past its deadline is ended with its whole process tree.
 ///
 /// # Errors
@@ -47,17 +47,29 @@ pub struct CapturedRun {
 pub fn run_captured(
     spec: &ProcessSpec,
     confinement: &Confinement<'_>,
+    input: &[u8],
     deadline: Duration,
     cap: usize,
 ) -> io::Result<CapturedRun> {
     let (reader, writer) = io::pipe()?;
     let mut command: Command = confined_command(spec, confinement);
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::from(writer.try_clone()?))
         .stderr(Stdio::from(writer));
     let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
     let collector = std::thread::spawn(move || collect(reader, cap));
+    if let Some(mut stdin) = process.take_stdin() {
+        let input: Vec<u8> = input.to_vec();
+        // Written on a thread so a process that does not read cannot block the deadline.
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, &input);
+        });
+    }
     let exit: Option<ProcessExit> = process.wait_timeout(deadline)?;
     // Ends the tree on timeout, and any leftovers that would keep the pipe open otherwise.
     process.kill_tree()?;
@@ -133,12 +145,17 @@ mod tests {
     const SMALL_CAP: usize = 16;
     /// What the command prints.
     const GREETING: &str = "hello-from-exec";
+    /// A run with nothing on standard input.
+    const NO_INPUT: &[u8] = b"";
+    /// A first message, as an agent receives its context pack.
+    const FIRST_MESSAGE: &str = "pack-for-attempt-41a";
 
     #[test]
     fn an_exec_reports_its_exit_and_output() {
         let run: CapturedRun = run_captured(
             &shell(&format!("echo {GREETING}")),
             &Confinement::Unconfined,
+            NO_INPUT,
             DEADLINE,
             usize::MAX,
         )
@@ -156,6 +173,7 @@ mod tests {
         let run: CapturedRun = run_captured(
             &a_long_running_process(),
             &Confinement::Unconfined,
+            NO_INPUT,
             A_MOMENT,
             usize::MAX,
         )
@@ -172,6 +190,7 @@ mod tests {
         let run: CapturedRun = run_captured(
             &shell(&format!("echo {GREETING}{GREETING}{GREETING}")),
             &Confinement::Unconfined,
+            NO_INPUT,
             DEADLINE,
             SMALL_CAP,
         )
@@ -181,6 +200,30 @@ mod tests {
             (run.output.len(), run.truncated),
             (SMALL_CAP, true),
             "a huge log must not flood the agent's context, and the cut is visible"
+        );
+    }
+
+    #[test]
+    fn an_exec_reads_the_input_it_was_given() {
+        let echo_stdin = if cfg!(windows) {
+            shell("more")
+        } else {
+            shell("cat")
+        };
+
+        let run: CapturedRun = run_captured(
+            &echo_stdin,
+            &Confinement::Unconfined,
+            FIRST_MESSAGE.as_bytes(),
+            DEADLINE,
+            usize::MAX,
+        )
+        .expect("the shell runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&run.output).trim(),
+            FIRST_MESSAGE,
+            "an agent receives its context pack on standard input"
         );
     }
 }

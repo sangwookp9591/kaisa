@@ -96,7 +96,7 @@ impl FileBroker {
             ExecSandbox::Landlock(ruleset) => Confinement::Landlock(ruleset),
             ExecSandbox::Unconfined => Confinement::Unconfined,
         };
-        match run_captured(&spec, &confinement, EXEC_DEADLINE, EXEC_OUTPUT_CAP) {
+        match run_captured(&spec, &confinement, &[], EXEC_DEADLINE, EXEC_OUTPUT_CAP) {
             Ok(run) => ToolOutcome::Done(describe(&run)),
             Err(error) => ToolOutcome::Refused(format!("{program} could not be run: {error}")),
         }
