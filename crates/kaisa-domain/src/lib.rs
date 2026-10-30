@@ -5,6 +5,7 @@
 mod attempt;
 mod attempt_codes;
 mod authority;
+mod catalog;
 mod containment;
 mod effect;
 mod event;
@@ -24,6 +25,7 @@ pub use attempt::{
     Verification,
 };
 pub use authority::{Authority, Operation};
+pub use catalog::{AgentEntry, AgentKind, Catalog, CatalogError, CatalogModel};
 pub use containment::{Admission, ContainmentCapability, ReducedModeDecision, admit};
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
