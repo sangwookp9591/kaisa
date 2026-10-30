@@ -29,8 +29,9 @@ struct Workbench {
 }
 
 impl Workbench {
-    fn new() -> Self {
-        let base: PathBuf = std::env::temp_dir().join(format!("kaisa-goal-{}", std::process::id()));
+    fn new(name: &str) -> Self {
+        let base: PathBuf =
+            std::env::temp_dir().join(format!("kaisa-goal-{name}-{}", std::process::id()));
         let repository: PathBuf = base.join("repo");
         std::fs::create_dir_all(repository.join("src")).expect("writable temp dir");
         std::fs::write(repository.join("src/lib.rs"), "pub fn login() {}\n").expect("written");
@@ -74,7 +75,7 @@ fn the_fake_agent() -> PathBuf {
 
 #[test]
 fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
-    let bench = Workbench::new();
+    let bench = Workbench::new("preserved");
     let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
     let launch = |mcp_config: &Path| ProcessSpec {
         program: the_fake_agent(),
@@ -94,6 +95,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         write_set: &write_set,
         launch: &launch,
         kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
     })
     .expect("the goal runs");
     let preserved_notes: String = git(
@@ -121,5 +123,52 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
             .join(outcome.attempt.as_str())
             .exists(),
         "the worktree is reclaimed once the work is on its branch"
+    );
+}
+
+/// Where the probe tries to write around the broker, relative to the agent's worktree.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const DIRECT_WRITE: &str = "src/direct.md";
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
+    let bench = Workbench::new("confined");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: the_fake_agent(),
+        args: vec![
+            "--mcp-config".to_owned(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".to_owned(),
+            NOTES.to_owned(),
+            "--try-direct-write".to_owned(),
+            DIRECT_WRITE.to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+    })
+    .expect("the goal runs");
+    let preserved: String = git(
+        &bench.repository(),
+        &["ls-tree", "-r", "--name-only", &outcome.branch],
+    );
+
+    assert!(
+        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        "the probe's own write was refused, so the agent went on through the broker: {outcome:?}"
+    );
+    assert!(
+        preserved.contains(NOTES) && !preserved.contains(DIRECT_WRITE),
+        "only the brokered change reached the preserved branch, got {preserved:?}"
     );
 }

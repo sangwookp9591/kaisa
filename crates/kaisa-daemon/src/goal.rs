@@ -57,6 +57,10 @@ pub struct GoalRequest<'request> {
     pub launch: AgentLauncher<'request>,
     /// The `kaisa` executable the agent's MCP config runs as its bridge.
     pub kaisa_executable: &'request Path,
+    /// Whether the agent's own process runs under the OS sandbox. An agent that needs the
+    /// network runs unconfined until its egress goes through the broker (T16.5e3c); that run
+    /// is reported as reduced.
+    pub confine_agent: bool,
 }
 
 /// What came of it.
@@ -75,6 +79,8 @@ pub struct GoalOutcome {
     pub kept_back: Vec<String>,
     /// The digest of the context pack the agent started from.
     pub context_pack: String,
+    /// False if the agent's process ran without OS confinement (a reduced run).
+    pub confined: bool,
 }
 
 impl GoalOutcome {
@@ -96,8 +102,13 @@ impl GoalOutcome {
                 self.kept_back.join(", ")
             ),
         };
+        let reduced: &str = if self.confined {
+            ""
+        } else {
+            "; reduced: the agent process ran without OS confinement"
+        };
         format!(
-            "{} {ending}; {work}; context pack {}",
+            "{} {ending}; {work}; context pack {}{reduced}",
             self.attempt,
             short(&self.context_pack)
         )
@@ -259,6 +270,8 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         let socket: PathBuf = endpoint.socket().to_owned();
         (std::thread::spawn(move || endpoint.serve_one()), socket)
     };
+    let scratch: PathBuf = attempt_directory.join("scratch");
+    std::fs::create_dir_all(&scratch).map_err(at("preparing the agent's scratch"))?;
     let kaisa: &Path = request.kaisa_executable;
     let mcp_config: PathBuf = attempt_directory.join("mcp.json");
     std::fs::write(
@@ -279,9 +292,17 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
     agent.working_directory = worktree.path().to_owned();
     let input: String = format!("{}\n", first_message(&pack));
+    #[cfg(unix)]
+    let sandbox = if request.confine_agent {
+        agent_sandbox(&scratch, &broker.1).map_err(at("building the agent's sandbox"))?
+    } else {
+        AgentSandbox::Unconfined
+    };
+    #[cfg(not(unix))]
+    let sandbox = AgentSandbox::Unconfined;
     let finished: CapturedRun = run_captured(
         &agent,
-        &Confinement::Unconfined,
+        &sandbox.confinement(),
         input.as_bytes(),
         AGENT_DEADLINE,
         TRANSCRIPT_CAP,
@@ -331,7 +352,62 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         commit,
         kept_back,
         context_pack: digest.as_str().to_owned(),
+        confined: !matches!(sandbox, AgentSandbox::Unconfined),
     })
+}
+
+/// The OS sandbox the agent's own process runs in.
+enum AgentSandbox {
+    Unconfined,
+    #[cfg(target_os = "macos")]
+    Seatbelt(kaisa_sys::SeatbeltPolicy),
+    #[cfg(target_os = "linux")]
+    Landlock(kaisa_sys::LandlockRuleset),
+}
+
+impl AgentSandbox {
+    fn confinement(&self) -> Confinement<'_> {
+        match self {
+            Self::Unconfined => Confinement::Unconfined,
+            #[cfg(target_os = "macos")]
+            Self::Seatbelt(policy) => Confinement::Seatbelt(policy),
+            #[cfg(target_os = "linux")]
+            Self::Landlock(ruleset) => Confinement::Landlock(ruleset),
+        }
+    }
+}
+
+/// The agent writes nothing but its scratch, reaches nothing but its tool broker's socket, and
+/// has no network: every change it makes goes through the broker.
+#[cfg(unix)]
+fn agent_sandbox(scratch: &Path, broker_socket: &Path) -> std::io::Result<AgentSandbox> {
+    let scratch: PathBuf = scratch.canonicalize()?;
+    #[cfg(target_os = "macos")]
+    {
+        // Seatbelt matches canonical paths; the socket itself may not resolve, its directory does.
+        let socket: PathBuf = match (broker_socket.parent(), broker_socket.file_name()) {
+            (Some(directory), Some(name)) => directory.canonicalize()?.join(name),
+            _ => broker_socket.to_owned(),
+        };
+        Ok(AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+            writable: vec![scratch],
+            broker_socket: Some(socket),
+            ..kaisa_sys::SeatbeltPolicy::default()
+        }))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = broker_socket;
+        Ok(match kaisa_sys::write_ruleset(&[scratch], None)? {
+            Some(ruleset) => AgentSandbox::Landlock(ruleset),
+            None => AgentSandbox::Unconfined,
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (scratch, broker_socket);
+        Ok(AgentSandbox::Unconfined)
+    }
 }
 
 /// Ends the broker thread: if the agent never connected, a throwaway connection releases it.

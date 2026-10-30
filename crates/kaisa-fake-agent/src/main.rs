@@ -2,10 +2,12 @@
 //!
 //! It does what Claude Code does in brokered mode and nothing else: reads its MCP config, starts
 //! the bridge it names, reads the first message (the context pack) from standard input, and
-//! writes one file through the bridge's `fs_write`. It contains no code that touches files
-//! directly, so every change it makes went through Kaisa's broker.
+//! writes one file through the bridge's `fs_write`. Its only direct file access is the opt-in
+//! `--try-direct-write` probe, which exists to prove the agent's own process is confined: it
+//! tries to write a file itself, and the agent fails if that succeeds.
 //!
-//! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path> [other flags]`
+//! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
+//! [--try-direct-write <path relative to its working directory>] [other flags]`
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, ExitCode, Stdio};
@@ -26,6 +28,13 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
     let target: String = flag(&args, "--fake-write").ok_or("missing --fake-write")?;
+    if let Some(probe) = flag(&args, "--try-direct-write")
+        && std::fs::write(&probe, "written around the broker\n").is_ok()
+    {
+        return Err(format!(
+            "wrote {probe} directly: the agent process is not confined"
+        ));
+    }
     let config: Value = serde_json::from_str(
         &std::fs::read_to_string(&config_path).map_err(|error| error.to_string())?,
     )
