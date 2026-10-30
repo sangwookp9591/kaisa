@@ -264,14 +264,20 @@ The rules that connect the axes:
 | developer | own worktree | write in worktree, exec via broker | read, write, edit, exec, search | T1–T2 |
 | tester | own worktree | write in worktree, exec via broker | read, write, exec | T1 |
 | reviewer | clean snapshot checkout | read-only, no egress | read, diff, report | T1–T2, different model from the implementer |
-| security | clean snapshot checkout | read-only, no egress | read, diff, report | T2, `never_downgrade` |
+| security | clean snapshot checkout | read-only, no egress | read, diff, report | T3 floor (`never_downgrade`) |
 | documentation | own worktree, write set limited to docs paths | write in worktree, no exec | read, write, edit, search | T1 |
 | coordinator | none | no filesystem access; no exec | coordinator MCP tools only | T2 |
 
+This table is the **single source** of each role's default grade and floor (v0.6.1, review M11). The
+router (§5.10), templates and flows read it; a template or policy that sets a role below its floor
+fails validation. Final user-facing output (the Mission summary and delivered answers) has a T3 floor
+as well.
+
 **Lightweight attempts.** Read-only roles (researcher, architect, reviewer, security) need no
-worktree of their own: they share one read-only snapshot checkout per revision and one keeper per
-host slot. A heavy attempt (developer, tester, documentation) gets a worktree, a keeper and a
-sandbox. This is what makes large teams affordable (§5.13); the cost of each kind is a measured
+worktree of their own: they share one read-only snapshot checkout per revision, and their keeper
+has no worktree, write scratch or egress beyond review needs. Every attempt still has its own
+keeper (ADR-0013), because ownership and exit records are per attempt. A heavy attempt (developer,
+tester, documentation) gets a worktree, a keeper and a full sandbox. This is what makes large teams affordable (§5.13); the cost of each kind is a measured
 budget (§15).
 
 **Write-set ownership (scheduler invariant).** Every writing Task declares its write set as path
@@ -733,6 +739,12 @@ bystanders and blames the wrong item. Instead:
 - delivered results that needed an override, and anything `Tampered`, never count as positive.
 Items that keep failing to help decay; items unused for a policy-set period retire.
 
+**Forgetting (v0.6.1, review M12).** `kaisa memory` forget writes a tombstone event. Replays never
+resurrect a tombstoned item; its derived data — FTS rows, vectors, cached context packs not yet used —
+is purged, and packs already recorded keep only the item's id and a "forgotten" marker. The vector index
+and FTS tables are projections with a sequence watermark: after a crash, disk full or index corruption
+they are rebuilt from the event log up to the watermark, so they can never disagree with it.
+
 **Scope.** Per repository by default. Sharing knowledge across a team is a policy-pack setting
 (M3), because shared knowledge is shared influence over agents.
 
@@ -967,7 +979,11 @@ Unanswered questions go to the Needs-you lane (§5.11) and notifications. Other 
 - `policy_allowed`, checked against the policy pack when the Decision is made.
 
 The policy compiler includes active Decisions in each snapshot, so an expired Decision drops out
-at the next snapshot. Reduced-protection approval is a `machine`-scoped Decision whose card lists:
+at the next snapshot. Because a running attempt may outlive a snapshot, expiry is also re-checked
+at every dispatch and every effect (v0.6.1, review M12): when a reduced-protection Decision expires,
+the attempts that relied on it are frozen and their generation revoked until a human renews the
+Decision or the run proceeds without it. Expiry uses the daemon's monotonic clock plus wall time; a
+clock jump backwards never extends a Decision. Reduced-protection approval is a `machine`-scoped Decision whose card lists:
 - the missing capabilities;
 - what the agents can still reach;
 - the expiry.
@@ -985,7 +1001,8 @@ When the user confirms, the client sends back the preview's digest. If the state
 daemon rejects the action and re-previews. This rule is "you approve exactly what you saw".
 
 **Approval rules (F20, F33).** The policy maps paths and repositories to an approval rule:
-- `self`: the requester may approve;
+- `self`: the authenticated human who started the Mission may approve (v0.6.1, review M11). A
+  Requester token (§5.7) can never approve, whatever the rule says;
 - `second-person`: someone other than the requester must approve;
 - `codeowners`: an approver from CODEOWNERS;
 - `n-of-m`: N approvals from a named group.
@@ -1032,6 +1049,20 @@ agents any better than one developer can; that is context collapse moved up a le
   safe changes can make an unsafe pair. This applies to each merge, to each conflict revision and to
   the final Mission result. Child receipts are inputs to the reviewer, never a substitute: evidence is
   valid only for the exact source digest it was produced on.
+
+**Proving it (v0.6.1, review M9).** Scripted agents prove the engine, not the service, so there are
+two benchmarks:
+- *Engine scale*: scripted agents on a fixed reference host (CPU, memory and disk recorded with the
+  result), a fixed role mix (60% light, 40% heavy), 30 minutes sustained; it reports total RSS, file
+  descriptors, worktree disk, ledger append latency, admission latency, p95 queue wait and completed
+  Tasks per hour.
+- *Service scale*: real agent CLIs that passed conformance, with real checks and reviews, at the
+  largest size the providers' rate limits allow, reported as measured — including the amplification
+  that review and security add.
+Write-set reservations are taken **Mission-wide** in one ledger transaction, so two sub-runs can never
+own overlapping paths. Tests cover hierarchy deadlock (a parent waiting on a child that waits on a
+parent's path), starvation of light Tasks behind heavy ones, ledger writer saturation (backpressure to
+admission, never dropped events) and the loss of one keeper among many.
 
 **Beyond one host (M3).** Remote workers add slots on other machines through the team-server
 mode; the hierarchy and the admission rules do not change.
