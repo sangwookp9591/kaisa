@@ -6,14 +6,64 @@
 use std::io;
 use std::path::Path;
 
+use kaisa_domain::RepoPath;
+
 use crate::profile::{Confirmation, DetectedCommand, Language, ProjectProfile, Purpose};
 
-/// Derives the profile of the repository rooted at `root`.
+/// Directory names that hold dependencies, build output or tool state, never project roots.
+const NOT_PROJECT_DIRECTORIES: [&str; 5] = ["node_modules", "target", "vendor", "dist", "build"];
+
+/// Derives the profile of the repository rooted at `root`: the root itself and each first-level
+/// subdirectory (a monorepo's packages), each command keeping the directory it runs in.
+///
+/// A language found at the root is not detected again below it, because the root's commands
+/// already cover its members (`cargo --workspace`, package-manager workspaces).
 ///
 /// # Errors
 ///
-/// Returns the I/O error if a manifest exists but cannot be read.
+/// Returns the I/O error if a directory cannot be listed or a manifest cannot be read.
 pub fn derive_profile(root: &Path) -> io::Result<ProjectProfile> {
+    let mut profile: ProjectProfile = detect_in(root)?;
+    let mut subdirectories: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name: String = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_dir()
+            && !name.starts_with('.')
+            && !NOT_PROJECT_DIRECTORIES.contains(&name.as_str())
+        {
+            subdirectories.push(name);
+        }
+    }
+    subdirectories.sort();
+    let root_languages: Vec<Language> = profile.languages.clone();
+    for name in subdirectories {
+        let Ok(directory) = RepoPath::try_new(&name) else {
+            continue;
+        };
+        let package: ProjectProfile = detect_in(&root.join(&name))?;
+        for language in package.languages {
+            if !root_languages.contains(&language) && !profile.languages.contains(&language) {
+                profile.languages.push(language);
+            }
+        }
+        profile.commands.extend(
+            package
+                .commands
+                .into_iter()
+                .filter(|command| !root_languages.contains(&command.language))
+                .map(|command| DetectedCommand {
+                    directory: Some(directory.clone()),
+                    ..command
+                }),
+        );
+    }
+    profile.languages.sort();
+    Ok(profile)
+}
+
+/// Detects the languages and commands defined directly in `directory`.
+fn detect_in(root: &Path) -> io::Result<ProjectProfile> {
     let mut profile = ProjectProfile::default();
     if root.join("Cargo.toml").is_file() {
         add_rust(&mut profile);
@@ -135,7 +185,7 @@ fn detected(language: Language, purpose: Purpose, argv: &[&str]) -> DetectedComm
 #[cfg(test)]
 mod tests {
     use super::derive_profile;
-    use crate::profile::{Language, ProjectProfile, Purpose};
+    use crate::profile::{DetectedCommand, Language, ProjectProfile, Purpose};
     use crate::test_support::ScratchProject;
 
     /// A pnpm project with test and lint scripts but no build step.
@@ -151,6 +201,11 @@ mod tests {
         "[project]\nname = \"billing\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n";
     /// A Go module file.
     const GO_MOD: &str = "module example.com/payments\n\ngo 1.25\n";
+
+    /// A language contributes at most one command for each purpose.
+    const ONE_COMMAND_PER_PURPOSE: usize = 1;
+    /// A Cargo package manifest for one workspace member.
+    const CARGO_MEMBER_MANIFEST: &str = "[package]\nname = \"cli\"\nversion = \"0.1.0\"\n";
 
     /// The manifest of a small Cargo workspace.
     const CARGO_WORKSPACE_MANIFEST: &str = "[workspace]\nmembers = [\"crates/*\"]\n";
@@ -262,6 +317,59 @@ mod tests {
             (profile.languages.clone(), argv_for(&profile, Purpose::Test)),
             (vec![Language::Go], Some(vec!["go", "test", "./..."])),
             "a Go module tests every package below it"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_rust_and_node_keeps_both_command_sets() {
+        let project: ScratchProject = ScratchProject::with_files(&[
+            ("Cargo.toml", CARGO_WORKSPACE_MANIFEST),
+            ("web/package.json", PNPM_PACKAGE_JSON),
+            ("web/pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+
+        let profile: ProjectProfile =
+            derive_profile(project.root()).expect("the manifests are readable");
+        let web_tests: Option<&str> = profile
+            .commands
+            .iter()
+            .find(|command| command.language == Language::Node && command.purpose == Purpose::Test)
+            .and_then(|command| command.directory.as_ref())
+            .map(kaisa_domain::RepoPath::as_str);
+
+        assert_eq!(
+            profile.languages,
+            vec![Language::Rust, Language::Node],
+            "both halves of the repository are part of its profile"
+        );
+        assert_eq!(
+            web_tests,
+            Some("web"),
+            "the web tests must run inside web/, not at the repository root"
+        );
+    }
+
+    #[test]
+    fn a_rust_member_below_a_cargo_workspace_root_is_not_detected_twice() {
+        let project: ScratchProject = ScratchProject::with_files(&[
+            ("Cargo.toml", CARGO_WORKSPACE_MANIFEST),
+            ("cli/Cargo.toml", CARGO_MEMBER_MANIFEST),
+        ]);
+
+        let profile: ProjectProfile =
+            derive_profile(project.root()).expect("the manifests are readable");
+        let rust_test_commands: Vec<&DetectedCommand> = profile
+            .commands
+            .iter()
+            .filter(|command| {
+                command.language == Language::Rust && command.purpose == Purpose::Test
+            })
+            .collect();
+
+        assert_eq!(
+            rust_test_commands.len(),
+            ONE_COMMAND_PER_PURPOSE,
+            "the workspace-wide test command already covers the member"
         );
     }
 }
