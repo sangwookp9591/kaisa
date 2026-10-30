@@ -14,6 +14,10 @@
 > Every security property is a **requirement to be proven by a negative test on each OS**
 > before it is advertised.
 
+**Changes in v0.6.1 — independent review of v0.6.** A Codex review found 3 blockers and 12 major
+issues ([`reviews/2026-10-30-architecture-v0.6-codex.md`](reviews/2026-10-30-architecture-v0.6-codex.md));
+all are addressed, mapped in Appendix C.
+
 **Changes in v0.6 — redesign of the team-intelligence layer.** An audit against eight required
 capabilities found four of them only bolted on (project memory, self-learning retrieval, context
 scoping, routing judgement) and two missing (web console, large-scale teams). They are now part of
@@ -1578,6 +1582,27 @@ defences (§5.8), compaction snapshot (§5.6, §5.3), cost ladder and gateway bu
 refusal (§5.7), context-footprint budget (§5.10, §15), deterministic tier 0 (§5.10), no
 self-promotion (§5.9), `pre-bash` tokenizer (§5.7), auto-memory ingestion (§5.9), witness/catalog digests
 (§16).
+
+## Appendix C. v0.6 review findings → resolution (v0.6.1)
+
+| Finding | Resolution |
+|---|---|
+| B1 `exec` bypasses the write set | §5.7 write-set confinement by the OS for every process; scratch area; link rules; diff check as a second line; §16 corpus per route |
+| B2 MCP relay as an effect bypass | §5.6 sandboxed, pinned servers; effect classes; `external` calls through the outbox, previews and Decisions; untrusted output |
+| B3 integration skips review and security | §5.8 every integration, conflict revision and final Mission result is a candidate with its own evidence; §5.13 |
+| M1 quoted knowledge is not a defence | §5.9 provenance vs truth: machine-evidence lessons, quarantine and taint, no commands or permissions in items, adversarial corpus |
+| M2 gameable learning | §5.9 ablation-based usefulness; §5.10 whole-Task rewards, version-keyed priors, minimum samples, caps, shadow benchmark and rollback |
+| M3 optional hard budget | §5.10 atomic chain reservation, per-request ceilings, `hard_cap` capability, shown overrun bound; §17 wording |
+| M4 loopback reachable through proxies | §5.7 broker refuses host-internal destinations after DNS and redirects; §5.11 token, CSRF, lifetime, rendering, residual risk |
+| M5 untrusted local endpoints | §5.10 pinned identity and model, data classification, limits and isolation; signed embedding manifest |
+| M6 context overflow and freshness | §5.9 required sections never cut (split instead), cumulative budgets, unknown impact widens checks, version-keyed invalidation |
+| M7 screens contradict the contract | §5.8 one eligibility state machine; `unverified` and `overridden` distinct; verified answers; user-flows F03, F06, F09 |
+| M8 incomplete verification execution | §5.8 ephemeral build area, test-change review, failure taxonomy, reviewer fallback, daemon-validated JSON verdicts |
+| M9 scripted 100 ≠ real 100 | §5.13 engine-scale and service-scale benchmarks, Mission-wide write-set reservation, deadlock/starvation/backpressure tests; §5.2 one keeper per attempt |
+| M10 ease of use vs milestones | §17 M0 promises a preserved result; personal `kaisa agent add` in M1; §19.1 brokered spike before the adapter |
+| M11 inconsistent grades and authority | §5.2 single role-grade table with floors; security T3; `self` means the initiating human |
+| M12 expiry, forgetting, restart | §5.12 expiry re-checked per dispatch and effect, freeze on expiry; §5.9 tombstones and watermark-rebuilt projections |
+| N1 drift | Linear in M3 everywhere; F26 exit 6; default output says "light model", not T1; PRD vector wording |
 
 ## Licensing note
 
