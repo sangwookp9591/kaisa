@@ -208,14 +208,20 @@ impl AttemptState {
         })
     }
 
-    /// Contact was lost while starting, so it is unknown whether the process runs.
+    /// Kaisa lost track of the process — contact was lost while starting, or the keeper of a
+    /// running attempt is gone without an exit record — so whether it runs is unknown until
+    /// proven (architecture §5.1, "Keeper loss").
     ///
     /// # Errors
     ///
-    /// Returns [`IllegalTransition`] unless the attempt is [`Execution::Starting`].
-    pub fn lose_track_while_starting(&mut self) -> Result<(), IllegalTransition> {
-        self.execution_step("lose_track_while_starting", |execution| {
-            matches!(execution, Execution::Starting).then_some(Execution::Unknown)
+    /// Returns [`IllegalTransition`] unless the attempt is starting, running or stalled.
+    pub fn lose_track(&mut self) -> Result<(), IllegalTransition> {
+        self.execution_step("lose_track", |execution| {
+            matches!(
+                execution,
+                Execution::Starting | Execution::Running | Execution::Stalled
+            )
+            .then_some(Execution::Unknown)
         })
     }
 
@@ -371,7 +377,7 @@ mod tests {
         let mut attempt = AttemptState::admitted();
         attempt.start().expect("an admitted attempt can start");
         attempt
-            .lose_track_while_starting()
+            .lose_track()
             .expect("contact can be lost while starting");
         attempt
     }
@@ -417,6 +423,21 @@ mod tests {
             attempt.execution(),
             Execution::Unknown,
             "the unknown state is kept"
+        );
+    }
+
+    #[test]
+    fn a_running_attempt_whose_keeper_is_lost_becomes_unknown() {
+        let mut attempt: AttemptState = a_running_attempt();
+
+        attempt
+            .lose_track()
+            .expect("a running attempt can lose its keeper");
+
+        assert_eq!(
+            attempt.execution(),
+            Execution::Unknown,
+            "a lost keeper is never read as an exit or a failure, only as not knowing"
         );
     }
 

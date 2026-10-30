@@ -74,7 +74,7 @@ fn an_attempt_the_daemon_lost_track_of() -> AttemptState {
     let mut attempt = AttemptState::admitted();
     attempt.start().expect("an admitted attempt can start");
     attempt
-        .lose_track_while_starting()
+        .lose_track()
         .expect("contact can be lost while starting");
     attempt
 }
