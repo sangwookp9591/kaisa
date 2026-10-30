@@ -637,8 +637,45 @@ therefore tuned by outcomes, not by whether a keyword matched again.
 
 ### 5.10 Router, budget, quota and admission (review M7)
 
-- **Tier 0, deterministic.** Taken from ruflo ADR-143. Tasks that a script or codemod can handle never call a model, for example formatting, renames or known transforms.
-- **Routing policy.** Policy is data. A task's grade and its required capabilities map to an agent, a model, an effort level and a candidate count N.
+The router decides which agent, model and effort run each attempt. It sits on the spawn path (P17):
+the keeper starts exactly what the router chose, so a routing decision is never a recommendation.
+
+**Grades**
+
+| Grade | Typical work | Default target (catalog data, per company) |
+|---|---|---|
+| T0 | formatting, renames, known codemods, lockfile updates | no model: a script or codemod (ruflo ADR-143 idea) |
+| T1 | small, checkable edits; summaries; classification; first-pass review | a light model: Haiku-class, or a local model server such as Ollama |
+| T2 | ordinary feature and bug work; reviews; documentation | a standard model: Sonnet-class or the Codex default |
+| T3 | architecture, hard debugging, security review, final user-facing output | a heavy model: Opus-class |
+
+**The grader is deterministic.** Kaisa sets a Task's grade from features it can measure — role,
+task kind from the template, write-set size and spread, files in the impact set, whether security
+paths are touched, earlier failures of the same Task — with the coordinator's suggestion as one
+input. The grade and its reasons are recorded, so routing can be explained and replayed.
+
+**Learned choice inside the grade.** For each `(role, task kind, grade)` Kaisa keeps a Beta prior per
+eligible `(agent, model, effort)` option, updated from **verified** outcomes only (delivered without
+revision, delivered after revision, rejected) and weighted by actual cost from usage events. The
+router picks by expected cost per verified success, with a small, policy-capped exploration share.
+Priors are per category, so one task type's failures cannot poison another's (lesson from ruflo
+ADR-142). Priors change automatically (P15); the set of eligible options does not.
+
+**Escalation rules.**
+- A failed attempt is retried on the next option in the grade before the grade goes up; the effort
+  of the same model is raised at most one step, because a stronger model at medium effort usually
+  beats a weaker one at maximum effort.
+- Steps marked `never_downgrade` (security review, release gate, permission boundary, final
+  user-facing output) are never routed below their declared grade, whatever the budget says.
+- A reviewer is always a different model from the implementer (§5.8).
+
+**Local and OpenAI-compatible models.** An agent catalog row may point at an OpenAI-compatible
+endpoint (for example a local Ollama server). Such rows are tool-less: they serve T1 work that needs
+no file access — classification, summaries, first-pass review of a diff Kaisa supplies. Their usage
+is recorded in tokens even when it costs nothing.
+
+- **Routing policy.** Policy is data. A task's grade and its required capabilities map to the
+  eligible agents, models, efforts and a candidate count N; the learned choice picks among them.
 - **Fallback chains** exist for the coordinator and for workers, and each is filtered by capability.
 
 ```toml
@@ -667,6 +704,7 @@ failover = "preserve"     # §5.5 protocol
 **Admission control and enforcement**
 
 - **Cost reservation.** Before admitting an attempt, the Router reserves an estimated cost against the run and team budget. Actual usage is reconciled afterwards.
+- **Per-request usage.** Adapters report usage per model request from the agent's structured stream (or from the gateway), not per turn, so cost is attributed to the attempt, role and tool that caused it. Where an agent exposes only turn totals, the figure is labelled as estimated.
 - **Separate caps.** Unpriced usage and subscription usage are capped separately.
 - **Optional gateway enforcement.** This is ruflo ADR-508. Kaisa writes a budget file and can configure an LLM gateway, such as LiteLLM, with **per-attempt virtual keys**. The gateway enforces hard limits. Kaisa keeps attribution per attempt, role and tool.
 - **Budget ladder.** Notifications fire at 50 / 75 / 90 / 100%. At 100% the run pauses, and steps marked `never_downgrade` stop and ask.
