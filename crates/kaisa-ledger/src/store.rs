@@ -537,4 +537,44 @@ mod tests {
             "nothing has been recorded after the last event"
         );
     }
+
+    #[test]
+    fn events_survive_closing_and_reopening_the_store() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        drop(store);
+
+        let reopened: EventStore = EventStore::open(&scratch.path()).expect("the ledger reopens");
+
+        assert_eq!(
+            reopened.read_from(Sequence::FIRST).expect("read succeeds"),
+            history,
+            "committed events are durable across a restart"
+        );
+    }
+
+    #[test]
+    fn appending_after_reopening_continues_the_same_chain() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let last_before_restart: ChainedEvent =
+            history.last().expect("history is not empty").clone();
+        drop(store);
+        let mut reopened: EventStore =
+            EventStore::open(&scratch.path()).expect("the ledger reopens");
+
+        let after_restart: ChainedEvent =
+            reopened.append(run_41_started()).expect("append succeeds");
+
+        assert_eq!(
+            after_restart.recorded.sequence,
+            last_before_restart.recorded.sequence.next(),
+            "a restart must not reset or skip sequences"
+        );
+        assert_eq!(
+            after_restart.hash,
+            last_before_restart.hash.link(&after_restart.recorded),
+            "the chain continues from the last hash written before the restart"
+        );
+    }
 }
