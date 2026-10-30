@@ -143,7 +143,13 @@ pub fn serve_attempt(
     input: impl BufRead,
     output: &mut dyn Write,
 ) -> io::Result<()> {
-    let config: BridgeConfig = BridgeConfig::load(attempt_directory)?;
+    attempt_server(&BridgeConfig::load(attempt_directory)?)?
+        .serve(input, output)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
+}
+
+/// The MCP server holding the attempt's tools and its broker.
+pub(crate) fn attempt_server(config: &BridgeConfig) -> io::Result<McpServer<FileBroker>> {
     let mut broker: FileBroker = FileBroker::new(&config.worktree, config.write_set.clone())?;
     if tools_for(config.role)
         .iter()
@@ -151,9 +157,7 @@ pub fn serve_attempt(
     {
         broker = broker.with_exec(config.exec_sandbox()?);
     }
-    McpServer::new(tools_for(config.role), broker)
-        .serve(input, output)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
+    Ok(McpServer::new(tools_for(config.role), broker))
 }
 
 #[cfg(test)]
