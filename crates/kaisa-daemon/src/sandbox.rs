@@ -2,6 +2,7 @@
 //! its scratch and the paths its CLI needs, reaches only its tool broker's socket, and reaches
 //! the network only through its attempt's egress broker.
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 use kaisa_sys::Confinement;
