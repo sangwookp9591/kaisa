@@ -20,6 +20,20 @@ const SCHEMA: &str = "
     );
 ";
 
+/// What is wrong with a stored row that cannot be decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CorruptReason {
+    /// The stored sequence is zero or negative.
+    NonPositiveSequence,
+    /// The stored kind code does not name any [`EventKind`].
+    UnknownEventKind,
+    /// The stored payload version does not fit the payload version type.
+    PayloadVersionOutOfRange,
+    /// The stored hash does not have the length of a chain hash.
+    WrongHashLength,
+}
+
 /// Why the event store could not do what was asked.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -31,7 +45,7 @@ pub enum StoreError {
         /// The stored sequence of the bad row.
         stored_sequence: i64,
         /// What was wrong with it.
-        reason: &'static str,
+        reason: CorruptReason,
     },
     /// The stored events do not form an unbroken chain.
     ChainBroken(ChainBreak),
@@ -45,7 +59,7 @@ impl fmt::Display for StoreError {
                 stored_sequence,
                 reason,
             } => {
-                write!(f, "ledger row {stored_sequence} is corrupt: {reason}")
+                write!(f, "ledger row {stored_sequence} is corrupt: {reason:?}")
             }
             Self::ChainBroken(chain_break) => write!(f, "{chain_break}"),
         }
@@ -215,7 +229,7 @@ fn decode_sequence(stored: i64) -> Result<Sequence, StoreError> {
         .and_then(Sequence::from_stored)
         .ok_or(StoreError::Corrupt {
             stored_sequence: stored,
-            reason: "sequence is not positive",
+            reason: CorruptReason::NonPositiveSequence,
         })
 }
 
@@ -230,13 +244,14 @@ struct StoredRow {
 }
 
 fn decode_row(row: StoredRow) -> Result<ChainedEvent, StoreError> {
-    let corrupt = |reason: &'static str| StoreError::Corrupt {
+    let corrupt = |reason: CorruptReason| StoreError::Corrupt {
         stored_sequence: row.sequence,
         reason,
     };
-    let kind: EventKind = EventKind::from_code(&row.kind).ok_or(corrupt("unknown event kind"))?;
-    let payload_version: u16 =
-        u16::try_from(row.payload_version).map_err(|_| corrupt("payload version out of range"))?;
+    let kind: EventKind =
+        EventKind::from_code(&row.kind).ok_or(corrupt(CorruptReason::UnknownEventKind))?;
+    let payload_version: u16 = u16::try_from(row.payload_version)
+        .map_err(|_| corrupt(CorruptReason::PayloadVersionOutOfRange))?;
     let recorded = RecordedEvent {
         sequence: decode_sequence(row.sequence)?,
         event: Event {
@@ -255,7 +270,7 @@ fn decode_row(row: StoredRow) -> Result<ChainedEvent, StoreError> {
 fn decode_hash(stored_sequence: i64, bytes: Vec<u8>) -> Result<ChainHash, StoreError> {
     let bytes: [u8; blake3::OUT_LEN] = bytes.try_into().map_err(|_| StoreError::Corrupt {
         stored_sequence,
-        reason: "hash has the wrong length",
+        reason: CorruptReason::WrongHashLength,
     })?;
     Ok(ChainHash::from_bytes(bytes))
 }
@@ -352,6 +367,34 @@ pub(crate) mod test_support {
             .expect("the attacker's delete succeeds");
     }
 
+    /// Someone with file access stores a kind code that no Kaisa version ever wrote.
+    pub(crate) fn an_attacker_invents_an_event_kind_for(
+        ledger: &std::path::Path,
+        sequence: kaisa_domain::Sequence,
+    ) {
+        let connection = rusqlite::Connection::open(ledger).expect("the ledger file opens");
+        connection
+            .execute(
+                "UPDATE events SET kind = 'invented.kind' WHERE sequence = ?1",
+                [i64::try_from(sequence.value()).expect("test sequences are small")],
+            )
+            .expect("the attacker's edit succeeds");
+    }
+
+    /// Someone with file access cuts the stored chain hash of an event in half.
+    pub(crate) fn an_attacker_truncates_the_hash_of(
+        ledger: &std::path::Path,
+        sequence: kaisa_domain::Sequence,
+    ) {
+        let connection = rusqlite::Connection::open(ledger).expect("the ledger file opens");
+        connection
+            .execute(
+                "UPDATE events SET hash = substr(hash, 1, length(hash) / 2) WHERE sequence = ?1",
+                [i64::try_from(sequence.value()).expect("test sequences are small")],
+            )
+            .expect("the attacker's edit succeeds");
+    }
+
     /// A path where no ledger exists yet.
     pub(crate) fn a_ledger_path_that_does_not_exist_yet() -> ScratchLedger {
         let directory: PathBuf = std::env::temp_dir().join(format!(
@@ -370,10 +413,11 @@ mod tests {
 
     use super::test_support::{
         ScratchLedger, a_ledger_path_that_does_not_exist_yet, an_attacker_deletes,
-        an_attacker_rewrites_the_subject_of, attempt_41a_admitted, attempt_41a_running,
+        an_attacker_invents_an_event_kind_for, an_attacker_rewrites_the_subject_of,
+        an_attacker_truncates_the_hash_of, attempt_41a_admitted, attempt_41a_running,
         run_41_started,
     };
-    use super::{EventStore, StoreError};
+    use super::{CorruptReason, EventStore, StoreError};
     use crate::chain::{BreakReason, ChainBreak, ChainHash, ChainedEvent};
 
     /// Each call to `append` records exactly this many events.
@@ -673,6 +717,70 @@ mod tests {
                     if at == deleted
             ),
             "a deletion made outside Kaisa must be reported where the event is missing"
+        );
+    }
+
+    /// The stored sequence number of `sequence`, as it appears in a corruption report.
+    fn as_stored(sequence: Sequence) -> i64 {
+        i64::try_from(sequence.value()).expect("test sequences are small")
+    }
+
+    #[test]
+    fn a_row_with_an_unknown_event_kind_is_reported_as_corrupt() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let invented: Sequence = admission_of(&history);
+
+        an_attacker_invents_an_event_kind_for(&scratch.path(), invented);
+
+        assert!(
+            matches!(
+                store.read_from(Sequence::FIRST),
+                Err(StoreError::Corrupt { stored_sequence, reason: CorruptReason::UnknownEventKind })
+                    if stored_sequence == as_stored(invented)
+            ),
+            "an event Kaisa cannot interpret must be reported, never guessed"
+        );
+    }
+
+    #[test]
+    fn a_row_with_a_wrong_length_hash_is_reported_as_corrupt() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let truncated: Sequence = admission_of(&history);
+
+        an_attacker_truncates_the_hash_of(&scratch.path(), truncated);
+
+        assert!(
+            matches!(
+                store.read_from(Sequence::FIRST),
+                Err(StoreError::Corrupt { stored_sequence, reason: CorruptReason::WrongHashLength })
+                    if stored_sequence == as_stored(truncated)
+            ),
+            "a hash that cannot be a chain hash must be reported as corruption"
+        );
+    }
+
+    #[test]
+    fn appending_after_the_last_hash_was_truncated_is_refused() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (mut store, history) = a_ledger_with_run_41_history(&scratch);
+        let last: Sequence = history
+            .last()
+            .expect("history is not empty")
+            .recorded
+            .sequence;
+        an_attacker_truncates_the_hash_of(&scratch.path(), last);
+
+        assert!(
+            matches!(
+                store.append(run_41_started()),
+                Err(StoreError::Corrupt {
+                    reason: CorruptReason::WrongHashLength,
+                    ..
+                })
+            ),
+            "new events must never be chained onto a hash that cannot be trusted"
         );
     }
 }
