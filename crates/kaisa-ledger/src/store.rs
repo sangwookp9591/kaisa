@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use kaisa_domain::{Event, RecordedEvent, Sequence};
+use kaisa_domain::{Event, EventKind, RecordedEvent, Sequence};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::chain::{ChainHash, ChainedEvent};
@@ -118,6 +118,30 @@ impl EventStore {
         Ok(ChainedEvent { recorded, hash })
     }
 
+    /// Every event at `from` or later, in sequence order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the query fails, or [`StoreError::Corrupt`] if a row
+    /// cannot be decoded.
+    pub fn read_from(&self, from: Sequence) -> Result<Vec<ChainedEvent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT sequence, kind, subject, payload_version, payload, hash
+             FROM events WHERE sequence >= ?1 ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![stored_sequence(from)], |row| {
+            Ok(StoredRow {
+                sequence: row.get(0)?,
+                kind: row.get(1)?,
+                subject: row.get(2)?,
+                payload_version: row.get(3)?,
+                payload: row.get(4)?,
+                hash: row.get(5)?,
+            })
+        })?;
+        rows.map(|row| decode_row(row?)).collect()
+    }
+
     /// Number of events recorded so far.
     ///
     /// # Errors
@@ -178,6 +202,39 @@ fn decode_sequence(stored: i64) -> Result<Sequence, StoreError> {
             stored_sequence: stored,
             reason: "sequence is not positive",
         })
+}
+
+/// A row exactly as SQLite returns it, before validation.
+struct StoredRow {
+    sequence: i64,
+    kind: String,
+    subject: String,
+    payload_version: i64,
+    payload: String,
+    hash: Vec<u8>,
+}
+
+fn decode_row(row: StoredRow) -> Result<ChainedEvent, StoreError> {
+    let corrupt = |reason: &'static str| StoreError::Corrupt {
+        stored_sequence: row.sequence,
+        reason,
+    };
+    let kind: EventKind = EventKind::from_code(&row.kind).ok_or(corrupt("unknown event kind"))?;
+    let payload_version: u16 =
+        u16::try_from(row.payload_version).map_err(|_| corrupt("payload version out of range"))?;
+    let recorded = RecordedEvent {
+        sequence: decode_sequence(row.sequence)?,
+        event: Event {
+            kind,
+            subject: row.subject,
+            payload_version,
+            payload: row.payload,
+        },
+    };
+    Ok(ChainedEvent {
+        recorded,
+        hash: decode_hash(row.sequence, row.hash)?,
+    })
 }
 
 fn decode_hash(stored_sequence: i64, bytes: Vec<u8>) -> Result<ChainHash, StoreError> {
@@ -269,7 +326,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use kaisa_domain::Sequence;
+    use kaisa_domain::{EventKind, Sequence};
 
     use super::EventStore;
     use super::test_support::{
@@ -283,6 +340,20 @@ mod tests {
 
     fn an_open_empty_ledger(scratch: &ScratchLedger) -> EventStore {
         EventStore::open(&scratch.path()).expect("a new ledger opens")
+    }
+
+    /// A ledger holding run 41's history: started, admitted, running.
+    fn a_ledger_with_run_41_history(scratch: &ScratchLedger) -> (EventStore, Vec<ChainedEvent>) {
+        let mut store: EventStore = an_open_empty_ledger(scratch);
+        let history: Vec<ChainedEvent> = [
+            run_41_started(),
+            attempt_41a_admitted(),
+            attempt_41a_running(),
+        ]
+        .into_iter()
+        .map(|event| store.append(event).expect("append succeeds"))
+        .collect();
+        (store, history)
     }
 
     /// The journal mode that makes committed events crash-safe without blocking readers.
@@ -412,6 +483,58 @@ mod tests {
             store.len().expect("the count is readable"),
             before + EVENTS_PER_APPEND,
             "one append records exactly one event"
+        );
+    }
+
+    #[test]
+    fn reading_from_the_first_sequence_returns_every_event_in_order() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+
+        let read: Vec<ChainedEvent> = store.read_from(Sequence::FIRST).expect("read succeeds");
+
+        assert_eq!(
+            read, history,
+            "reading from the start returns the whole history unchanged"
+        );
+    }
+
+    #[test]
+    fn reading_from_a_later_sequence_skips_earlier_events() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let admission: usize = history
+            .iter()
+            .position(|chained| chained.recorded.event.kind == EventKind::AttemptAdmitted)
+            .expect("run 41's history contains an admission");
+
+        let read: Vec<ChainedEvent> = store
+            .read_from(history[admission].recorded.sequence)
+            .expect("read succeeds");
+
+        assert_eq!(
+            read,
+            history[admission..],
+            "events before the requested sequence are left out"
+        );
+    }
+
+    #[test]
+    fn reading_past_the_last_event_returns_nothing() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let after_last: Sequence = history
+            .last()
+            .expect("the history is not empty")
+            .recorded
+            .sequence
+            .next();
+
+        let read: Vec<ChainedEvent> = store.read_from(after_last).expect("read succeeds");
+
+        assert!(
+            read.is_empty(),
+            "nothing has been recorded after the last event"
         );
     }
 }
