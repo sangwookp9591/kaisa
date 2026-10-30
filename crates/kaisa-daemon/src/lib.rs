@@ -6,6 +6,7 @@
 mod gate;
 mod goal;
 mod ids;
+mod learn;
 mod mission;
 mod recover;
 mod review;
@@ -19,6 +20,7 @@ pub use goal::{
     AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
     whole_repository,
 };
+pub use learn::learn_from_delivery;
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
 pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict};
