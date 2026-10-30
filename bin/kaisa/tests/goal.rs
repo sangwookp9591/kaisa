@@ -235,3 +235,78 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
         "nothing outside the broker received a connection from the agent"
     );
 }
+
+/// True if any process's command line names `attempt_directory` (Unix `ps`).
+#[cfg(unix)]
+fn a_process_still_serves(attempt_directory: &str) -> bool {
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .expect("ps is on every Unix runner");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|line| line.contains(attempt_directory) && !line.contains("ps -A"))
+}
+
+/// How long the bridge of a dead agent may take to notice its closed input.
+#[cfg(unix)]
+const BRIDGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(unix)]
+#[test]
+fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind() {
+    let bench = Workbench::new("crash");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: the_fake_agent(),
+        args: vec![
+            "--mcp-config".to_owned(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".to_owned(),
+            NOTES.to_owned(),
+            "--crash-after-write".to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+    })
+    .expect("a crashing agent is an outcome, not an error");
+    let attempt_directory: String = bench
+        .state()
+        .join("attempts")
+        .join(outcome.attempt.as_str())
+        .to_string_lossy()
+        .into_owned();
+    let deadline = std::time::Instant::now() + BRIDGE_EXIT_GRACE;
+    while a_process_still_serves(&attempt_directory) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let preserved: String = git(
+        &bench.repository(),
+        &["ls-tree", "-r", "--name-only", &outcome.branch],
+    );
+
+    assert!(
+        outcome.exit != Some(ProcessExit::Code(0)),
+        "the crash is recorded as a failed run: {outcome:?}"
+    );
+    assert!(
+        preserved.contains(NOTES),
+        "the change made before the crash is preserved on the attempt's branch"
+    );
+    assert!(
+        !a_process_still_serves(&attempt_directory),
+        "the crashed agent's bridge does not outlive it"
+    );
+}

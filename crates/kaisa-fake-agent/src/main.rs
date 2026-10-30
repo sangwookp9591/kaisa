@@ -8,7 +8,11 @@
 //!
 //! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
 //! [--try-direct-write <path relative to its working directory>]
-//! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [other flags]`
+//! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [--crash-after-write]
+//! [other flags]`
+//!
+//! `--crash-after-write` aborts the agent right after its brokered write, leaving its bridge
+//! running, as a crashing CLI would (chaos suite, T16.6).
 //!
 //! The network probes work the same way: `--try-direct-connect` fails the agent if a direct
 //! connection succeeds, and `--expect-proxy-refuses` fails it unless the proxy in
@@ -45,6 +49,10 @@ fn proxy_status_for(host: &str) -> Result<String, String> {
         .read_line(&mut status)
         .map_err(|error| error.to_string())?;
     Ok(status)
+}
+
+fn flag_present(args: &[String], name: &str) -> bool {
+    args.iter().any(|argument| argument == name)
 }
 
 fn run() -> Result<(), String> {
@@ -124,6 +132,9 @@ fn run() -> Result<(), String> {
         if response["id"] == 2 {
             refused = response.pointer("/result/isError").and_then(Value::as_bool) != Some(false);
         }
+    }
+    if flag_present(&args, "--crash-after-write") {
+        std::process::abort();
     }
     let _ = bridge.wait();
     if refused {
