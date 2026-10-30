@@ -91,6 +91,21 @@ pub trait PseudoTerminal {
 
     /// The size the terminal currently has.
     fn size(&self) -> TerminalSize;
+
+    /// Closes the terminal and returns everything the agent printed that was not read yet.
+    ///
+    /// Call it once the agent has finished or is finishing. It closes the terminal in the
+    /// order that loses nothing: on Windows the remaining output is read while the pseudo
+    /// console closes, because closing it may wait until that output has been read. On macOS
+    /// an agent cannot even finish exiting while its output is unread, so a keeper must keep
+    /// reading for as long as the agent runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if the remaining output cannot be read.
+    fn drain(self) -> io::Result<Vec<u8>>
+    where
+        Self: Sized;
 }
 
 #[cfg(test)]

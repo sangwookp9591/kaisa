@@ -85,6 +85,25 @@ pub(crate) fn set_size(fd: &OwnedFd, size: TerminalSize) -> io::Result<()> {
     }
 }
 
+/// Makes reads of `fd` return `WouldBlock` instead of waiting.
+pub(crate) fn set_nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
+    #[allow(unsafe_code)]
+    // SAFETY: F_GETFL on a descriptor the caller owns touches no caller memory.
+    let flags: libc::c_int = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: F_SETFL with an integer flag set touches no caller memory.
+    let result: libc::c_int =
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// The size the kernel reports for the terminal behind `fd`.
 #[cfg(test)]
 pub(crate) fn size_seen_through(fd: &OwnedFd) -> io::Result<TerminalSize> {

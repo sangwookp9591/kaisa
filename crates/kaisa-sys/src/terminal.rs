@@ -12,6 +12,8 @@ use std::os::unix::process::CommandExt;
 use std::os::windows::io::OwnedHandle;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use crate::conpty::{self, OpenedConsole, PseudoConsole};
@@ -69,7 +71,73 @@ impl PseudoTerminal for Terminal {
     fn size(&self) -> TerminalSize {
         self.size
     }
+
+    #[cfg(unix)]
+    fn drain(self) -> io::Result<Vec<u8>> {
+        let mut remaining: Vec<u8> = Vec::new();
+        let mut buffer = [0_u8; DRAIN_CHUNK];
+        let mut master = File::from(self.master);
+        // macOS keeps a read of the master waiting even after every slave is closed, and its
+        // `poll` does not work on terminals. So reads never block, and the end is "no new
+        // output for a quiet period" unless the OS reports end of file first.
+        openpty::set_nonblocking(&master)?;
+        let mut last_output: Instant = Instant::now();
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    remaining.extend_from_slice(&buffer[..read]);
+                    last_output = Instant::now();
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if last_output.elapsed() >= DRAIN_QUIET_PERIOD {
+                        break;
+                    }
+                    std::thread::sleep(DRAIN_POLL_INTERVAL);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                // Linux reports a terminal nobody holds open anymore as EIO, not end of file.
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(remaining)
+    }
+
+    #[cfg(windows)]
+    fn drain(self) -> io::Result<Vec<u8>> {
+        let Terminal {
+            console,
+            input,
+            output,
+            size: _,
+        } = self;
+        drop(input);
+        // Read on another thread first: closing the console may block until its output pipe
+        // is drained, and the pipe only reaches end of file once the console is closed.
+        let reader = std::thread::spawn(move || {
+            let mut remaining: Vec<u8> = Vec::new();
+            File::from(output)
+                .read_to_end(&mut remaining)
+                .map(|_| remaining)
+        });
+        drop(console);
+        reader
+            .join()
+            .map_err(|_| io::Error::other("the output reader panicked"))?
+    }
 }
+
+/// How many bytes a drain reads at a time.
+#[cfg(unix)]
+const DRAIN_CHUNK: usize = 4096;
+/// How long a drain waits for more output before deciding there is none. A drain runs once
+/// the agent has finished or is finishing, so this only covers output still on its way.
+#[cfg(unix)]
+const DRAIN_QUIET_PERIOD: Duration = Duration::from_millis(500);
+/// How often a drain looks for more output during the quiet period.
+#[cfg(unix)]
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 impl OwnedProcess {
     /// Starts `spec` with a new pseudo-terminal of `size` as its standard input, output and
@@ -171,7 +239,6 @@ fn become_session_leader_of_its_terminal() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    #[cfg(unix)]
     use std::path::PathBuf;
     use std::sync::mpsc::{Receiver, channel};
     use std::thread;
@@ -192,10 +259,8 @@ mod tests {
     use crate::pty::{PseudoTerminal, TerminalSize};
 
     /// Rows after the user enlarges the window; differs from the classic size on purpose.
-    #[cfg(unix)]
     const ENLARGED_ROWS: u16 = 40;
     /// Columns after the user enlarges the window.
-    #[cfg(unix)]
     const ENLARGED_COLUMNS: u16 = 132;
     /// Rows of a classic text terminal.
     const CLASSIC_ROWS: u16 = 24;
@@ -206,6 +271,8 @@ mod tests {
     /// What the agent prints when its standard input is a terminal.
     #[cfg(unix)]
     const SEES_A_TERMINAL: &str = "stdin-is-a-terminal";
+    /// The last thing the agent prints before it exits.
+    const FAREWELL: &str = "goodbye-from-the-agent";
     /// A greeting the agent prints.
     const GREETING: &str = "hello-from-the-agent";
     /// A line a user types into the agent's terminal.
@@ -242,6 +309,25 @@ mod tests {
             agent
         } else {
             shell(&format!("read line; echo \"{REPLY_PREFIX}$line\""))
+        }
+    }
+
+    /// An agent that waits for one typed line, then prints its terminal size as
+    /// "rows columns".
+    fn an_agent_that_reports_its_size_after_a_line() -> ProcessSpec {
+        if cfg!(windows) {
+            ProcessSpec {
+                program: PathBuf::from("powershell"),
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    "$null = Read-Host; '{0} {1}' -f [Console]::WindowHeight, [Console]::WindowWidth"
+                        .to_owned(),
+                ],
+                working_directory: std::env::temp_dir(),
+            }
+        } else {
+            shell("read resized; stty size")
         }
     }
 
@@ -356,20 +442,19 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_agent_sees_the_new_size_after_the_terminal_is_resized() {
         let enlarged: TerminalSize =
             TerminalSize::new(ENLARGED_ROWS, ENLARGED_COLUMNS).expect("an enlarged size is valid");
-        // `stty size` prints "rows columns" as the agent's terminal reports them.
         let size_as_the_agent_reports_it: String = format!("{ENLARGED_ROWS} {ENLARGED_COLUMNS}");
-        let (mut agent, mut terminal) = started_in_a_terminal(&shell("read resized; stty size"));
+        let (mut agent, mut terminal) =
+            started_in_a_terminal(&an_agent_that_reports_its_size_after_a_line());
 
         terminal.resize(enlarged).expect("resizing succeeds");
         terminal
             .writer()
             .expect("the terminal can be written")
-            .write_all(b"\n")
+            .write_all(ENTER.as_bytes())
             .expect("typing succeeds");
         let output: String = output_until(&terminal, &size_as_the_agent_reports_it);
         agent
@@ -381,5 +466,26 @@ mod tests {
             "a TUI agent must redraw for the window the user actually has, got {output:?}"
         );
         assert_eq!(terminal.size(), enlarged, "Kaisa remembers the size it set");
+    }
+
+    #[test]
+    fn the_last_output_of_an_agent_is_not_lost_when_the_terminal_closes() {
+        let (mut agent, terminal) = started_in_a_terminal(&shell(&format!("echo {FAREWELL}")));
+
+        // Drained while the agent exits: on macOS closing a terminal waits until its output
+        // is read, so an agent nobody reads from can never finish exiting.
+        let remaining: Vec<u8> = terminal
+            .drain()
+            .expect("the rest of the output can be read");
+        agent
+            .wait()
+            .expect("the agent exits once its output was read");
+        agent.kill_tree().expect("leftovers are cleaned up");
+        let output: String = String::from_utf8_lossy(&remaining).into_owned();
+
+        assert!(
+            output.contains(FAREWELL),
+            "an agent's final words (often its summary) must reach the transcript, got {output:?}"
+        );
     }
 }
