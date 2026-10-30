@@ -8,5 +8,7 @@ mod profile;
 mod test_support;
 
 pub use confirm::confirm;
-pub use detect::derive_profile;
-pub use profile::{Confirmation, DetectedCommand, Language, ProjectProfile, Purpose};
+pub use detect::{INSTRUCTION_EXCERPT_LIMIT, derive_profile};
+pub use profile::{
+    Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
+};

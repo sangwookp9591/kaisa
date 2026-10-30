@@ -55,6 +55,18 @@ pub struct DetectedCommand {
     pub confirmation: Confirmation,
 }
 
+/// The beginning of a repository instruction file, kept as quoted data for context packs. Its
+/// text is never parsed for commands: what an instruction file says to run is not what Kaisa runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionExcerpt {
+    /// The file, relative to the repository root.
+    pub path: RepoPath,
+    /// The first part of the file, cut on a character boundary.
+    pub text: String,
+    /// True if the file was longer than the excerpt.
+    pub truncated: bool,
+}
+
 /// Everything Kaisa derived about a repository at one base revision.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectProfile {
@@ -62,4 +74,6 @@ pub struct ProjectProfile {
     pub languages: Vec<Language>,
     /// Commands found, per language and purpose.
     pub commands: Vec<DetectedCommand>,
+    /// Excerpts of the repository's instruction files, as untrusted, quoted data.
+    pub instructions: Vec<InstructionExcerpt>,
 }
