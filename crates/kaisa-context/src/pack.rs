@@ -3,7 +3,7 @@
 //! A pack is a list of sections in priority order. Its canonical bytes are deterministic, so the
 //! same inputs always give the same pack and the same address.
 
-use kaisa_domain::{ContentDigest, WriteSet};
+use kaisa_domain::{ContentDigest, RepoPath, WriteSet};
 
 use crate::profile::{Confirmation, Language, ProjectProfile, Purpose};
 
@@ -21,9 +21,10 @@ pub fn estimated_tokens(text: &str) -> usize {
 }
 
 /// The sections that are never cut: without them an agent does not know what to do or where.
-const REQUIRED: [SectionKind; 3] = [
+const REQUIRED: [SectionKind; 4] = [
     SectionKind::Spec,
     SectionKind::Acceptance,
+    SectionKind::Findings,
     SectionKind::WriteSet,
 ];
 
@@ -57,10 +58,14 @@ pub enum SectionKind {
     Spec,
     /// How the result will be judged.
     Acceptance,
+    /// What a revision must fix: review findings and failing checks, quoted (T24a).
+    Findings,
     /// The paths the attempt may change.
     WriteSet,
     /// Languages and confirmed commands.
     Profile,
+    /// Files the change can affect, for context; the first to be cut (T24a).
+    Impact,
     /// Quoted excerpts of the repository's instruction files.
     Instructions,
 }
@@ -72,8 +77,10 @@ impl SectionKind {
         match self {
             Self::Spec => "spec",
             Self::Acceptance => "acceptance",
+            Self::Findings => "findings",
             Self::WriteSet => "write_set",
             Self::Profile => "profile",
+            Self::Impact => "impact",
             Self::Instructions => "instructions",
         }
     }
@@ -99,6 +106,10 @@ pub struct PackInputs<'inputs> {
     pub write_set: &'inputs WriteSet,
     /// The repository's profile.
     pub profile: &'inputs ProjectProfile,
+    /// What a revision must fix, one item per entry; empty for a first attempt.
+    pub findings: &'inputs [String],
+    /// Files the change can affect (T23 impact set), outside the write set included.
+    pub impact: &'inputs [RepoPath],
 }
 
 /// The context an attempt starts from.
@@ -127,6 +138,14 @@ impl ContextPack {
                     .collect(),
             },
             Section {
+                kind: SectionKind::Findings,
+                text: inputs
+                    .findings
+                    .iter()
+                    .map(|finding| format!("{finding}\n"))
+                    .collect(),
+            },
+            Section {
                 kind: SectionKind::WriteSet,
                 text: inputs
                     .write_set
@@ -139,7 +158,23 @@ impl ContextPack {
                 kind: SectionKind::Profile,
                 text: profile_summary(inputs.profile),
             },
+            Section {
+                kind: SectionKind::Impact,
+                text: inputs
+                    .impact
+                    .iter()
+                    .map(|path| format!("{path}\n"))
+                    .collect(),
+            },
         ];
+        // A first attempt has no findings, and an empty optional section says nothing; the
+        // other required sections stay even when empty, so every pack has the same shape.
+        sections.retain(|section| match section.kind {
+            SectionKind::Findings | SectionKind::Profile | SectionKind::Impact => {
+                !section.text.is_empty()
+            }
+            _ => true,
+        });
         sections.extend(inputs.profile.instructions.iter().map(|excerpt| Section {
             kind: SectionKind::Instructions,
             text: format!("{}\n{}", excerpt.path, excerpt.text),
@@ -188,6 +223,15 @@ impl ContextPack {
         let mut message: String = String::new();
         for section in &self.sections {
             match section.kind {
+                SectionKind::Findings => {
+                    message.push_str(&format!("## {}\n", heading(SectionKind::Findings)));
+                    message.push_str(UNTRUSTED_NOTICE);
+                    for line in section.text.lines() {
+                        message.push_str("> ");
+                        message.push_str(line);
+                        message.push('\n');
+                    }
+                }
                 SectionKind::Instructions => {
                     message.push_str(UNTRUSTED_NOTICE);
                     for line in section.text.lines() {
@@ -273,8 +317,10 @@ fn heading(kind: SectionKind) -> &'static str {
     match kind {
         SectionKind::Spec => "Task",
         SectionKind::Acceptance => "Done when",
+        SectionKind::Findings => "Fix before delivery",
         SectionKind::WriteSet => "You may change only",
         SectionKind::Profile => "Project",
+        SectionKind::Impact => "Files this change can affect",
         SectionKind::Instructions => "Repository instructions",
     }
 }
@@ -375,6 +421,8 @@ mod tests {
             acceptance: &the_login_tests_pass(),
             write_set: &the_auth_directory(),
             profile: &a_rust_profile_with_confirmed_tests(),
+            findings: &[],
+            impact: &[],
         })
     }
 
@@ -396,6 +444,8 @@ mod tests {
             acceptance: &the_login_tests_pass(),
             write_set: &the_auth_directory(),
             profile: &a_profile_with_a_long_readme(),
+            findings: &[],
+            impact: &[],
         })
     }
 
@@ -494,6 +544,8 @@ mod tests {
             acceptance: &the_login_tests_pass(),
             write_set: &the_auth_directory(),
             profile: &a_profile_with_a_hostile_readme(),
+            findings: &[],
+            impact: &[],
         });
 
         let message: String = pack.render();
@@ -547,4 +599,48 @@ mod tests {
             "two different tasks must never share a pack"
         );
     }
+
+    /// A tight budget that fits the required sections but not the optional ones.
+    const TIGHT_BUDGET_SLACK: usize = 4;
+
+    #[test]
+    fn a_revision_pack_carries_the_findings_it_must_fix() {
+        let findings: Vec<String> =
+            vec!["src/auth/session.rs:12: the refresh token is never rotated".to_owned()];
+        let impact: Vec<RepoPath> = (0..MANY_IMPACTED_FILES)
+            .map(|index| RepoPath::try_new(&format!("src/api/handler_{index}.rs")).expect("valid"))
+            .collect();
+        let full: ContextPack = ContextPack::assemble(PackInputs {
+            spec: LOGIN_FIX_SPEC,
+            acceptance: &the_login_tests_pass(),
+            write_set: &the_auth_directory(),
+            profile: &ProjectProfile::default(),
+            findings: &findings,
+            impact: &impact,
+        });
+        let required_only: usize = full
+            .sections()
+            .iter()
+            .filter(|section| super::REQUIRED.contains(&section.kind))
+            .map(|section| super::estimated_tokens(&section.text))
+            .sum();
+
+        let fitted: ContextPack = full
+            .fit(required_only + TIGHT_BUDGET_SLACK)
+            .expect("the required sections fit");
+        let message: String = fitted.render();
+
+        assert!(
+            message.contains("> src/auth/session.rs:12: the refresh token is never rotated"),
+            "the finding is in the pack, quoted as data: {message}"
+        );
+        assert!(
+            fitted.cut().contains(&SectionKind::Impact)
+                && !fitted.cut().contains(&SectionKind::Findings),
+            "a tight budget cuts the impact set first and never the findings"
+        );
+    }
+
+    /// Enough impacted files that the impact section cannot fit a tight budget.
+    const MANY_IMPACTED_FILES: usize = 200;
 }

@@ -74,6 +74,8 @@ mod tests {
             acceptance: &["the login tests pass".to_owned()],
             write_set: &WriteSet::new(vec![RepoPath::try_new("src/auth").expect("valid")]),
             profile: &ProjectProfile::default(),
+            findings: &[],
+            impact: &[],
         })
     }
 

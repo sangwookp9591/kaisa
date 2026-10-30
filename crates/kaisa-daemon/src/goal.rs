@@ -260,6 +260,8 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         acceptance: &[],
         write_set: request.write_set,
         profile: &profile,
+        findings: &[],
+        impact: &[],
     })
     .fit(DEVELOPER_PACK_BUDGET)
     .map_err(at("fitting the context pack"))?;
