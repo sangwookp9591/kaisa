@@ -27,6 +27,14 @@ const SCHEMA: &str = "
         receipt           TEXT,
         recorded_sequence INTEGER NOT NULL REFERENCES events (sequence)
     );
+    CREATE TABLE IF NOT EXISTS attempts (
+        attempt_id    TEXT    PRIMARY KEY,
+        task_id       TEXT    NOT NULL,
+        execution     TEXT    NOT NULL,
+        cleanup       TEXT    NOT NULL,
+        context_pack  TEXT,
+        last_sequence INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS context_packs (
         digest TEXT PRIMARY KEY,
         bytes  BLOB NOT NULL

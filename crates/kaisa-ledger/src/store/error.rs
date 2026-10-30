@@ -45,6 +45,11 @@ pub enum StoreError {
     CorruptOutbox,
     /// Bytes offered under a content digest do not hash to it.
     DigestMismatch(ContentDigest),
+    /// An event's payload or a projected value cannot be read as what its kind requires.
+    CorruptPayload {
+        /// The stored sequence of the event or of the projection row's last event.
+        stored_sequence: i64,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -67,6 +72,12 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::CorruptOutbox => write!(f, "an outbox row cannot be decoded"),
+            Self::CorruptPayload { stored_sequence } => {
+                write!(
+                    f,
+                    "the payload of ledger event {stored_sequence} cannot be read"
+                )
+            }
             Self::DigestMismatch(digest) => {
                 write!(
                     f,
@@ -87,7 +98,8 @@ impl std::error::Error for StoreError {
             | Self::UnknownIntent(_)
             | Self::ReceiptConflict(_)
             | Self::CorruptOutbox
-            | Self::DigestMismatch(_) => None,
+            | Self::DigestMismatch(_)
+            | Self::CorruptPayload { .. } => None,
         }
     }
 }

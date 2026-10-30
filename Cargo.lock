@@ -185,6 +185,7 @@ dependencies = [
  "blake3",
  "kaisa-domain",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
