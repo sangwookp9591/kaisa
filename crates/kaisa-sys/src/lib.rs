@@ -11,6 +11,8 @@ mod console_process;
 mod control_pipe;
 #[cfg(windows)]
 mod job;
+#[cfg(target_os = "linux")]
+mod landlock;
 #[cfg(unix)]
 mod openpty;
 #[cfg(unix)]
@@ -29,6 +31,8 @@ mod windows_command_line;
 
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
+#[cfg(target_os = "linux")]
+pub use landlock::{LandlockRuleset, write_ruleset};
 #[cfg(unix)]
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};

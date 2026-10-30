@@ -82,6 +82,32 @@ impl OwnedProcess {
         Self::adopt(command.spawn()?)
     }
 
+    /// Starts `spec` like [`spawn`](Self::spawn), with `ruleset` applied in the child before
+    /// `exec`, so the agent and everything it starts can write only where the ruleset allows.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if the program cannot be started or the ruleset
+    /// cannot be applied (the child then never runs).
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_landlock(
+        spec: &ProcessSpec,
+        ruleset: &crate::landlock::LandlockRuleset,
+    ) -> io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+
+        let mut command: Command = command_for(spec);
+        command.process_group(0);
+        let fd = ruleset.raw_fd();
+        #[allow(unsafe_code)]
+        // SAFETY: the closure runs in the forked child before `exec` and only calls `prctl` and
+        // the `landlock_restrict_self` syscall, which are async-signal-safe.
+        unsafe {
+            command.pre_exec(move || crate::landlock::restrict_self(fd));
+        }
+        Self::spawn_prepared(command)
+    }
+
     #[cfg(not(windows))]
     fn adopt(child: Child) -> io::Result<Self> {
         Ok(Self {
