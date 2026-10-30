@@ -22,6 +22,7 @@ mod peer;
 mod pidfd;
 mod process;
 mod pty;
+mod random;
 mod seatbelt;
 mod state_dir;
 mod terminal;
@@ -39,6 +40,7 @@ pub use landlock::{LandlockRuleset, write_ruleset};
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
+pub use random::fill_random;
 pub use seatbelt::{SeatbeltPolicy, sandboxed_spec, seatbelt_profile};
 #[cfg(unix)]
 pub use state_dir::PRIVATE_MODE;
