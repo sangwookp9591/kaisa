@@ -53,7 +53,13 @@ impl OwnedProcess {
     ///
     /// Returns the operating system's error if the program cannot be started.
     pub fn spawn(spec: &ProcessSpec) -> io::Result<Self> {
-        let mut command: Command = command_for(spec);
+        Self::spawn_owned(command_for(spec))
+    }
+
+    /// Starts `command` as an owned process: leading its own process group on Unix, created
+    /// suspended and put in a Job Object on Windows. Callers may have set its stdio and, on
+    /// Unix, `pre_exec` hooks.
+    pub(crate) fn spawn_owned(mut command: Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
             // The process leads a new process group, so everything it starts can be ended
@@ -97,7 +103,6 @@ impl OwnedProcess {
         use std::os::unix::process::CommandExt;
 
         let mut command: Command = command_for(spec);
-        command.process_group(0);
         let fd = ruleset.raw_fd();
         let udp_filter: Option<(usize, u16)> = ruleset.udp_filter_parts();
         #[allow(unsafe_code)]
@@ -107,7 +112,7 @@ impl OwnedProcess {
         unsafe {
             command.pre_exec(move || crate::landlock::restrict_self(fd, udp_filter));
         }
-        Self::spawn_prepared(command)
+        Self::spawn_owned(command)
     }
 
     #[cfg(not(windows))]

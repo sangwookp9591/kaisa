@@ -3,6 +3,7 @@
 //!
 //! Design: `docs/architecture.md` §5.1, §8 and §13.
 
+mod capture;
 #[cfg(windows)]
 mod conpty;
 #[cfg(windows)]
@@ -29,6 +30,7 @@ mod windows_child;
 #[cfg(any(windows, test))]
 mod windows_command_line;
 
+pub use capture::{CapturedRun, Confinement, run_captured};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
 #[cfg(target_os = "linux")]
