@@ -2,13 +2,20 @@
 
 | | |
 |---|---|
-| Status | Draft v0.2 |
+| Status | Draft v0.3 |
 | Date | 2026-10-30 |
-| Companion | [`architecture.md`](architecture.md) v0.4 |
+| Companion | [`architecture.md`](architecture.md) v0.6 |
 | Review | [`reviews/2026-10-30-user-flows-v0.1-codex.md`](reviews/2026-10-30-user-flows-v0.1-codex.md), applied in this version |
 
 > If Kaisa is hard to use, nobody will use it, however good the engine is. This document is the
 > contract the engine must serve. When a flow and the architecture disagree, fix the architecture.
+
+**Changes in v0.3** (team intelligence, architecture v0.6) — more capability, no more commands to learn.
+- Project memory is on by default and needs no setup; `kaisa memory` shows and corrects it (F21).
+- Every run says in one line what context it started from and which model tier it was routed to (F04).
+- Blocking review findings are fixed by automatic revision before you see the result (F16).
+- Merge conflicts go to the agent that owns the files first, and to you only if that fails (F07).
+- `kaisa console` opens the same view in a browser (F10). New flows: F36 large mission, F37 light work on a local model.
 
 **Changes in v0.2** (from the usability review)
 - F19m no longer offers a duplicate-risking "start fresh".
@@ -187,6 +194,16 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   - Scans for risky settings. The "keep" option says plainly that agents will not run in this repo.
   - Changes nothing without confirmation.
   - Backs up the existing files.
+- **Optional.** `kaisa init` is never required: the first run derives the project profile itself
+  (languages, build/test/lint commands, layout) and confirms the commands by running them. `init`
+  only writes agent integration files and lets you review the profile:
+  ```
+  Kaisa learned this project:  Rust workspace · 10 crates
+    build  cargo build          ✓ ran
+    test   cargo test           ✓ ran (148 tests)
+    lint   cargo clippy -D warnings  ✓ ran
+  [Enter] Looks right   [E] Edit   (stored in kaisa.toml [profile]; Kaisa keeps it up to date)
+  ```
 - **Variants:**
   - **Monorepo:** pick the packages, and each gets its own checks.
   - **No tests:** "Kaisa can't verify without checks." [P] Propose checks (an agent drafts them, and you approve) · [S] Skip (results will be marked *unverified*).
@@ -202,6 +219,11 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
     Next: kaisa review 41   (or keep working; this terminal is free)
   ```
 - **Kaisa:** picks the cheapest way that works. A script or codemod is used when it can do the job.
+  One status line says what it did, so nothing about routing or memory is hidden:
+  ```
+    context: project profile · 2 lessons (login tests) · 6 related files    routed: T1 light model (small, checkable)
+  ```
+  Nothing to configure: the profile and lessons come from earlier runs on this repository.
 - **Variants:** `--n 3`, `--agents claude` (one or more; this is the only agent flag), `--plan`, `--watch`, `--budget 5`,
   `--issue 123`.
 - **Question-shaped goals.** A goal like "why …" or "how does …" is routed to F09 automatically. Kaisa says so and shows the cost ceiling.
@@ -239,7 +261,8 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
    3 build      backend   · frontend     separate copies (in parallel)
    4 test       integration tests
    5 review     security + code review   read-only · always strongest model
-   Integration: step 3 results are merged by Kaisa before step 4; conflicts come to you.
+   Integration: step 3 results are merged by Kaisa before step 4; a conflict goes to the agent that
+   owns those files first, and comes to you only if it cannot resolve it.
   [Enter] Go   [E] Edit   [Q] Quit
   ```
 - **Editing the plan.** Edits are validated as you make them, for example: "step 4 depends on step 3 — can't remove 3 while 4 needs it".
@@ -273,6 +296,9 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Filters:** `[n]` needs you · `[m]` mine · `[f]` failed · `[/]` search.
 - **Actions** are keys on the selected card: `[t]` take over · `[s]` steer · `[p]` pause · `[u]` undo · `[k]` keep.
 - **Accessibility.** `--plain` prints the same information as a text stream that screen readers can follow.
+- **Browser.** `kaisa console` opens the same view in your browser on this machine only (nothing
+  listens until you run it). It adds a team grid that stays readable with 100+ agents, cost per
+  request and model, and each Task's evidence and revisions. Close the tab or press Ctrl-C to stop it.
 
 #### F11 Take over and hand back
 - **Take over.** In `watch`, `[t]` on an attempt (or `kaisa attach 44.3 --take`) shows:
@@ -328,6 +354,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   Run 41 · candidate A
     What changed: login test now waits for token refresh; fixed race in session.rs
     Evidence: all 212 tests passed · no tests removed or skipped · review: 1 minor (naming)
+              revised once: reviewer found a missing null check (major) → fixed → re-reviewed ✓
     Approving will: open PR #318 from kaisa/41-a → main   (your project setting: "PR, not merge")
     Undo: close PR any time
   [A] Approve   [R] Request changes   [X] Reject   [K] Keep for later
@@ -336,6 +363,9 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Two steps when publishing is risky.** Accepting a candidate and publishing it are separate decisions when the target is protected,
   for example a release branch or a direct push. The effect preview always names the destination.
 - **Base moved.** If the base moved since verification, Kaisa re-checks before approval.
+- **Only verified results reach this screen.** Blocking review findings were already sent back to the
+  agent and fixed (at most twice). If the loop could not fix them, you see the findings and the
+  attempts instead of a candidate, with [R] retry with guidance · [T] take over · [X] drop.
 - **Reject.** The work is kept with a visible countdown (default 14 days) and a `[K] Keep` option.
 
 #### F17 Undo and restore
@@ -384,10 +414,16 @@ The default (marked ★) is always the safe choice.
   and can be revoked with `kaisa admin delegate --revoke …`.
 - **Reassignment.** Pending reviews move to a new delegate automatically when the old one is revoked or absent (F33).
 
-#### F21 Shared knowledge
-- **Turning it on.** Knowledge is off by default in v1. An admin enables it (`kaisa admin knowledge on`), and `kaisa ask` then uses it.
-- **Notes.** Notes are proposed from merged, verified work and carry links to the proving commits.
-- **Flagging.** `[!]` on any note marks it as wrong or stale. Flagged notes are removed until someone re-verifies them.
+#### F21 Project memory
+- **On by default, no setup.** Kaisa remembers each repository: its profile, decisions, and lessons
+  from work that passed verification. Each run shows which items it used (F04).
+- **See and correct.** `kaisa memory` lists what Kaisa knows about this repository, newest and most
+  used first. `[!]` flags an item as wrong or stale (it stops being used until re-verified);
+  `[d]` forgets it. Nothing an agent merely claims is remembered: lessons come only from delivered work.
+- **Vector search.** On after a one-time model download at first run (from the company mirror when one
+  is configured). If it is unavailable, memory still works by keyword search and says so.
+- **Team sharing.** Sharing memory across a team is an admin setting (`kaisa admin knowledge share on`),
+  because shared memory influences everyone's agents.
 
 #### F22 Admin: policy packs
 - **Publishing.**
@@ -462,6 +498,27 @@ The default (marked ★) is always the safe choice.
 
 ### H. Added scenarios
 
+#### F36 Large mission
+- **Trigger:** `kaisa "migrate the API to v2 across all services" --template migration`, or any goal Kaisa
+  judges too big for one plan.
+- **User sees:** a plan split into areas, each run by its own coordinator:
+  ```
+  Mission 52  migrate the API to v2            budget $180 · est. 3–5 h
+    api/        sub-run · 9 tasks       web/   sub-run · 14 tasks
+    workers/    sub-run · 11 tasks      docs/  sub-run · 4 tasks
+    up to 40 agents at once on this machine (measured) · queued work shows its position
+  [Enter] Go   [E] Edit   [Q] Quit
+  ```
+- **While running:** the Needs-you lane still holds only real decisions; sub-run failures show as
+  one card with a fix option, not as a flood of agent events.
+
+#### F37 Light work on a local model
+- **Setup:** an admin or user adds a local model server once (`kaisa admin agent add ollama`, which runs
+  the conformance check).
+- **Effect:** summaries, classification and first-pass reviews go to it automatically when the router
+  grades them T1; F04's status line says `routed: T1 local model`. Code edits and security reviews never
+  go to a tool-less model.
+
 #### F31 Repository not ready
 - **Dirty working tree.** "You have uncommitted changes. Kaisa works on a copy of **committed** state." The options:
   - [Include my uncommitted changes in the copy];
@@ -500,9 +557,9 @@ The default (marked ★) is always the safe choice.
 |---|---|
 | Everyone | `kaisa "<goal>"` · `kaisa watch` · `kaisa review` · `kaisa` (Home) |
 | Also reachable as keys in watch/review | take over `[t]`, hand back `[h]`, steer `[s]`, pause `[p]`, undo `[u]`, keep `[k]` |
-| Common commands | `ask`, `attach`, `steer`, `pause`, `resume`, `cancel`, `undo`, `restore`, `init`, `doctor`, `status` |
+| Common commands | `ask`, `attach`, `steer`, `pause`, `resume`, `cancel`, `undo`, `restore`, `init`, `doctor`, `status`, `console`, `memory` |
 | Advanced | `run` flags `--n`, `--agents`, `--template`, `--plan`, `--budget`, `--issue`, `--issues`; `retain`, `gc`, `handoff` (planner), `handback` (attempt), `wrap` |
-| Team / admin | `team`, `admin enroll`, `admin pack validate\|publish\|rollback`, `admin budget set`, `admin delegate`, `admin offboard`, `admin template new\|test`, `admin agent add`, `admin knowledge on\|off`, `admin cost export`, `audit verify`, `audit export` |
+| Team / admin | `team`, `admin enroll`, `admin pack validate\|publish\|rollback`, `admin budget set`, `admin delegate`, `admin offboard`, `admin template new\|test`, `admin agent add`, `admin knowledge share on\|off`, `admin cost export`, `audit verify`, `audit export` |
 | Automation | `run --headless --json`, `run --resume` |
 
 Every command supports `--json`, `--plain` and `--help`, in `ko` or `en`. Read-only commands never start the daemon or write state.
@@ -530,10 +587,10 @@ The v0.2 additions below are included in `architecture.md` v0.5: §5.5 (source s
 
 | Milestone | Flows that must work end to end |
 |---|---|
-| M0 | F01, F02 (no policy pack), F04, F15, F18, F19i/k/l/m/n, F28 baseline, F31 |
-| M1 | F03, F05, F06, F08 (GitHub), F10–F14, F16, F17, F19a/b/f/g/h/o, F29, F32, F34 |
-| M2 | F07, F09, F19c/d/e/j/p, F23, F26, F27, F33 |
-| M3 | F20–F22, F24, F25, F28 optional, F35, desktop, Linear, mobile/chat |
+| M0 | F01, F02 (no policy pack), F04 (profile + context line), F15, F18, F19i/k/l/m/n, F28 baseline, F31 |
+| M1 | F03, F05, F06, F08 (GitHub), F10–F14, F16 (with automatic revision), F17, F19a/b/f/g/h/o, F21 (per repository), F29, F32, F34, F37 |
+| M2 | F07, F09, F10 (`console`), F19c/d/e/j/p, F23, F26, F27, F33, F36 |
+| M3 | F20, F21 (team sharing), F22, F24, F25, F28 optional, F35, desktop, Linear, mobile/chat |
 
 ## 10. Usability acceptance (measured, not assumed)
 
@@ -543,6 +600,8 @@ The v0.2 additions below are included in `architecture.md` v0.5: §5.5 (source s
 | Commands a P1 user must learn for daily work | 3 |
 | Prompts per routine task with no permission boundary | 0 |
 | Blocker cards without a safe default and a fix option | 0 (CI-enforced) |
+| Things a user must re-explain about a repository in its second session | 0 |
+| Settings needed before memory, routing or context work | 0 |
 | Duplicate agent starts in chaos tests | 0 |
 | Abandoned resources after a normal week | 0 |
 | 4-week retention of pilot users | tracked; target set after the first pilot |
