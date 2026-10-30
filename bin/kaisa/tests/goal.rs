@@ -181,9 +181,18 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
         &["ls-tree", "-r", "--name-only", &outcome.branch],
     );
 
+    let transcript: String = std::fs::read_to_string(
+        bench
+            .state()
+            .join("attempts")
+            .join(outcome.attempt.as_str())
+            .join("transcript.log"),
+    )
+    .unwrap_or_default();
     assert!(
         outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
-        "the probe's own write was refused, so the agent went on through the broker: {outcome:?}"
+        "the probe's own write was refused, so the agent went on through the broker: \
+         {outcome:?}; agent said {transcript:?}"
     );
     assert!(
         preserved.contains(NOTES) && !preserved.contains(DIRECT_WRITE),
