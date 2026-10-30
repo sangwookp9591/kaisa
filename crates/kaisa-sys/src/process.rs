@@ -30,7 +30,11 @@ pub enum ProcessExit {
 /// A process started and owned by Kaisa.
 #[derive(Debug)]
 pub struct OwnedProcess {
+    #[cfg(not(windows))]
     child: Child,
+    /// Started by std, or by Kaisa itself when it is attached to a pseudo console.
+    #[cfg(windows)]
+    child: crate::windows_child::WindowsChild,
     /// Set once Kaisa ends the process, so the exit is reported as [`ProcessExit::Terminated`]
     /// on every OS (Windows reports a killed process as exit code 1).
     ended_by_us: bool,
@@ -65,6 +69,8 @@ impl OwnedProcess {
             );
         }
         let child: Child = command.spawn()?;
+        #[cfg(windows)]
+        let child = crate::windows_child::WindowsChild::Std(child);
         Self::adopt(child)
     }
 
@@ -86,10 +92,15 @@ impl OwnedProcess {
         })
     }
 
+    /// Takes over a process Kaisa created suspended with `CreateProcessW`, such as an agent
+    /// attached to a pseudo console: puts it in its Job Object, then lets it run.
     #[cfg(windows)]
-    fn adopt(mut child: Child) -> io::Result<Self> {
-        use std::os::windows::io::AsRawHandle;
+    pub(crate) fn adopt_created(process: crate::windows_child::CreatedProcess) -> io::Result<Self> {
+        Self::adopt(crate::windows_child::WindowsChild::Created(process))
+    }
 
+    #[cfg(windows)]
+    fn adopt(mut child: crate::windows_child::WindowsChild) -> io::Result<Self> {
         let contained: io::Result<crate::job::Job> = crate::job::Job::new().and_then(|job| {
             job.assign(child.as_raw_handle())?;
             crate::job::resume_threads_of(child.id())?;
@@ -223,7 +234,6 @@ mod unix {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::path::PathBuf;
-    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     use super::ProcessSpec;
@@ -275,11 +285,9 @@ pub(crate) mod test_support {
         ))
     }
 
-    /// How long a test waits for a pid file or for a process to disappear.
-    #[cfg(unix)]
-    const PATIENCE: Duration = Duration::from_secs(10);
+    /// How long a test waits for a pid file, a process to disappear or a job to change size.
+    pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
     /// How often it checks while waiting.
-    #[cfg(unix)]
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
     /// A pid file path no other test uses.
@@ -322,6 +330,19 @@ pub(crate) mod test_support {
         let deadline: Instant = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
             if !is_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        false
+    }
+
+    /// True once the number of live processes in `agent`'s job satisfies `expected`.
+    #[cfg(windows)]
+    pub(crate) fn job_reaches(agent: &super::OwnedProcess, expected: impl Fn(u32) -> bool) -> bool {
+        let deadline: Instant = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if expected(agent.processes_in_job().expect("the job can be queried")) {
                 return true;
             }
             std::thread::sleep(POLL_INTERVAL);
@@ -436,30 +457,15 @@ mod tests {
 
     #[cfg(windows)]
     mod windows_tree {
-        use std::time::{Duration, Instant};
-
         use super::super::OwnedProcess;
-        use super::super::test_support::a_process_that_starts_a_background_child_on_windows;
+        use super::super::test_support::{
+            a_process_that_starts_a_background_child_on_windows, job_reaches,
+        };
 
-        /// How long the test waits for the job to reach the expected size.
-        const PATIENCE: Duration = Duration::from_secs(10);
-        /// How often it checks while waiting.
-        const POLL_INTERVAL: Duration = Duration::from_millis(20);
         /// The shell plus the background child it started.
         const AGENT_AND_ITS_CHILD: u32 = 2;
         /// A job whose processes have all ended.
         const NO_PROCESSES: u32 = 0;
-
-        fn job_reaches(agent: &OwnedProcess, expected: impl Fn(u32) -> bool) -> bool {
-            let deadline: Instant = Instant::now() + PATIENCE;
-            while Instant::now() < deadline {
-                if expected(agent.processes_in_job().expect("the job can be queried")) {
-                    return true;
-                }
-                std::thread::sleep(POLL_INTERVAL);
-            }
-            false
-        }
 
         #[test]
         fn the_job_contains_the_agent_and_the_children_it_starts() {

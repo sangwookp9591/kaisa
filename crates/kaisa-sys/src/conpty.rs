@@ -8,7 +8,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::System::Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON};
+use windows_sys::Win32::System::Console::{
+    COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 
 use crate::pty::TerminalSize;
@@ -28,6 +30,18 @@ impl PseudoConsole {
     /// The raw handle, for attaching a process to this console.
     pub(crate) fn handle(&self) -> HPCON {
         self.handle
+    }
+
+    /// Changes the size the attached agent sees.
+    pub(crate) fn resize(&self, size: TerminalSize) -> io::Result<()> {
+        #[allow(unsafe_code)]
+        // SAFETY: the console handle is owned by `self` and valid; the size is passed by value.
+        let result: i32 = unsafe { ResizePseudoConsole(self.handle, coord_of(size)?) };
+        if result < 0 {
+            Err(io::Error::from_raw_os_error(result))
+        } else {
+            Ok(())
+        }
     }
 }
 
