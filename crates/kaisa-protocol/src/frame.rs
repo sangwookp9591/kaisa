@@ -218,6 +218,18 @@ pub(crate) mod test_support {
         }
     }
 
+    /// The bytes of a frame whose writer died before writing the terminator.
+    pub(crate) fn a_frame_cut_off_before_its_terminator() -> Vec<u8> {
+        let mut wire: Vec<u8> = written(&status_request_for_run_41());
+        wire.pop();
+        wire
+    }
+
+    /// A complete line that is not JSON, as a confused or hostile peer might send.
+    pub(crate) fn a_line_of_plain_text() -> Vec<u8> {
+        b"hello daemon, are you there?\n".to_vec()
+    }
+
     /// Bytes `message` would occupy on the wire.
     pub(crate) fn written(message: &StatusRequest) -> Vec<u8> {
         let mut wire: Vec<u8> = Vec::new();
@@ -229,8 +241,9 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{
-        StatusRequest, TrickleStream, frame_body_length, status_request_for_run_41,
-        status_request_with_a_note_of_length, status_request_with_a_two_line_note, written,
+        StatusRequest, TrickleStream, a_frame_cut_off_before_its_terminator, a_line_of_plain_text,
+        frame_body_length, status_request_for_run_41, status_request_with_a_note_of_length,
+        status_request_with_a_two_line_note, written,
     };
     use super::{DEFAULT_FRAME_LIMIT, FRAME_TERMINATOR, FrameError, FrameReader};
 
@@ -352,6 +365,59 @@ mod tests {
             reader.into_inner().bytes_handed_out() <= SMALL_LIMIT + TRICKLE_CHUNK,
             "a peer must not be able to make the reader buffer a whole oversized frame \
              (the frame was {wire_length} bytes)"
+        );
+    }
+
+    #[test]
+    fn an_empty_stream_reports_a_clean_end() {
+        let mut reader = reader_over(Vec::new(), DEFAULT_FRAME_LIMIT);
+
+        let read: Option<StatusRequest> = reader
+            .read_frame()
+            .expect("an empty stream is not an error");
+
+        assert_eq!(
+            read, None,
+            "a peer that closes before sending anything ended cleanly"
+        );
+    }
+
+    #[test]
+    fn the_end_of_stream_after_the_last_frame_is_a_clean_end() {
+        let mut reader = reader_over(written(&status_request_for_run_41()), DEFAULT_FRAME_LIMIT);
+        reader
+            .read_frame::<StatusRequest>()
+            .expect("the only frame reads");
+
+        let after_last: Option<StatusRequest> = reader.read_frame().expect("the end is clean");
+
+        assert_eq!(
+            after_last, None,
+            "closing after a complete frame is a normal shutdown"
+        );
+    }
+
+    #[test]
+    fn a_partial_frame_at_end_of_stream_is_reported_as_truncated() {
+        let mut reader = reader_over(a_frame_cut_off_before_its_terminator(), DEFAULT_FRAME_LIMIT);
+
+        let read: Result<Option<StatusRequest>, FrameError> = reader.read_frame();
+
+        assert!(
+            matches!(read, Err(FrameError::Truncated)),
+            "a half-written frame must never be decoded as if it were complete, got {read:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_json_is_reported_as_malformed() {
+        let mut reader = reader_over(a_line_of_plain_text(), DEFAULT_FRAME_LIMIT);
+
+        let read: Result<Option<StatusRequest>, FrameError> = reader.read_frame();
+
+        assert!(
+            matches!(read, Err(FrameError::Malformed(_))),
+            "non-JSON input must be rejected, got {read:?}"
         );
     }
 }
