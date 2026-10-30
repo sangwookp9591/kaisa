@@ -414,8 +414,12 @@ fn kaisa_with_a_verified_goal_reports_verified_and_exits_zero() {
     let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
 
     assert!(
-        run.status.success() && stdout.contains("verified:"),
-        "checks passed and the review approved, so it is delivered as verified; got {stdout:?} {:?}",
+        run.status.success()
+            && stdout
+                .lines()
+                .any(|line| line.starts_with("verified:") || line.starts_with("verified (reduced")),
+        "checks passed and the review approved, so it is delivered as verified (reduced where checks \
+         run without OS confinement); got {stdout:?} {:?}",
         String::from_utf8_lossy(&run.stderr)
     );
 }
