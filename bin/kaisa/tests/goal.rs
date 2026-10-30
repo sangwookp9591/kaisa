@@ -142,10 +142,10 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
 }
 
 /// Where the probe tries to write around the broker, relative to the agent's worktree.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 const DIRECT_WRITE: &str = "src/direct.md";
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 #[test]
 fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
     let bench = Workbench::new("confined");

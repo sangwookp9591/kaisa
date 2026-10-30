@@ -287,8 +287,21 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .write_to(&attempt_directory)
     .map_err(at("writing the bridge config"))?;
     kaisa_mcp::AttemptToken::issue(&attempt_directory).map_err(at("issuing the attempt token"))?;
+    // On Windows the container exists before the broker, whose pipes must admit it.
+    #[cfg(windows)]
+    let mut contained: Option<crate::sandbox::ContainedAttempt> = if request.confine_agent {
+        Some(
+            crate::sandbox::ContainedAttempt::create(
+                &attempt_directory,
+                &format!("kaisa.{attempt}"),
+            )
+            .map_err(at("creating the agent's container"))?,
+        )
+    } else {
+        None
+    };
     // The broker runs here, outside the agent's sandbox; the agent's bridge only relays to it.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let broker = {
         let endpoint = kaisa_mcp::BrokerEndpoint::bind(&attempt_directory)
             .map_err(at("binding the attempt's broker"))?;
@@ -341,8 +354,27 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     } else {
         AgentSandbox::Unconfined
     };
-    // Windows confinement (AppContainer) is T15.5; until then the run is reported as reduced.
-    #[cfg(not(unix))]
+    // A container cannot reach loopback (spike check 4a), so the egress broker is out of its
+    // reach: on Windows a confined agent has no network.
+    #[cfg(windows)]
+    let sandbox = {
+        let _ = egress_port;
+        match contained.take() {
+            Some(mut contained) => {
+                contained
+                    .grant_for_agent(
+                        worktree.path(),
+                        &attempt_directory,
+                        &scratch,
+                        &[agent.program.as_path(), request.kaisa_executable],
+                    )
+                    .map_err(at("granting the agent's paths"))?;
+                AgentSandbox::AppContainer(contained)
+            }
+            None => AgentSandbox::Unconfined,
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
     let sandbox = {
         let _ = egress_port;
         AgentSandbox::Unconfined
@@ -359,8 +391,10 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .map_err(at("running the agent"))?;
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)
         .map_err(at("saving the transcript"))?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     finish_broker(broker)?;
+    let confined: bool = !matches!(sandbox, AgentSandbox::Unconfined);
+    sandbox.release();
 
     let status: ExitStatus = match finished.exit {
         Some(ProcessExit::Code(code)) => ExitStatus::Code(code),
@@ -401,17 +435,29 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         commit,
         kept_back,
         context_pack: digest.as_str().to_owned(),
-        confined: !matches!(sandbox, AgentSandbox::Unconfined),
+        confined,
     })
 }
 
 /// Ends the broker thread: if the agent never connected, a throwaway connection releases it.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn finish_broker(
     (broker, socket): (std::thread::JoinHandle<std::io::Result<()>>, PathBuf),
 ) -> Result<(), GoalError> {
     if !broker.is_finished() {
+        #[cfg(unix)]
         let _ = std::os::unix::net::UnixStream::connect(socket);
+        #[cfg(windows)]
+        {
+            // The Windows broker accepts its up pipe, then its down pipe.
+            let base: String = socket.to_string_lossy().into_owned();
+            let _up = std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("{base}-up"));
+            let _down = std::fs::OpenOptions::new()
+                .read(true)
+                .open(format!("{base}-down"));
+        }
     }
     broker
         .join()

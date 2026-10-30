@@ -2,7 +2,7 @@
 //! its scratch and the paths its CLI needs, reaches only its tool broker's socket, and reaches
 //! the network only through its attempt's egress broker.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::{Path, PathBuf};
 
 use kaisa_sys::Confinement;
@@ -14,6 +14,69 @@ pub(crate) enum AgentSandbox {
     Seatbelt(kaisa_sys::SeatbeltPolicy),
     #[cfg(target_os = "linux")]
     Landlock(kaisa_sys::LandlockRuleset),
+    #[cfg(windows)]
+    AppContainer(ContainedAttempt),
+}
+
+/// A Windows attempt's AppContainer and the paths granted to it, released after the run.
+#[cfg(windows)]
+pub(crate) struct ContainedAttempt {
+    profile: kaisa_sys::AppContainerProfile,
+    granted: Vec<PathBuf>,
+}
+
+#[cfg(windows)]
+impl ContainedAttempt {
+    /// Creates the attempt's container and records its SID in `attempt_directory`, so the
+    /// broker created next admits it (T15.5b2).
+    pub(crate) fn create(attempt_directory: &Path, name: &str) -> std::io::Result<Self> {
+        let profile = kaisa_sys::AppContainerProfile::ensure(name)?;
+        std::fs::write(
+            attempt_directory.join(kaisa_mcp::CONTAINER_SID_FILE),
+            profile.sid_string()?,
+        )?;
+        Ok(Self {
+            profile,
+            granted: Vec::new(),
+        })
+    }
+
+    fn grant(&mut self, path: &Path, access: kaisa_sys::ContainerAccess) -> std::io::Result<()> {
+        self.profile.grant(path, access)?;
+        self.granted.push(path.to_owned());
+        Ok(())
+    }
+
+    /// Grants what the agent needs and nothing more: read its worktree, its own programs and
+    /// its attempt directory (MCP config, token, broker name); change only its scratch. Writes
+    /// to the worktree go through the broker.
+    pub(crate) fn grant_for_agent(
+        &mut self,
+        worktree: &Path,
+        attempt_directory: &Path,
+        scratch: &Path,
+        programs: &[&Path],
+    ) -> std::io::Result<()> {
+        use kaisa_sys::ContainerAccess::{Modify, ReadExecute};
+        self.grant(worktree, ReadExecute)?;
+        self.grant(attempt_directory, ReadExecute)?;
+        self.grant(scratch, Modify)?;
+        for program in programs {
+            // A bare program name ("claude") is found on PATH; there is no directory to grant.
+            if let Some(directory) = program.parent().filter(|path| !path.as_os_str().is_empty()) {
+                self.grant(directory, ReadExecute)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Revokes every grant and deletes the container.
+    pub(crate) fn release(self) {
+        for path in &self.granted {
+            let _ = self.profile.revoke(path);
+        }
+        let _ = self.profile.delete();
+    }
 }
 
 impl AgentSandbox {
@@ -24,6 +87,16 @@ impl AgentSandbox {
             Self::Seatbelt(policy) => Confinement::Seatbelt(policy),
             #[cfg(target_os = "linux")]
             Self::Landlock(ruleset) => Confinement::Landlock(ruleset),
+            #[cfg(windows)]
+            Self::AppContainer(contained) => Confinement::AppContainer(&contained.profile),
+        }
+    }
+
+    /// Releases what the sandbox granted on the way out (Windows ACEs and profile).
+    pub(crate) fn release(self) {
+        #[cfg(windows)]
+        if let Self::AppContainer(contained) = self {
+            contained.release();
         }
     }
 }
