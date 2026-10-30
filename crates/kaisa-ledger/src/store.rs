@@ -13,4 +13,4 @@ mod tests;
 
 pub use error::{CorruptReason, StoreError};
 pub use event_store::EventStore;
-pub use outbox::{Intent, PendingIntent};
+pub use outbox::{Completion, Intent, PendingIntent};

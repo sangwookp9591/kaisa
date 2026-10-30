@@ -31,6 +31,15 @@ pub struct Intent {
     pub detail: String,
 }
 
+/// What a call to [`EventStore::complete`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Completion {
+    /// The intent was pending; its completion event was recorded.
+    Recorded(ChainedEvent),
+    /// The intent was already completed with the same receipt; nothing changed.
+    AlreadyRecorded,
+}
+
 /// An intent that has been recorded but not yet completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingIntent {
@@ -67,21 +76,31 @@ impl EventStore {
     /// Marks a pending intent as completed with `receipt` and appends its `IntentCompleted`
     /// event, atomically.
     ///
+    /// Completing is idempotent: repeating it with the same receipt (for example after a crash
+    /// between performing the effect and learning that the completion was stored) changes
+    /// nothing and returns [`Completion::AlreadyRecorded`].
+    ///
     /// # Errors
     ///
-    /// Returns [`StoreError::IntentNotPending`] if no pending intent has this id. Returns
-    /// another [`StoreError`] if the transaction fails.
-    pub fn complete(&mut self, id: &IntentId, receipt: &str) -> Result<ChainedEvent, StoreError> {
+    /// Returns [`StoreError::UnknownIntent`] if no intent has this id,
+    /// [`StoreError::ReceiptConflict`] if it was completed with a different receipt, or another
+    /// [`StoreError`] if the transaction fails.
+    pub fn complete(&mut self, id: &IntentId, receipt: &str) -> Result<Completion, StoreError> {
         let transaction: Transaction<'_> = self.connection.transaction()?;
-        let state: Option<String> = transaction
+        let stored: Option<(String, Option<String>)> = transaction
             .query_row(
-                "SELECT state FROM outbox WHERE intent_id = ?1",
+                "SELECT state, receipt FROM outbox WHERE intent_id = ?1",
                 params![id.as_str()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if state.as_deref() != Some(PENDING) {
-            return Err(StoreError::IntentNotPending(id.clone()));
+        match stored {
+            None => return Err(StoreError::UnknownIntent(id.clone())),
+            Some((state, _)) if state == PENDING => {}
+            Some((_, Some(earlier))) if earlier == receipt => {
+                return Ok(Completion::AlreadyRecorded);
+            }
+            Some(_) => return Err(StoreError::ReceiptConflict(id.clone())),
         }
         transaction.execute(
             "UPDATE outbox SET state = 'completed', receipt = ?2 WHERE intent_id = ?1",
@@ -89,7 +108,7 @@ impl EventStore {
         )?;
         let chained: ChainedEvent = append_in(&transaction, intent_completed_event(id, receipt))?;
         transaction.commit()?;
-        Ok(chained)
+        Ok(Completion::Recorded(chained))
     }
 
     /// Every intent that has been recorded and not completed, oldest first.

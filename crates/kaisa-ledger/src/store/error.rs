@@ -37,8 +37,10 @@ pub enum StoreError {
     ChainBroken(ChainBreak),
     /// An intent with this id was already recorded.
     DuplicateIntent(IntentId),
-    /// No pending intent has this id.
-    IntentNotPending(IntentId),
+    /// No intent with this id was ever recorded.
+    UnknownIntent(IntentId),
+    /// The intent was already completed with a different receipt.
+    ReceiptConflict(IntentId),
     /// An outbox row cannot be decoded into an intent.
     CorruptOutbox,
 }
@@ -55,7 +57,13 @@ impl fmt::Display for StoreError {
             }
             Self::ChainBroken(chain_break) => write!(f, "{chain_break}"),
             Self::DuplicateIntent(id) => write!(f, "intent {id} was already recorded"),
-            Self::IntentNotPending(id) => write!(f, "intent {id} is not pending"),
+            Self::UnknownIntent(id) => write!(f, "intent {id} was never recorded"),
+            Self::ReceiptConflict(id) => {
+                write!(
+                    f,
+                    "intent {id} was already completed with a different receipt"
+                )
+            }
             Self::CorruptOutbox => write!(f, "an outbox row cannot be decoded"),
         }
     }
@@ -67,7 +75,10 @@ impl std::error::Error for StoreError {
             Self::Sqlite(error) => Some(error),
             Self::Corrupt { .. } => None,
             Self::ChainBroken(chain_break) => Some(chain_break),
-            Self::DuplicateIntent(_) | Self::IntentNotPending(_) | Self::CorruptOutbox => None,
+            Self::DuplicateIntent(_)
+            | Self::UnknownIntent(_)
+            | Self::ReceiptConflict(_)
+            | Self::CorruptOutbox => None,
         }
     }
 }
