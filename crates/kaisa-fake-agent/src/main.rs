@@ -102,6 +102,23 @@ fn flag_present(args: &[String], name: &str) -> bool {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--fake-observed-write <path>` acts like an observed agent (Codex): it reads the whole
+    // pack as plain text and writes straight into its working directory, with no bridge.
+    if let Some(path) = flag(&args, "--fake-observed-write") {
+        let mut pack = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut pack)
+            .map_err(|error| error.to_string())?;
+        if pack.trim_start().starts_with('{') {
+            return Err(
+                "an observed agent was given a JSON message, not the plain pack".to_owned(),
+            );
+        }
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        return std::fs::write(&path, "written by an observed agent\n")
+            .map_err(|error| error.to_string());
+    }
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
     if let Some(required) = flag(&args, "--fake-review-require") {
         return review(&required);

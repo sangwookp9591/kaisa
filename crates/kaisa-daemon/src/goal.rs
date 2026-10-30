@@ -75,6 +75,10 @@ pub struct GoalRequest<'request> {
     /// The loopback port of a local model server the agent talks to (tier 0, T28b); the
     /// sandbox allows exactly that port when no egress broker is in use.
     pub local_model_port: Option<u16>,
+    /// An observed agent (Codex, T32c): it reads the pack as plain text and writes straight
+    /// into its worktree under its own sandbox, so Kaisa does not confine it and checks its
+    /// changes against the write set afterwards instead of on each write.
+    pub observed: bool,
 }
 
 /// The file in an attempt directory naming the agent process Kaisa started, so that after a
@@ -112,6 +116,8 @@ pub struct GoalOutcome {
     pub context_pack: String,
     /// False if the agent's process ran without OS confinement (a reduced run).
     pub confined: bool,
+    /// True if the agent was observed rather than brokered.
+    pub observed: bool,
 }
 
 impl GoalOutcome {
@@ -138,8 +144,13 @@ impl GoalOutcome {
         } else {
             "; reduced: the agent process ran without OS confinement"
         };
+        let observed: &str = if self.observed {
+            "; observed: the agent wrote under its own sandbox, so its changes were checked afterwards, not on each write"
+        } else {
+            ""
+        };
         format!(
-            "{} {ending}; {work}; context pack {}{reduced}",
+            "{} {ending}; {work}; context pack {}{reduced}{observed}",
             self.attempt,
             short(&self.context_pack)
         )
@@ -224,6 +235,8 @@ pub(crate) fn record_cleanup(
 /// Returns [`GoalError`] naming the step that failed; everything recorded until then stays in
 /// the ledger, and nothing is deleted that was not preserved.
 pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
+    // An observed agent writes directly, which Kaisa's confinement would forbid.
+    let confine_agent: bool = request.confine_agent && !request.observed;
     kaisa_sys::ensure_private_directory(request.state_directory)
         .map_err(at("preparing the state directory"))?;
     let mut ledger: EventStore = EventStore::open(&request.state_directory.join("kaisa.db"))
@@ -311,7 +324,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     kaisa_mcp::AttemptToken::issue(&attempt_directory).map_err(at("issuing the attempt token"))?;
     // On Windows the container exists before the broker, whose pipes must admit it.
     #[cfg(windows)]
-    let mut contained: Option<crate::sandbox::ContainedAttempt> = if request.confine_agent {
+    let mut contained: Option<crate::sandbox::ContainedAttempt> = if confine_agent {
         Some(
             crate::sandbox::ContainedAttempt::create(
                 &attempt_directory,
@@ -371,9 +384,13 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         .as_ref()
         .map(|broker| broker.address().port())
         .or(request.local_model_port);
-    let input: String = format!("{}\n", first_message(&pack));
+    let input: String = if request.observed {
+        format!("{}\n", pack.render())
+    } else {
+        format!("{}\n", first_message(&pack))
+    };
     #[cfg(unix)]
-    let sandbox = if request.confine_agent {
+    let sandbox = if confine_agent {
         agent_sandbox(&scratch, request.agent_writable, &broker.1, egress_port)
             .map_err(at("building the agent's sandbox"))?
     } else {
@@ -473,6 +490,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         kept_back,
         context_pack: digest.as_str().to_owned(),
         confined,
+        observed: request.observed,
     })
 }
 

@@ -220,6 +220,7 @@ impl GoalCommand {
             egress_hosts: &[],
             agent_writable: &[],
             local_model_port: None,
+            observed: false,
         }) {
             Ok(outcome) => {
                 writeln!(out, "{}", outcome.summary())?;

@@ -102,6 +102,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         egress_hosts: &[],
         agent_writable: &[],
         local_model_port: None,
+        observed: false,
     })
     .expect("the goal runs");
     let preserved_notes: String = git(
@@ -180,6 +181,7 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
         egress_hosts: &[],
         agent_writable: &[],
         local_model_port: None,
+        observed: false,
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -252,6 +254,7 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
         egress_hosts: &[MODEL_PROVIDER],
         agent_writable: &[],
         local_model_port: None,
+        observed: false,
     })
     .expect("the goal runs");
 
@@ -313,6 +316,7 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
         egress_hosts: &[],
         agent_writable: &[],
         local_model_port: None,
+        observed: false,
     })
     .expect("a crashing agent is an outcome, not an error");
     let attempt_directory: String = bench
@@ -395,6 +399,7 @@ fn a_second_session_needs_no_re_explanation() {
         egress_hosts: &[],
         agent_writable: &[],
         local_model_port: None,
+        observed: false,
     })
     .expect("the goal runs");
     let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("reopens");
@@ -544,6 +549,7 @@ fn a_local_model_drives_a_confined_attempt_through_the_broker() {
         egress_hosts: &[],
         agent_writable: &[],
         local_model_port: Some(port),
+        observed: false,
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -558,5 +564,59 @@ fn a_local_model_drives_a_confined_attempt_through_the_broker() {
     assert_eq!(
         preserved, LOCAL_MODEL_NOTES,
         "the model's change reached the branch only through the broker"
+    );
+}
+
+#[test]
+fn an_observed_agent_writes_directly_and_is_reported_as_observed() {
+    let bench = Workbench::new("observed");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let launch = |_mcp_config: &Path| ProcessSpec {
+        program: fake_agent.clone(),
+        args: vec!["--fake-observed-write".to_owned(), NOTES.to_owned()],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        base: "HEAD",
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        role: kaisa_domain::Role::Developer,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+        local_model_port: None,
+        observed: true,
+    })
+    .expect("the goal runs");
+    let files: String = git(
+        &bench.repository(),
+        &["ls-tree", "-r", "--name-only", &outcome.branch],
+    );
+
+    assert_eq!(
+        outcome.exit,
+        Some(ProcessExit::Code(0)),
+        "the observed agent read the plain pack and finished: {outcome:?}"
+    );
+    assert!(
+        outcome.observed && !outcome.confined,
+        "an observed agent runs under its own sandbox, never Kaisa's, even when confinement was asked"
+    );
+    assert!(
+        files.contains(NOTES),
+        "the observed agent's direct write was preserved on the attempt branch: {files:?}"
+    );
+    assert!(
+        outcome.summary().contains("observed"),
+        "the summary tells the person the run was observed: {}",
+        outcome.summary()
     );
 }
