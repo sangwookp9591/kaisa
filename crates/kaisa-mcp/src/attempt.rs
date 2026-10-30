@@ -193,7 +193,9 @@ mod tests {
     use kaisa_domain::{RepoPath, Role, WriteSet};
     use serde_json::json;
 
-    use super::{BridgeConfig, bridge_from, serve_attempt};
+    #[cfg(unix)]
+    use super::bridge_from;
+    use super::{BridgeConfig, serve_attempt};
 
     #[test]
     fn the_bridge_command_serves_the_attempts_tools() {

@@ -227,6 +227,8 @@ mod tests {
     }
 
     /// Connects, says hello with `token`, writes one file, and returns the first reply line.
+    /// A broker that refuses may hang up mid-conversation, so sending and reading are best
+    /// effort: a cut connection reads as an empty reply.
     fn a_bridge_writes(socket: &Path, token: &str) -> String {
         let mut stream = UnixStream::connect(socket).expect("the broker is listening");
         let requests = [
@@ -235,11 +237,9 @@ mod tests {
                    "params": {"name": "fs_write", "arguments": {"path": "src/auth/notes.md", "content": "notes\n"}}}),
         ];
         for request in requests {
-            writeln!(stream, "{request}").expect("sent");
+            let _ = writeln!(stream, "{request}");
         }
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("closed for writing");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut reply = String::new();
         BufReader::new(stream)
             .read_line(&mut reply)
@@ -282,7 +282,7 @@ mod tests {
         broker.join().expect("the broker thread finishes");
 
         assert!(
-            reply.contains("another attempt") && !attempt.base.join("w/src/auth/notes.md").exists(),
+            !reply.contains("\"result\"") && !attempt.base.join("w/src/auth/notes.md").exists(),
             "a caller without the capability is refused before any tool runs; got {reply}"
         );
     }
