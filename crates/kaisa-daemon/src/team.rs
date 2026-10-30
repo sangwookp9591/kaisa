@@ -2,7 +2,7 @@
 //! a reviewer attempt on the same candidate, the delivery gate, and bounded revision. Nothing
 //! reaches the user unless the gate says so.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kaisa_context::DetectedCommand;
 use kaisa_domain::{ReviewVerdict, Role, WriteSet};
@@ -46,6 +46,11 @@ pub struct VerifiedRequest<'request> {
     /// A light first-pass reviewer on a local model (F37, T33): its blocking findings send the
     /// candidate back without spending the full review; its approval is only advisory.
     pub first_pass: Option<FirstPass<'request>>,
+    /// Hosts the developer and reviewer may reach through the egress broker.
+    pub egress_hosts: &'request [&'request str],
+    /// Paths outside the worktree the agents must be able to change (for example their own
+    /// session files).
+    pub agent_writable: &'request [PathBuf],
 }
 
 /// A first-pass reviewer and the loopback port of the local model it talks to.
@@ -144,8 +149,8 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             launch: request.developer,
             kaisa_executable: request.kaisa_executable,
             confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-            egress_hosts: &[],
-            agent_writable: &[],
+            egress_hosts: request.egress_hosts,
+            agent_writable: request.agent_writable,
             local_model_port: None,
             observed: request.observed,
         })?;
@@ -238,8 +243,8 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             launch: request.reviewer,
             kaisa_executable: request.kaisa_executable,
             confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-            egress_hosts: &[],
-            agent_writable: &[],
+            egress_hosts: request.egress_hosts,
+            agent_writable: request.agent_writable,
             local_model_port: None,
             observed: false,
         })?;

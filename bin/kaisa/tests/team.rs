@@ -146,6 +146,8 @@ fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
         policy: &a_policy(true),
         observed: false,
         first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
     })
     .expect("the team run completes")
 }
@@ -280,6 +282,8 @@ fn an_observed_change_outside_the_write_set_needs_a_person() {
         policy: &a_policy(true),
         observed: true,
         first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
     })
     .expect("the team run completes");
 
@@ -319,6 +323,8 @@ fn a_team_run_with_a_first_pass(
             launch: &first_pass,
             model_port: None,
         }),
+        egress_hosts: &[],
+        agent_writable: &[],
     })
     .expect("the team run completes")
 }
@@ -362,5 +368,56 @@ fn a_first_pass_approval_still_needs_the_full_review() {
         outcome.attempts.len(),
         ATTEMPTS_WHEN_THE_FULL_REVIEW_OVERRULES,
         "the full review ran after every first-pass approval"
+    );
+}
+
+/// A host the policy allows the agents to reach.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const ALLOWED_HOST: &str = "allowed.example";
+/// A host nobody allowed; the egress broker must refuse it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const UNLISTED_HOST: &str = "unlisted.example";
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_team_run_gives_its_agents_the_egress_broker() {
+    let bench = Workbench::new("team-egress");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let developer = |mcp_config: &Path| {
+        scripted(
+            mcp_config,
+            &[
+                "--fake-write-next",
+                STEP_PREFIX,
+                "--expect-proxy-refuses",
+                UNLISTED_HOST,
+            ],
+        )
+    };
+    let reviewer = |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", FIRST_STEP]);
+    let egress_hosts: [&str; 1] = [ALLOWED_HOST];
+
+    let outcome: VerifiedOutcome = run_verified_goal(&VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &bench.base.join("state"),
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[the_projects_test_command()],
+        policy: &a_policy(true),
+        observed: false,
+        first_pass: None,
+        egress_hosts: &egress_hosts,
+        agent_writable: &[],
+    })
+    .expect("the team run completes");
+
+    assert!(
+        matches!(outcome.delivery, Delivery::Deliver { .. }),
+        "the developer found the egress broker in front of it, refusing an unlisted host: {:?}",
+        outcome.delivery
     );
 }

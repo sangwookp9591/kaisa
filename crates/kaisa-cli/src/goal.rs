@@ -242,6 +242,8 @@ impl GoalCommand {
             policy: &policy,
             observed: self.agent.codex,
             first_pass,
+            egress_hosts: &[],
+            agent_writable: &[],
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
