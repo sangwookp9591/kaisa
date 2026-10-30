@@ -164,3 +164,100 @@ fn an_attempt_abandoned_by_a_killed_kaisa_is_recovered_on_the_next_run() {
         "the abandoned attempt's work is preserved and no worktree is left; got {stdout:?}"
     );
 }
+
+/// Rounds of starting Kaisa and killing it at a random moment.
+#[cfg(unix)]
+const KILL_ROUNDS: u64 = 5;
+/// The latest moment a round kills Kaisa, in milliseconds after starting it.
+#[cfg(unix)]
+const LATEST_KILL_MS: u64 = 1_500;
+/// Seed of the kill schedule; printed on failure so a run can be replayed.
+#[cfg(unix)]
+const KILL_SEED: u64 = 0x5eed_c4a0;
+
+/// The next value of a linear congruential generator (deterministic, dependency-free).
+#[cfg(unix)]
+fn next_random(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state >> 33
+}
+
+/// True if a live process's command line mentions `needle`.
+#[cfg(unix)]
+fn a_process_mentions(needle: &str) -> bool {
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .expect("ps is on every Unix runner");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|line| line.contains(needle) && !line.contains("ps -A"))
+}
+
+#[cfg(unix)]
+#[test]
+fn no_resource_is_orphaned_after_random_kills() {
+    let bench = Workbench::new("chaos");
+    let repository: PathBuf = bench.base.join("repo");
+    let state: PathBuf = bench.base.join("state");
+    let fake_agent: String = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX))
+        .to_string_lossy()
+        .into_owned();
+    let kaisa = |goal: &str, hang: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kaisa"));
+        command.args([
+            "--agent-program",
+            &fake_agent,
+            "--agent-arg",
+            "--fake-write",
+        ]);
+        command.args(["--agent-arg", "src/notes.md"]);
+        if hang {
+            command.args(["--agent-arg", "--hang-after-write"]);
+        }
+        command
+            .arg(goal)
+            .current_dir(&repository)
+            .env("KAISA_STATE_DIR", &state);
+        command
+    };
+    let mut seed: u64 = KILL_SEED;
+    let mut schedule: Vec<u64> = Vec::new();
+    for round in 0..KILL_ROUNDS {
+        let delay: u64 = next_random(&mut seed) % LATEST_KILL_MS;
+        schedule.push(delay);
+        let mut running = kaisa(&format!("Chaos round {round}."), true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("kaisa starts");
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        let _ = running.kill();
+        let _ = running.wait();
+    }
+
+    let recovery: Output = kaisa(GOAL, false).output().expect("kaisa runs again");
+    let report: String = String::from_utf8_lossy(&recovery.stdout).into_owned();
+    let leftover: Vec<String> = std::fs::read_dir(state.join("worktrees"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    let replay: String = format!("seed {KILL_SEED:#x}, kills at {schedule:?} ms");
+
+    assert!(
+        !a_process_mentions(&state.to_string_lossy()),
+        "no agent or bridge of a killed run is still alive ({replay})"
+    );
+    assert!(
+        leftover
+            .iter()
+            .all(|attempt| report.contains(&format!("kept {attempt} untouched"))),
+        "every worktree still on disk was reported to the user as kept; left {leftover:?}, \
+         report {report:?} ({replay})"
+    );
+}
