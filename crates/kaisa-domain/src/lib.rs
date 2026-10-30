@@ -5,6 +5,7 @@
 mod attempt;
 mod effect;
 mod event;
+mod grade;
 mod id;
 mod repo_path;
 mod write_set;
@@ -15,6 +16,7 @@ pub use attempt::{
 };
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
+pub use grade::{BelowFloor, Grade, GradeFloor};
 pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use write_set::WriteSet;
