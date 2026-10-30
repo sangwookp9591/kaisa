@@ -4,6 +4,8 @@
 
 mod lease;
 mod recovery;
+mod stall;
 
 pub use lease::Lease;
 pub use recovery::{Recovery, decide_recovery};
+pub use stall::{ExpiryAction, on_lease_expired};
