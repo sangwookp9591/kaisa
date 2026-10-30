@@ -32,6 +32,8 @@ kaisa-supervisor = { path = "crates/kaisa-supervisor" }
 kaisa-sys = { path = "crates/kaisa-sys" }
 kaisa-workspace = { path = "crates/kaisa-workspace" }
 
+blake3 = { version = "1.8.7", default-features = false, features = ["std"] }
+
 # Lints shared by every crate except `kaisa-sys`, which declares its own copy with
 # `unsafe_code = "deny"` (the only crate allowed to opt into `unsafe`, architecture §13).
 [workspace.lints.rust]
