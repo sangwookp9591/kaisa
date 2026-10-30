@@ -92,6 +92,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
     let outcome: GoalOutcome = run_goal(&GoalRequest {
         repository: &bench.repository(),
         goal: GOAL,
+        base: "HEAD",
         state_directory: &bench.state(),
         write_set: &write_set,
         launch: &launch,
@@ -167,6 +168,7 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
     let outcome: GoalOutcome = run_goal(&GoalRequest {
         repository: &bench.repository(),
         goal: GOAL,
+        base: "HEAD",
         state_directory: &bench.state(),
         write_set: &write_set,
         launch: &launch,
@@ -236,6 +238,7 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
     let outcome: GoalOutcome = run_goal(&GoalRequest {
         repository: &bench.repository(),
         goal: GOAL,
+        base: "HEAD",
         state_directory: &bench.state(),
         write_set: &write_set,
         launch: &launch,
@@ -294,6 +297,7 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
     let outcome: GoalOutcome = run_goal(&GoalRequest {
         repository: &bench.repository(),
         goal: GOAL,
+        base: "HEAD",
         state_directory: &bench.state(),
         write_set: &write_set,
         launch: &launch,

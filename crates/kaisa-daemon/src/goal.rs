@@ -52,6 +52,9 @@ pub struct GoalRequest<'request> {
     pub repository: &'request Path,
     /// What the user asked for.
     pub goal: &'request str,
+    /// The commit the attempt starts from: `HEAD` for a lone goal, a dependency's preserved
+    /// commit for a task of a mission.
+    pub base: &'request str,
     /// Kaisa's state directory (ledger, attempts, worktrees).
     pub state_directory: &'request Path,
     /// The paths the attempt may change.
@@ -270,8 +273,9 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         .join(attempt.as_str());
     std::fs::create_dir_all(request.state_directory.join("worktrees"))
         .map_err(at("preparing worktrees"))?;
-    let worktree: Worktree = create_worktree(request.repository, "HEAD", &branch, &worktree_path)
-        .map_err(at("creating the worktree"))?;
+    let worktree: Worktree =
+        create_worktree(request.repository, request.base, &branch, &worktree_path)
+            .map_err(at("creating the worktree"))?;
     let attempt_directory: PathBuf = request
         .state_directory
         .join("attempts")

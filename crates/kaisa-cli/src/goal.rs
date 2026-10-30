@@ -103,6 +103,7 @@ impl GoalCommand {
         match run_goal(&GoalRequest {
             repository: &repository,
             goal: &self.goal,
+            base: "HEAD",
             state_directory: &state,
             write_set: &write_set,
             launch: &launch,
