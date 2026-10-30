@@ -806,3 +806,25 @@ fn a_run_uses_the_personal_policy() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn a_trial_run_is_labelled() {
+    let bench = Workbench::new("trial");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let mut args: Vec<String> = vec!["--confine-claude".to_owned()];
+    args.extend(a_verified_run(&fake_agent, true));
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(args)
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert!(
+        stdout.contains("trial (T16.0)") && stdout.contains("api.anthropic.com"),
+        "the person is told this is a trial and what Claude Code may reach: {stdout:?}"
+    );
+}

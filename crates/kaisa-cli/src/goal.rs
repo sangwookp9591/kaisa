@@ -46,6 +46,9 @@ pub(crate) struct GoalCommand {
     reviewer_args: Vec<String>,
     /// The user's own trusted check, replacing the profile's test commands.
     check: Option<Vec<String>>,
+    /// `--confine-claude`: a T16.0 trial that runs Claude Code confined, with its provider and
+    /// session files allowed, instead of reduced.
+    confine_claude: bool,
 }
 
 impl GoalCommand {
@@ -60,6 +63,7 @@ impl GoalCommand {
         let mut goal: Vec<&str> = Vec::new();
         let mut reviewer_args: Vec<String> = Vec::new();
         let mut check: Option<Vec<String>> = None;
+        let mut confine_claude = false;
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
@@ -71,6 +75,7 @@ impl GoalCommand {
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
+                "--confine-claude" => confine_claude = true,
                 "--check-program" => check = words.next().map(|program| vec![program.clone()]),
                 "--check-arg" => {
                     if let (Some(check), Some(arg)) = (check.as_mut(), words.next()) {
@@ -85,6 +90,7 @@ impl GoalCommand {
             agent,
             reviewer_args,
             check,
+            confine_claude,
         })
     }
 
@@ -228,6 +234,30 @@ impl GoalCommand {
             launch: &first_pass_spec,
             model_port: Some(*port),
         });
+        // T16.0 trial: Claude Code confined, reaching only its provider and its session files.
+        let home: PathBuf = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let trial = self.confine_claude.then(|| {
+            crate::verified::claude_confinement(&home, &policy.policy().allowed_egress_hosts)
+        });
+        let trial_hosts: Vec<&str> = trial
+            .as_ref()
+            .map(|trial| trial.egress_hosts.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        if let Some(trial) = &trial {
+            writeln!(
+                out,
+                "trial (T16.0): Claude Code runs confined; it may reach {} and change {}",
+                trial.egress_hosts.join(", "),
+                trial
+                    .writable
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
+        }
         match run_verified_goal(&VerifiedRequest {
             repository,
             state_directory: state,
@@ -236,14 +266,17 @@ impl GoalCommand {
             developer: &developer,
             reviewer: &reviewer,
             kaisa_executable: &kaisa,
-            // Claude Code runs reduced until a confined run is verified per OS (T16.0).
-            confine_agent: self.agent.program.is_some(),
+            // Claude Code runs reduced until a confined run is verified per OS (T16.0), unless
+            // the person asked for the trial.
+            confine_agent: self.agent.program.is_some() || self.confine_claude,
             checks: &checks,
             policy: &policy,
             observed: self.agent.codex,
             first_pass,
-            egress_hosts: &[],
-            agent_writable: &[],
+            egress_hosts: &trial_hosts,
+            agent_writable: trial
+                .as_ref()
+                .map_or(&[][..], |trial| trial.writable.as_slice()),
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
@@ -348,6 +381,21 @@ fn repository_root() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::codex_args;
+
+    #[test]
+    fn the_confine_claude_switch_is_parsed() {
+        let words: Vec<String> = ["--confine-claude", "Add", "notes"]
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect();
+
+        let parsed = super::GoalCommand::parse(&words).expect("a goal is given");
+
+        assert!(
+            parsed.confine_claude && parsed.goal == "Add notes",
+            "the trial switch is a flag, not part of the goal"
+        );
+    }
 
     #[test]
     fn the_codex_developer_launch_is_valid() {

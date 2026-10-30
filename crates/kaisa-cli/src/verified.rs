@@ -16,11 +16,9 @@ use kaisa_sys::ProcessSpec;
 const FALLBACK_CLAUDE_MODEL: &str = "sonnet";
 
 /// The provider Claude Code must reach during a confined run.
-#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
 pub(crate) const CLAUDE_PROVIDER_HOST: &str = "api.anthropic.com";
 
 /// The egress and session-state permissions needed by a confined Claude Code run.
-#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
 pub(crate) struct ClaudeConfinement {
     /// The provider followed by the policy's additional allowed hosts.
     pub(crate) egress_hosts: Vec<String>,
@@ -31,7 +29,6 @@ pub(crate) struct ClaudeConfinement {
 /// Adds the policy's hosts to Claude Code's provider and grants its session-state writes.
 ///
 /// Host order is preserved; empty hosts and exact duplicates grant no additional access.
-#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
 pub(crate) fn claude_confinement(home: &Path, policy_hosts: &[String]) -> ClaudeConfinement {
     let mut egress_hosts = vec![CLAUDE_PROVIDER_HOST.to_owned()];
     for host in policy_hosts {

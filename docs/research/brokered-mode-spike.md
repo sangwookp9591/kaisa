@@ -63,3 +63,14 @@ which is the user's call.
 
 Linux and Windows need the CLIs logged in on those machines; this development machine is macOS and CI
 has no agent credentials. Running the same command there closes the row.
+
+### Closing a row (T35)
+
+On a machine with Claude Code logged in:
+
+1. Run the brokered command above; the session's tools must be exactly `["mcp__kaisa__kaisa_echo"]`.
+2. In a scratch git repository, run `kaisa --confine-claude "Add a NOTES.md that says hello"`.
+   Kaisa prints `trial (T16.0): ...` with the hosts and session paths it allows.
+3. The row closes if the run ends `verified` with the note on its branch. If Claude Code fails to start or
+   cannot reach its provider, record the error and which path or host it needed; that is the
+   allow-list finding T16.0 is waiting for.
