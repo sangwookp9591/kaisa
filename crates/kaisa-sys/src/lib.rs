@@ -4,6 +4,12 @@
 //! Design: `docs/architecture.md` §5.1, §8 and §13.
 
 #[cfg(windows)]
+#[expect(
+    dead_code,
+    reason = "used once agents start in a pseudo console (T12.6c)"
+)]
+mod conpty;
+#[cfg(windows)]
 mod job;
 #[cfg(unix)]
 mod openpty;
