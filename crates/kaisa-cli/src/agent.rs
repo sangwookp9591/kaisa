@@ -62,7 +62,7 @@ fn entry_from_json(value: &Value) -> Option<AgentEntry> {
 }
 
 /// The personal catalog saved in `state`; a missing file is an empty catalog.
-fn load(state: &Path) -> io::Result<Catalog> {
+pub(crate) fn load(state: &Path) -> io::Result<Catalog> {
     let mut catalog = Catalog::new();
     let text = match std::fs::read_to_string(state.join(CATALOG_FILE)) {
         Ok(text) => text,
