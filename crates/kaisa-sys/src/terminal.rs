@@ -336,6 +336,7 @@ mod tests {
                         .to_owned(),
                 ],
                 working_directory: std::env::temp_dir(),
+                env: Vec::new(),
             }
         } else {
             shell("read resized; stty size")

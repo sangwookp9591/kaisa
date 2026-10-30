@@ -82,6 +82,7 @@ pub fn run_to_exit(
         program: command.program.clone(),
         args: command.args.clone(),
         working_directory: command.working_directory.clone(),
+        env: Vec::new(),
     })
     .map_err(KeeperError::Spawn)?;
     let exit: ProcessExit = agent.wait().map_err(KeeperError::Wait)?;

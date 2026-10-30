@@ -104,6 +104,14 @@ pub(crate) fn create_suspended_in(
     console: &PseudoConsole,
     spec: &ProcessSpec,
 ) -> io::Result<CreatedProcess> {
+    // The console path inherits Kaisa's environment; refusing beats silently dropping
+    // variables such as an agent's proxy settings.
+    if !spec.env.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "environment variables are not applied to console processes yet",
+        ));
+    }
     let program: &str = spec.program.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

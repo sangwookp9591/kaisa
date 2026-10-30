@@ -16,6 +16,8 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     /// The working directory.
     pub working_directory: PathBuf,
+    /// Variables added to (or replacing ones in) the inherited environment.
+    pub env: Vec<(String, String)>,
 }
 
 /// How an owned process ended.
@@ -261,7 +263,8 @@ pub(crate) fn command_for(spec: &ProcessSpec) -> Command {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .current_dir(&spec.working_directory);
+        .current_dir(&spec.working_directory)
+        .envs(spec.env.iter().map(|(name, value)| (name, value)));
     command
 }
 
@@ -328,6 +331,7 @@ pub(crate) mod test_support {
             program: PathBuf::from(program),
             args,
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         }
     }
 
@@ -350,6 +354,7 @@ pub(crate) mod test_support {
                 pid_file.to_string_lossy().into_owned(),
             ],
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         }
     }
 

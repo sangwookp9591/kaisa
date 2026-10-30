@@ -87,6 +87,7 @@ pub fn sandboxed_spec(spec: &ProcessSpec, policy: &SeatbeltPolicy) -> ProcessSpe
         program: PathBuf::from(SANDBOX_EXEC),
         args,
         working_directory: spec.working_directory.clone(),
+        env: spec.env.clone(),
     }
 }
 
@@ -192,6 +193,7 @@ mod tests {
                     format!("echo changed > '{}'", target.display()),
                 ],
                 working_directory: std::env::temp_dir(),
+                env: Vec::new(),
             }
         }
 
@@ -254,6 +256,7 @@ mod tests {
                     format!("echo hello > /dev/tcp/127.0.0.1/{port}"),
                 ],
                 working_directory: std::env::temp_dir(),
+                env: Vec::new(),
             }
         }
 
@@ -322,6 +325,7 @@ mod tests {
                     socket.to_string_lossy().into_owned(),
                 ],
                 working_directory: std::env::temp_dir(),
+                env: Vec::new(),
             }
         }
 

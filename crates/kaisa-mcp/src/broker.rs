@@ -88,6 +88,7 @@ impl FileBroker {
             program: PathBuf::from(program),
             args: args.to_vec(),
             working_directory: self.root.clone(),
+            env: Vec::new(),
         };
         let confinement: Confinement<'_> = match sandbox {
             #[cfg(target_os = "macos")]

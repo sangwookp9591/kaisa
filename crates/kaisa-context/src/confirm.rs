@@ -39,6 +39,7 @@ pub fn confirm(
         program: PathBuf::from(program),
         args: args.to_vec(),
         working_directory,
+        env: Vec::new(),
     }) else {
         return Ok(with_confirmation(command, Confirmation::Failed));
     };

@@ -145,6 +145,8 @@ mod tests {
     const SMALL_CAP: usize = 16;
     /// What the command prints.
     const GREETING: &str = "hello-from-exec";
+    /// Where an agent's HTTPS traffic is sent: its egress broker.
+    const EGRESS_PROXY: &str = "http://127.0.0.1:41817";
     /// A run with nothing on standard input.
     const NO_INPUT: &[u8] = b"";
     /// A first message, as an agent receives its context pack.
@@ -224,6 +226,31 @@ mod tests {
             String::from_utf8_lossy(&run.output).trim(),
             FIRST_MESSAGE,
             "an agent receives its context pack on standard input"
+        );
+    }
+
+    #[test]
+    fn an_exec_sees_the_variables_it_was_given() {
+        let mut print_proxy = if cfg!(windows) {
+            shell("echo %HTTPS_PROXY%")
+        } else {
+            shell("echo $HTTPS_PROXY")
+        };
+        print_proxy.env = vec![("HTTPS_PROXY".to_owned(), EGRESS_PROXY.to_owned())];
+
+        let run: CapturedRun = run_captured(
+            &print_proxy,
+            &Confinement::Unconfined,
+            NO_INPUT,
+            DEADLINE,
+            usize::MAX,
+        )
+        .expect("the shell runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&run.output).trim(),
+            EGRESS_PROXY,
+            "an agent is pointed at its egress broker through its environment"
         );
     }
 }

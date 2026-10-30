@@ -59,6 +59,7 @@ impl GoalCommand {
                     program: program.clone(),
                     args,
                     working_directory: std::env::temp_dir(),
+                    env: Vec::new(),
                 }
             }
             None => ProcessSpec {
@@ -69,6 +70,7 @@ impl GoalCommand {
                     mcp_config,
                 }),
                 working_directory: std::env::temp_dir(),
+                env: Vec::new(),
             },
         }
     }

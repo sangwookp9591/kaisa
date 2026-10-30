@@ -86,6 +86,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
             NOTES.to_owned(),
         ],
         working_directory: std::env::temp_dir(),
+        env: Vec::new(),
     };
 
     let outcome: GoalOutcome = run_goal(&GoalRequest {
@@ -146,6 +147,7 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
             DIRECT_WRITE.to_owned(),
         ],
         working_directory: std::env::temp_dir(),
+        env: Vec::new(),
     };
 
     let outcome: GoalOutcome = run_goal(&GoalRequest {

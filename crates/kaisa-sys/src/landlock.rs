@@ -410,6 +410,7 @@ mod tests {
                 format!("echo changed > '{}'", target.display()),
             ],
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         }
     }
 
@@ -470,6 +471,7 @@ mod tests {
                 format!("echo hello > /dev/tcp/127.0.0.1/{port}"),
             ],
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         }
     }
 
@@ -537,6 +539,7 @@ mod tests {
                 format!("echo hello > /dev/udp/127.0.0.1/{port}"),
             ],
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         };
 
         run_confined(&agent, &ruleset);

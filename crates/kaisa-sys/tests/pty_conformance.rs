@@ -211,6 +211,7 @@ fn shell(script: &str) -> ProcessSpec {
         program: PathBuf::from(program),
         args,
         working_directory: std::env::temp_dir(),
+        env: Vec::new(),
     }
 }
 
@@ -241,6 +242,7 @@ fn an_agent_that_reports_its_size_after_a_line() -> ProcessSpec {
                     .to_owned(),
             ],
             working_directory: std::env::temp_dir(),
+            env: Vec::new(),
         }
     } else {
         shell("read resized; stty size")
