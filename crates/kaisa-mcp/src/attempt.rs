@@ -164,12 +164,8 @@ fn bridge_from(
     input: impl io::Read + Send + 'static,
     output: &mut dyn Write,
 ) -> io::Result<()> {
-    #[cfg(unix)]
-    if attempt_directory
-        .join(crate::endpoint::BROKER_ENDPOINT_FILE)
-        .exists()
-    {
-        return crate::endpoint::relay(attempt_directory, input, output);
+    if attempt_directory.join(crate::BROKER_ENDPOINT_FILE).exists() {
+        return crate::relay(attempt_directory, input, output);
     }
     serve_attempt(attempt_directory, io::BufReader::new(input), output)
 }

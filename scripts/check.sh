@@ -32,6 +32,12 @@ if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc
   cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc \
     -p kaisa-sys -p kaisa-keeper -p kaisa-domain -p kaisa-protocol -p kaisa-workspace -p kaisa-supervisor -p kaisa-egress \
     -- -D warnings
+  # blake3's C/assembly build cannot target MSVC from here; its pure-Rust build can. Crates that
+  # also need bundled SQLite (ledger, daemon, cli) still rely on the Windows CI job.
+  for crate in kaisa-mcp kaisa-context; do
+    cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -p "$crate" --features blake3/pure \
+      -- -D warnings
+  done
 fi
 if [[ "$(uname -s)" != "Linux" ]] && rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
   echo "== clippy (Linux cross-check of kaisa-sys and kaisa-mcp, compile only)"
