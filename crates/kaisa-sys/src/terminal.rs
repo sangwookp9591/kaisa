@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use crate::openpty::{self, TerminalPair};
 use crate::process::{OwnedProcess, ProcessSpec, command_for};
-use crate::pty::TerminalSize;
+use crate::pty::{PseudoTerminal, TerminalSize};
 
 /// The master side of the pseudo-terminal an agent runs in.
 #[derive(Debug)]
@@ -18,28 +18,22 @@ pub struct Terminal {
     size: TerminalSize,
 }
 
-impl Terminal {
-    /// A new handle that reads what the agent prints.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system's error if the descriptor cannot be duplicated.
-    pub fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
+impl PseudoTerminal for Terminal {
+    fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
         Ok(Box::new(File::from(self.master.try_clone()?)))
     }
 
-    /// A new handle that types input into the agent's terminal.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system's error if the descriptor cannot be duplicated.
-    pub fn writer(&self) -> io::Result<Box<dyn Write + Send>> {
+    fn writer(&self) -> io::Result<Box<dyn Write + Send>> {
         Ok(Box::new(File::from(self.master.try_clone()?)))
     }
 
-    /// The size the terminal was opened with.
-    #[must_use]
-    pub fn size(&self) -> TerminalSize {
+    fn resize(&mut self, size: TerminalSize) -> io::Result<()> {
+        openpty::set_size(&self.master, size)?;
+        self.size = size;
+        Ok(())
+    }
+
+    fn size(&self) -> TerminalSize {
         self.size
     }
 }
@@ -121,8 +115,12 @@ mod tests {
         shell, wait_for_pid_in,
     };
     use crate::process::{OwnedProcess, ProcessSpec};
-    use crate::pty::TerminalSize;
+    use crate::pty::{PseudoTerminal, TerminalSize};
 
+    /// Rows after the user enlarges the window; differs from the classic size on purpose.
+    const ENLARGED_ROWS: u16 = 40;
+    /// Columns after the user enlarges the window.
+    const ENLARGED_COLUMNS: u16 = 132;
     /// Rows of a classic text terminal.
     const CLASSIC_ROWS: u16 = 24;
     /// Columns of a classic text terminal.
@@ -237,5 +235,31 @@ mod tests {
             disappears_within_patience(grandchild),
             "a terminal session must not let background processes escape cleanup"
         );
+    }
+
+    #[test]
+    fn an_agent_sees_the_new_size_after_the_terminal_is_resized() {
+        let enlarged: TerminalSize =
+            TerminalSize::new(ENLARGED_ROWS, ENLARGED_COLUMNS).expect("an enlarged size is valid");
+        // `stty size` prints "rows columns" as the agent's terminal reports them.
+        let size_as_the_agent_reports_it: String = format!("{ENLARGED_ROWS} {ENLARGED_COLUMNS}");
+        let (mut agent, mut terminal) = started_in_a_terminal(&shell("read resized; stty size"));
+
+        terminal.resize(enlarged).expect("resizing succeeds");
+        terminal
+            .writer()
+            .expect("the terminal can be written")
+            .write_all(b"\n")
+            .expect("typing succeeds");
+        let output: String = output_until(&terminal, &size_as_the_agent_reports_it);
+        agent
+            .wait()
+            .expect("the agent exits after reporting its size");
+
+        assert!(
+            output.contains(&size_as_the_agent_reports_it),
+            "a TUI agent must redraw for the window the user actually has, got {output:?}"
+        );
+        assert_eq!(terminal.size(), enlarged, "Kaisa remembers the size it set");
     }
 }

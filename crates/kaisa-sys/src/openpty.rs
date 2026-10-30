@@ -70,6 +70,21 @@ fn close_on_exec(fd: RawFd) -> io::Result<()> {
     }
 }
 
+/// Changes the size of the terminal behind `fd`; the kernel tells the agent with SIGWINCH.
+pub(crate) fn set_size(fd: &OwnedFd, size: TerminalSize) -> io::Result<()> {
+    let window: libc::winsize = window_of(size);
+    #[allow(unsafe_code)]
+    // SAFETY: TIOCSWINSZ reads one `winsize` through the pointer, which refers to a live,
+    // correctly typed local.
+    let result: libc::c_int =
+        unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &raw const window) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// The size the kernel reports for the terminal behind `fd`.
 #[cfg(test)]
 pub(crate) fn size_seen_through(fd: &OwnedFd) -> io::Result<TerminalSize> {
