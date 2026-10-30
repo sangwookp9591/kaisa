@@ -25,7 +25,7 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -65,6 +65,7 @@ fn hresult(result: i32) -> io::Result<()> {
 pub struct AppContainerProfile {
     name: Vec<u16>,
     sid: PSID,
+    capability: Option<std::sync::Arc<CapabilitySid>>,
 }
 
 impl AppContainerProfile {
@@ -98,7 +99,30 @@ impl AppContainerProfile {
         } else {
             hresult(created)?;
         }
-        Ok(Self { name, sid })
+        Ok(Self {
+            name,
+            sid,
+            capability: None,
+        })
+    }
+
+    /// Gives processes in this container `capability`, so paths granted to the capability are
+    /// theirs too (T15.5e: one grant per installation for shared program directories).
+    #[must_use]
+    pub fn with_capability(mut self, capability: std::sync::Arc<CapabilitySid>) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    /// The capabilities a process of this container is started with.
+    fn capability_list(&self) -> Vec<SID_AND_ATTRIBUTES> {
+        self.capability
+            .iter()
+            .map(|capability| SID_AND_ATTRIBUTES {
+                Sid: capability.sid,
+                Attributes: SE_GROUP_ENABLED,
+            })
+            .collect()
     }
 
     /// Grants the container `access` to `path` and, for a directory, everything created in it.
@@ -108,7 +132,7 @@ impl AppContainerProfile {
     ///
     /// Returns the error Windows reports if the path's DACL cannot be read or written.
     pub fn grant(&self, path: &Path, access: ContainerAccess) -> io::Result<()> {
-        self.change_dacl(path, access.rights(), GRANT_ACCESS)?;
+        change_dacl(self.sid, path, access.rights(), GRANT_ACCESS)?;
         if access == ContainerAccess::Modify {
             // A container runs at low integrity; without a low label the path's default medium
             // label forbids it to write ("no write up"), whatever the DACL says (spike check 3a).
@@ -123,82 +147,8 @@ impl AppContainerProfile {
     ///
     /// Returns the error Windows reports if the path's DACL cannot be read or written.
     pub fn revoke(&self, path: &Path) -> io::Result<()> {
-        self.change_dacl(path, 0, REVOKE_ACCESS)?;
+        change_dacl(self.sid, path, 0, REVOKE_ACCESS)?;
         set_label(path, NO_EXPLICIT_LABEL)
-    }
-
-    fn change_dacl(&self, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
-        // Read-modify-write of a DACL: two attempts granting the same directory (their shared
-        // program directory) at once would otherwise lose one grant, and that agent could not
-        // start. Serialized across every thread and Kaisa process of this user session.
-        let _serialized = DaclLock::acquire()?;
-        let name: Vec<u16> = wide(path.as_os_str());
-        let mut old_dacl: *mut ACL = null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        #[allow(unsafe_code)]
-        // SAFETY: `name` is NUL-terminated; the out-pointers are live locals; the descriptor
-        // returned owns `old_dacl` and is released with LocalFree below.
-        let read: u32 = unsafe {
-            GetNamedSecurityInfoW(
-                name.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                &raw mut old_dacl,
-                null_mut(),
-                &raw mut descriptor,
-            )
-        };
-        if read != 0 {
-            return Err(io::Error::from_raw_os_error(read as i32));
-        }
-        let entry = EXPLICIT_ACCESS_W {
-            grfAccessPermissions: rights,
-            grfAccessMode: mode,
-            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-            Trustee: TRUSTEE_W {
-                pMultipleTrustee: null_mut(),
-                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-                TrusteeForm: TRUSTEE_IS_SID,
-                TrusteeType: TRUSTEE_IS_UNKNOWN,
-                ptstrName: self.sid.cast::<u16>(),
-            },
-        };
-        let mut new_dacl: *mut ACL = null_mut();
-        #[allow(unsafe_code)]
-        // SAFETY: one live entry whose trustee is this profile's SID; `old_dacl` is owned by
-        // `descriptor`, still alive; the new ACL is released with LocalFree below.
-        let merged: u32 =
-            unsafe { SetEntriesInAclW(1, &raw const entry, old_dacl, &raw mut new_dacl) };
-        let written: u32 = if merged == 0 {
-            #[allow(unsafe_code)]
-            // SAFETY: `name` is NUL-terminated and `new_dacl` is the ACL just built.
-            unsafe {
-                SetNamedSecurityInfoW(
-                    name.as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION,
-                    null_mut(),
-                    null_mut(),
-                    new_dacl,
-                    null(),
-                )
-            }
-        } else {
-            merged
-        };
-        #[allow(unsafe_code)]
-        // SAFETY: both were allocated by the calls above (or are null) and are freed once.
-        unsafe {
-            LocalFree(new_dacl as HLOCAL);
-            LocalFree(descriptor as HLOCAL);
-        }
-        if written == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(written as i32))
-        }
     }
 
     /// The container's SID as text (`S-1-15-2-…`), for security descriptors.
@@ -258,10 +208,15 @@ impl AppContainerProfile {
         let mut wide_line: Vec<u16> = wide(OsStr::new(&line));
         let wide_program: Vec<u16> = wide(OsStr::new(program));
         let wide_directory: Vec<u16> = wide(directory.as_os_str());
+        let mut granted: Vec<SID_AND_ATTRIBUTES> = self.capability_list();
         let mut capabilities = SECURITY_CAPABILITIES {
             AppContainerSid: self.sid,
-            Capabilities: null_mut(),
-            CapabilityCount: 0,
+            Capabilities: if granted.is_empty() {
+                null_mut()
+            } else {
+                granted.as_mut_ptr()
+            },
+            CapabilityCount: u32::try_from(granted.len()).unwrap_or(0),
             Reserved: 0,
         };
         let mut list = AttributeList::with_capabilities(&raw mut capabilities)?;
@@ -377,10 +332,15 @@ pub(crate) fn create_suspended_contained(
             return Err(io::Error::last_os_error());
         }
     }
+    let mut granted: Vec<SID_AND_ATTRIBUTES> = profile.capability_list();
     let mut capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: profile.sid,
-        Capabilities: null_mut(),
-        CapabilityCount: 0,
+        Capabilities: if granted.is_empty() {
+            null_mut()
+        } else {
+            granted.as_mut_ptr()
+        },
+        CapabilityCount: u32::try_from(granted.len()).unwrap_or(0),
         Reserved: 0,
     };
     let mut list = AttributeList::new(TWO_ATTRIBUTES)?;
@@ -596,6 +556,176 @@ fn set_label(path: &Path, sddl: &str) -> io::Result<()> {
         code => Err(io::Error::from_raw_os_error(code as i32)),
     }
 }
+
+/// Grants (or revokes) `sid` on `path`, serialized with every other DACL change of the user.
+fn change_dacl(sid: PSID, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
+    // Read-modify-write of a DACL: two attempts granting the same directory (their shared
+    // program directory) at once would otherwise lose one grant, and that agent could not
+    // start. Serialized across every thread and Kaisa process of this user session.
+    let _serialized = DaclLock::acquire()?;
+    let name: Vec<u16> = wide(path.as_os_str());
+    let mut old_dacl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: `name` is NUL-terminated; the out-pointers are live locals; the descriptor
+    // returned owns `old_dacl` and is released with LocalFree below.
+    let read: u32 = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &raw mut old_dacl,
+            null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if read != 0 {
+        return Err(io::Error::from_raw_os_error(read as i32));
+    }
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: rights,
+        grfAccessMode: mode,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.cast::<u16>(),
+        },
+    };
+    let mut new_dacl: *mut ACL = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: one live entry whose trustee is this profile's SID; `old_dacl` is owned by
+    // `descriptor`, still alive; the new ACL is released with LocalFree below.
+    let merged: u32 = unsafe { SetEntriesInAclW(1, &raw const entry, old_dacl, &raw mut new_dacl) };
+    let written: u32 = if merged == 0 {
+        #[allow(unsafe_code)]
+        // SAFETY: `name` is NUL-terminated and `new_dacl` is the ACL just built.
+        unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                new_dacl,
+                null(),
+            )
+        }
+    } else {
+        merged
+    };
+    #[allow(unsafe_code)]
+    // SAFETY: both were allocated by the calls above (or are null) and are freed once.
+    unsafe {
+        LocalFree(new_dacl as HLOCAL);
+        LocalFree(descriptor as HLOCAL);
+    }
+    if written == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(written as i32))
+    }
+}
+
+/// `SE_GROUP_ENABLED`: the capability is in force for the process.
+const SE_GROUP_ENABLED: u32 = 4;
+
+/// A capability SID derived from a name; every Kaisa container is started with the same one,
+/// so shared program directories are granted to it once instead of to each container.
+#[derive(Debug)]
+pub struct CapabilitySid {
+    sid: PSID,
+}
+
+impl CapabilitySid {
+    /// The capability SID for `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the SID cannot be derived.
+    pub fn derive(name: &str) -> io::Result<Self> {
+        use windows_sys::Win32::Security::DeriveCapabilitySidsFromName;
+        let wide_name: Vec<u16> = wide(OsStr::new(name));
+        let mut group_sids: *mut PSID = null_mut();
+        let mut group_count: u32 = 0;
+        let mut sids: *mut PSID = null_mut();
+        let mut count: u32 = 0;
+        #[allow(unsafe_code)]
+        // SAFETY: the name is NUL-terminated; the four out-pointers are live locals that
+        // receive LocalAlloc'd arrays of LocalAlloc'd SIDs, all released below except the one
+        // capability SID kept (released on drop).
+        let derived: i32 = unsafe {
+            DeriveCapabilitySidsFromName(
+                wide_name.as_ptr(),
+                &raw mut group_sids,
+                &raw mut group_count,
+                &raw mut sids,
+                &raw mut count,
+            )
+        };
+        if derived == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        #[allow(unsafe_code)]
+        // SAFETY: the arrays hold `group_count` and `count` SIDs as the call reported.
+        let kept: PSID = unsafe {
+            for index in 0..group_count as usize {
+                LocalFree(*group_sids.add(index) as HLOCAL);
+            }
+            LocalFree(group_sids as HLOCAL);
+            let kept: PSID = if count > 0 { *sids } else { null_mut() };
+            for index in 1..count as usize {
+                LocalFree(*sids.add(index) as HLOCAL);
+            }
+            LocalFree(sids as HLOCAL);
+            kept
+        };
+        if kept.is_null() {
+            return Err(io::Error::other("no capability SID was derived"));
+        }
+        Ok(Self { sid: kept })
+    }
+
+    /// Grants every container holding this capability `access` to `path`. Granting again is
+    /// harmless, so this is done at each start rather than tracked.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the DACL cannot be read or written.
+    pub fn grant(&self, path: &Path, access: ContainerAccess) -> io::Result<()> {
+        change_dacl(self.sid, path, access.rights(), GRANT_ACCESS)
+    }
+
+    /// Removes this capability's ACEs from `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the DACL cannot be read or written.
+    pub fn revoke(&self, path: &Path) -> io::Result<()> {
+        change_dacl(self.sid, path, 0, REVOKE_ACCESS)
+    }
+}
+
+impl Drop for CapabilitySid {
+    fn drop(&mut self) {
+        #[allow(unsafe_code)]
+        // SAFETY: the SID was LocalAlloc'd by DeriveCapabilitySidsFromName and is freed once.
+        unsafe {
+            LocalFree(self.sid as HLOCAL);
+        }
+    }
+}
+
+// SAFETY: the SID is written once by `derive` and only read afterwards; freed once on drop.
+#[allow(unsafe_code)]
+unsafe impl Send for CapabilitySid {}
+// SAFETY: as above.
+#[allow(unsafe_code)]
+unsafe impl Sync for CapabilitySid {}
 
 /// What a container may do with a granted path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1108,6 +1238,50 @@ mod tests {
         assert!(
             other_had_released,
             "a second Kaisa process changes DACLs only after the first one has finished"
+        );
+    }
+
+    #[test]
+    fn a_directory_granted_to_the_shared_capability_is_readable_only_with_it() {
+        let capability = std::sync::Arc::new(
+            super::CapabilitySid::derive(&format!("kaisaTestPrograms{}", std::process::id()))
+                .expect("a capability SID is derived"),
+        );
+        let programs: PathBuf = a_user_directory("capability-programs");
+        std::fs::write(programs.join("tool.txt"), "shared tool").expect("writable");
+        capability
+            .grant(&programs, ContainerAccess::ReadExecute)
+            .expect("granted once");
+        let holder =
+            a_profile("with-capability").with_capability(std::sync::Arc::clone(&capability));
+        let stranger = a_profile("without-capability");
+        let read = |profile: &AppContainerProfile| {
+            profile
+                .run(
+                    CMD,
+                    &[
+                        "/c".to_owned(),
+                        format!("type {}", programs.join("tool.txt").display()),
+                    ],
+                    &system_directory(),
+                )
+                .expect("starts")
+        };
+
+        let holder_exit: u32 = read(&holder);
+        let stranger_exit: u32 = read(&stranger);
+        let _ = capability.revoke(&programs);
+        let _ = holder.delete();
+        let _ = stranger.delete();
+        let _ = std::fs::remove_dir_all(&programs);
+
+        assert_eq!(
+            holder_exit, 0,
+            "a container holding the shared capability reads the shared programs"
+        );
+        assert_ne!(
+            stranger_exit, 0,
+            "a container without it does not: the grant names the capability, not every SID"
         );
     }
 }

@@ -22,21 +22,31 @@ pub(crate) enum AgentSandbox {
 #[cfg(windows)]
 pub(crate) struct ContainedAttempt {
     profile: kaisa_sys::AppContainerProfile,
+    programs: std::sync::Arc<kaisa_sys::CapabilitySid>,
     granted: Vec<PathBuf>,
 }
+
+/// The capability every Kaisa container holds; shared program directories are granted to it
+/// once, so attempts never rewrite a shared directory's DACL per run (T15.5e).
+#[cfg(windows)]
+const AGENT_PROGRAMS_CAPABILITY: &str = "kaisaAgentPrograms";
 
 #[cfg(windows)]
 impl ContainedAttempt {
     /// Creates the attempt's container and records its SID in `attempt_directory`, so the
     /// broker created next admits it (T15.5b2).
     pub(crate) fn create(attempt_directory: &Path, name: &str) -> std::io::Result<Self> {
-        let profile = kaisa_sys::AppContainerProfile::ensure(name)?;
+        let programs =
+            std::sync::Arc::new(kaisa_sys::CapabilitySid::derive(AGENT_PROGRAMS_CAPABILITY)?);
+        let profile = kaisa_sys::AppContainerProfile::ensure(name)?
+            .with_capability(std::sync::Arc::clone(&programs));
         std::fs::write(
             attempt_directory.join(kaisa_mcp::CONTAINER_SID_FILE),
             profile.sid_string()?,
         )?;
         Ok(Self {
             profile,
+            programs,
             granted: Vec::new(),
         })
     }
