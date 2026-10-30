@@ -80,11 +80,15 @@ pub enum EventKind {
     IntentRecorded,
     /// An outbox effect finished and produced a receipt.
     IntentCompleted,
+    /// A planned task was handed to an attempt (the subject is the task).
+    TaskStarted,
+    /// A planned task is done; tasks waiting on it may start (the subject is the task).
+    TaskFinished,
 }
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -97,6 +101,8 @@ impl EventKind {
         Self::AttemptStateChanged,
         Self::IntentRecorded,
         Self::IntentCompleted,
+        Self::TaskStarted,
+        Self::TaskFinished,
     ];
 
     /// Stable textual code used in storage and in the canonical encoding.
@@ -115,6 +121,8 @@ impl EventKind {
             Self::AttemptStateChanged => "attempt.state_changed",
             Self::IntentRecorded => "outbox.intent_recorded",
             Self::IntentCompleted => "outbox.intent_completed",
+            Self::TaskStarted => "task.started",
+            Self::TaskFinished => "task.finished",
         }
     }
 
