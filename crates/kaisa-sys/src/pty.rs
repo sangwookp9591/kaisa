@@ -7,6 +7,8 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+use crate::process::OwnedProcess;
+
 /// The visible size of a terminal, in character cells. Neither dimension may be zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSize {
@@ -92,18 +94,18 @@ pub trait PseudoTerminal {
     /// The size the terminal currently has.
     fn size(&self) -> TerminalSize;
 
-    /// Closes the terminal and returns everything the agent printed that was not read yet.
+    /// Waits for `agent` to exit while collecting what it prints, then closes the terminal
+    /// and returns everything that was not read yet.
     ///
-    /// Call it once the agent has finished or is finishing. It closes the terminal in the
-    /// order that loses nothing: on Windows the remaining output is read while the pseudo
-    /// console closes, because closing it may wait until that output has been read. On macOS
-    /// an agent cannot even finish exiting while its output is unread, so a keeper must keep
-    /// reading for as long as the agent runs.
+    /// Reading and waiting happen together because each OS punishes doing them one after the
+    /// other: on macOS an agent cannot finish exiting while its output is unread, and on
+    /// Windows closing the pseudo console before the agent is done loses its last output.
     ///
     /// # Errors
     ///
-    /// Returns the operating system's error if the remaining output cannot be read.
-    fn drain(self) -> io::Result<Vec<u8>>
+    /// Returns the operating system's error if the output cannot be read or the agent cannot
+    /// be waited for.
+    fn drain(self, agent: &mut OwnedProcess) -> io::Result<Vec<u8>>
     where
         Self: Sized;
 }

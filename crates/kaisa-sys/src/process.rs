@@ -142,6 +142,13 @@ impl OwnedProcess {
             .map_or(ProcessExit::Terminated, ProcessExit::Code))
     }
 
+    /// True once the process has exited, without waiting. The exit status stays available
+    /// to [`wait`](Self::wait).
+    #[cfg(unix)]
+    pub(crate) fn has_exited(&mut self) -> io::Result<bool> {
+        Ok(self.child.try_wait()?.is_some())
+    }
+
     /// Ends the process and everything it started (its process group on Unix, its Job Object
     /// on Windows). Ending a process that already exited is not an error; its leftover
     /// children are still ended, because an agent may leave background processes behind.

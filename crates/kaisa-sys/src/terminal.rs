@@ -73,15 +73,18 @@ impl PseudoTerminal for Terminal {
     }
 
     #[cfg(unix)]
-    fn drain(self) -> io::Result<Vec<u8>> {
+    fn drain(self, agent: &mut OwnedProcess) -> io::Result<Vec<u8>> {
         let mut remaining: Vec<u8> = Vec::new();
         let mut buffer = [0_u8; DRAIN_CHUNK];
         let mut master = File::from(self.master);
         // macOS keeps a read of the master waiting even after every slave is closed, and its
-        // `poll` does not work on terminals. So reads never block, and the end is "no new
-        // output for a quiet period" unless the OS reports end of file first.
+        // `poll` does not work on terminals. So reads never block, and the end is "the agent
+        // has exited and no new output came for a quiet period", unless the OS reports end of
+        // file first. Reading all along also matters: on macOS an agent cannot finish exiting
+        // while its output is unread.
         openpty::set_nonblocking(&master)?;
         let mut last_output: Instant = Instant::now();
+        let mut agent_exited: bool = false;
         loop {
             match master.read(&mut buffer) {
                 Ok(0) => break,
@@ -90,7 +93,10 @@ impl PseudoTerminal for Terminal {
                     last_output = Instant::now();
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if last_output.elapsed() >= DRAIN_QUIET_PERIOD {
+                    if !agent_exited {
+                        agent_exited = agent.has_exited()?;
+                    }
+                    if agent_exited && last_output.elapsed() >= DRAIN_QUIET_PERIOD {
                         break;
                     }
                     std::thread::sleep(DRAIN_POLL_INTERVAL);
@@ -105,34 +111,39 @@ impl PseudoTerminal for Terminal {
     }
 
     #[cfg(windows)]
-    fn drain(self) -> io::Result<Vec<u8>> {
+    fn drain(self, agent: &mut OwnedProcess) -> io::Result<Vec<u8>> {
         let Terminal {
             console,
             input,
             output,
             size: _,
         } = self;
-        drop(input);
-        // Read on another thread first: closing the console may block until its output pipe
-        // is drained, and the pipe only reaches end of file once the console is closed.
+        // Read on another thread from the start: the agent may block writing into a full pipe,
+        // closing the console may wait until its output is drained, and the pipe only reaches
+        // end of file once the console is closed.
         let reader = std::thread::spawn(move || {
             let mut remaining: Vec<u8> = Vec::new();
             File::from(output)
                 .read_to_end(&mut remaining)
                 .map(|_| remaining)
         });
+        // The console must stay open until the agent is done, or its last output is lost.
+        let waited: io::Result<crate::process::ProcessExit> = agent.wait();
         drop(console);
-        reader
+        drop(input);
+        let remaining: Vec<u8> = reader
             .join()
-            .map_err(|_| io::Error::other("the output reader panicked"))?
+            .map_err(|_| io::Error::other("the output reader panicked"))??;
+        waited?;
+        Ok(remaining)
     }
 }
 
 /// How many bytes a drain reads at a time.
 #[cfg(unix)]
 const DRAIN_CHUNK: usize = 4096;
-/// How long a drain waits for more output before deciding there is none. A drain runs once
-/// the agent has finished or is finishing, so this only covers output still on its way.
+/// How long a drain waits for more output after the agent exited before deciding there is
+/// none; covers output still on its way through the kernel.
 #[cfg(unix)]
 const DRAIN_QUIET_PERIOD: Duration = Duration::from_millis(500);
 /// How often a drain looks for more output during the quiet period.
@@ -472,16 +483,11 @@ mod tests {
     fn the_last_output_of_an_agent_is_not_lost_when_the_terminal_closes() {
         let (mut agent, terminal) = started_in_a_terminal(&shell(&format!("echo {FAREWELL}")));
 
-        // Drained while the agent exits: on macOS closing a terminal waits until its output
-        // is read, so an agent nobody reads from can never finish exiting.
         let remaining: Vec<u8> = terminal
-            .drain()
+            .drain(&mut agent)
             .expect("the rest of the output can be read");
-        agent
-            .wait()
-            .expect("the agent exits once its output was read");
-        agent.kill_tree().expect("leftovers are cleaned up");
         let output: String = String::from_utf8_lossy(&remaining).into_owned();
+        agent.kill_tree().expect("leftovers are cleaned up");
 
         assert!(
             output.contains(FAREWELL),
