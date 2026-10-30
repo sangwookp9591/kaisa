@@ -76,6 +76,7 @@ mod tests {
             profile: &ProjectProfile::default(),
             findings: &[],
             impact: &[],
+            diff: "",
         })
     }
 

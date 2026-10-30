@@ -37,8 +37,6 @@ const FIRST_INCARNATION: u64 = 1;
 const AGENT_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 /// How much of the agent's output is kept as its transcript, in bytes.
 const TRANSCRIPT_CAP: usize = 4 * 1024 * 1024;
-/// Token budget of a developer's context pack in M0.
-const DEVELOPER_PACK_BUDGET: usize = 32_000;
 /// Build output a worktree may contain without being preserved.
 pub(crate) const BUILD_OUTPUT: [&str; 3] = ["target", "node_modules", ".venv"];
 
@@ -262,8 +260,9 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         profile: &profile,
         findings: &[],
         impact: &[],
+        diff: "",
     })
-    .fit(DEVELOPER_PACK_BUDGET)
+    .fit(kaisa_context::budget_for(request.role))
     .map_err(at("fitting the context pack"))?;
     let digest = pack.digest();
     ledger

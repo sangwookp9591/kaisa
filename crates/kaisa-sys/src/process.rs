@@ -235,7 +235,15 @@ impl OwnedProcess {
     /// Ends the process group led by the child, then the child itself if it still runs.
     #[cfg(unix)]
     fn end_tree(&mut self) -> io::Result<()> {
-        unix::kill_process_group(self.child.id())?;
+        match unix::kill_process_group(self.child.id()) {
+            Ok(()) => {}
+            // macOS answers EPERM, not ESRCH, when the group holds only exited, unreaped
+            // members: there is nothing left to end once the leader is known to have exited.
+            Err(error)
+                if error.raw_os_error() == Some(libc::EPERM)
+                    && self.child.try_wait()?.is_some() => {}
+            Err(error) => return Err(error),
+        }
         #[cfg(target_os = "linux")]
         if let Some(pidfd) = &self.pidfd {
             // Addresses exactly our child, even if its PID was reused.
@@ -540,6 +548,25 @@ mod tests {
             "a natural exit stays a natural exit even if cleanup runs afterwards"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn killing_the_tree_of_an_exited_unreaped_agent_is_not_an_error() {
+        let mut process: OwnedProcess = started(&a_process_that_exits_with(AGENT_FAILURE_CODE));
+        // Leave it unreaped long enough to be a zombie: the state a drained agent is in.
+        std::thread::sleep(ZOMBIE_SETTLE);
+
+        let killed = process.kill_tree();
+
+        assert!(
+            killed.is_ok(),
+            "cleanup of an agent that already ended must not fail: {killed:?}"
+        );
+    }
+
+    /// Long enough for a process that exits at once to have exited.
+    #[cfg(unix)]
+    const ZOMBIE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 
     #[cfg(unix)]
     mod unix_tree {
