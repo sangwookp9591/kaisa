@@ -33,7 +33,7 @@ pub use control_pipe::ControlPipe;
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
-pub use seatbelt::{SeatbeltPolicy, seatbelt_profile};
+pub use seatbelt::{SeatbeltPolicy, sandboxed_spec, seatbelt_profile};
 #[cfg(unix)]
 pub use state_dir::PRIVATE_MODE;
 pub use state_dir::{

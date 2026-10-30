@@ -6,6 +6,12 @@
 
 use std::path::PathBuf;
 
+use crate::process::ProcessSpec;
+
+/// The macOS tool that runs a program under a Seatbelt profile; it execs the program in place,
+/// so process-group ownership is unchanged.
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
 /// What one attempt's Seatbelt profile allows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SeatbeltPolicy {
@@ -58,6 +64,23 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
     profile
 }
 
+/// `spec` wrapped so that it runs under the Seatbelt profile of `policy`.
+#[must_use]
+pub fn sandboxed_spec(spec: &ProcessSpec, policy: &SeatbeltPolicy) -> ProcessSpec {
+    let mut args: Vec<String> = vec![
+        "-p".to_owned(),
+        seatbelt_profile(policy),
+        "--".to_owned(),
+        spec.program.to_string_lossy().into_owned(),
+    ];
+    args.extend(spec.args.iter().cloned());
+    ProcessSpec {
+        program: PathBuf::from(SANDBOX_EXEC),
+        args,
+        working_directory: spec.working_directory.clone(),
+    }
+}
+
 /// `text` as an SBPL string literal: wrapped in quotes, with backslashes and quotes escaped.
 fn sbpl_string(text: &str) -> String {
     let mut literal: String = String::with_capacity(text.len() + 2);
@@ -106,5 +129,96 @@ mod tests {
             !profile.contains("(subpath \"/\")"),
             "a directory name must never become a rule that opens the whole disk, got {profile:?}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    mod enforced {
+        use std::path::{Path, PathBuf};
+
+        use super::super::{SeatbeltPolicy, sandboxed_spec};
+        use crate::process::{OwnedProcess, ProcessExit, ProcessSpec};
+
+        /// A worktree with an owned directory and one the attempt does not own.
+        struct ScratchWorktree {
+            root: PathBuf,
+        }
+
+        impl ScratchWorktree {
+            fn new(name: &str) -> Self {
+                let root: PathBuf = std::env::temp_dir()
+                    .join(format!("kaisa-seatbelt-{name}-{}", std::process::id()));
+                for directory in ["src/auth", "src/billing"] {
+                    std::fs::create_dir_all(root.join(directory)).expect("writable temp dir");
+                }
+                // Seatbelt matches canonical paths: /var is /private/var on macOS.
+                let root: PathBuf = root.canonicalize().expect("the directory exists");
+                Self { root }
+            }
+
+            fn path(&self, relative: &str) -> PathBuf {
+                self.root.join(relative)
+            }
+        }
+
+        impl Drop for ScratchWorktree {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        /// The attempt owns `src/auth` only.
+        fn an_auth_only_policy(worktree: &ScratchWorktree) -> SeatbeltPolicy {
+            SeatbeltPolicy {
+                writable: vec![worktree.path("src/auth")],
+                ..SeatbeltPolicy::default()
+            }
+        }
+
+        /// An agent that writes one file with the shell, as any build script could.
+        fn an_agent_writing(target: &Path) -> ProcessSpec {
+            ProcessSpec {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_owned(),
+                    format!("echo changed > '{}'", target.display()),
+                ],
+                working_directory: std::env::temp_dir(),
+            }
+        }
+
+        fn run_sandboxed(spec: &ProcessSpec, policy: &SeatbeltPolicy) -> ProcessExit {
+            OwnedProcess::spawn(&sandboxed_spec(spec, policy))
+                .expect("sandbox-exec is part of macOS")
+                .wait()
+                .expect("the agent exits")
+        }
+
+        #[test]
+        fn a_sandboxed_agent_cannot_write_outside_its_write_set() {
+            let worktree = ScratchWorktree::new("outside");
+            let foreign: PathBuf = worktree.path("src/billing/invoice.rs");
+
+            run_sandboxed(&an_agent_writing(&foreign), &an_auth_only_policy(&worktree));
+
+            assert!(
+                !foreign.exists(),
+                "a shell started by the agent must not write outside the write set"
+            );
+        }
+
+        #[test]
+        fn a_sandboxed_agent_can_write_inside_its_write_set() {
+            let worktree = ScratchWorktree::new("inside");
+            let owned: PathBuf = worktree.path("src/auth/session.rs");
+
+            let exit: ProcessExit =
+                run_sandboxed(&an_agent_writing(&owned), &an_auth_only_policy(&worktree));
+
+            assert_eq!(
+                (exit, owned.exists()),
+                (ProcessExit::Code(0), true),
+                "the sandbox must not stop the work the agent was given"
+            );
+        }
     }
 }
