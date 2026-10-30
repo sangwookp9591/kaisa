@@ -326,7 +326,7 @@ fn a_personal_agent_is_added_from_the_cli_without_an_admin() {
             "add",
             "ollama",
             "--endpoint",
-            "http://localhost:11434/v1",
+            &format!("http://127.0.0.1:{}/v1", a_local_model_server()),
             "--model",
             "llama3=T1",
         ],
@@ -479,5 +479,73 @@ fn a_cli_agent_that_does_not_run_is_not_registered() {
         accepted.status.success(),
         "a program that answers --version is registered: {:?}",
         String::from_utf8_lossy(&accepted.stderr)
+    );
+}
+
+/// Starts a one-shot OpenAI-compatible server on loopback that answers "ok"; returns its port.
+fn a_local_model_server() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+    let port: u16 = listener.local_addr().expect("bound").port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            // Read the whole request (headers, then Content-Length bytes) before answering, so
+            // closing the connection never resets a client still sending its body.
+            let mut request: Vec<u8> = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length: usize = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + "\r\n\r\n".len() + length {
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn an_unreachable_model_server_is_not_registered() {
+    let bench = Workbench::new("model-unreachable");
+    let state: PathBuf = bench.base.join("state");
+    let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+    let port: u16 = closed.local_addr().expect("bound").port();
+    drop(closed);
+
+    let refused = kaisa_agent(
+        &state,
+        &[
+            "add",
+            "silent",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}/v1"),
+            "--model",
+            "m=T1",
+        ],
+    );
+
+    assert!(
+        !refused.status.success(),
+        "a model server that does not answer is never offered to the router"
     );
 }

@@ -97,10 +97,11 @@ const CONFORMANCE_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 const CONFORMANCE_OUTPUT_CAP: usize = 4096;
 
 /// The conformance check run before an entry is saved (user-flows F37): a CLI agent must start
-/// and answer `--version`. A local model endpoint is checked once its client lands (T28b).
+/// and answer `--version`; a local model server must answer a one-line chat with each model.
 fn conforms(entry: &AgentEntry) -> Result<(), String> {
-    let AgentKind::CliAgent { program } = &entry.kind else {
-        return Ok(());
+    let program: &String = match &entry.kind {
+        AgentKind::CliAgent { program } => program,
+        AgentKind::OpenAiCompatible { endpoint } => return model_server_answers(endpoint, entry),
     };
     let spec = kaisa_sys::ProcessSpec {
         program: PathBuf::from(program),
@@ -119,6 +120,20 @@ fn conforms(entry: &AgentEntry) -> Result<(), String> {
         Ok(_) => Err(format!("{program} --version did not succeed")),
         Err(error) => Err(format!("{program} does not run: {error}")),
     }
+}
+
+/// Asks every model of `entry` for one short reply through `endpoint`.
+fn model_server_answers(endpoint: &str, entry: &AgentEntry) -> Result<(), String> {
+    let local = kaisa_agents::LocalEndpoint::parse(endpoint).map_err(|error| error.to_string())?;
+    let probe = [kaisa_agents::ChatMessage {
+        role: "user".to_owned(),
+        content: "Reply with the word ok.".to_owned(),
+    }];
+    for model in &entry.models {
+        kaisa_agents::chat(&local, &model.id, &probe, CONFORMANCE_DEADLINE)
+            .map_err(|error| format!("{} did not answer through {endpoint}: {error}", model.id))?;
+    }
+    Ok(())
 }
 
 /// Parsed `kaisa agent add <name> (--program <p> | --endpoint <url>) --model <id>=<T0..T3>…`.
