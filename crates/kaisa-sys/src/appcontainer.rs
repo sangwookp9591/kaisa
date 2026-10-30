@@ -482,4 +482,37 @@ mod tests {
             "spike check 6: the grant can be removed again"
         );
     }
+
+    /// curl.exe, shipped in System32 since Windows 10 1803.
+    const CURL: &str = r"C:\Windows\System32\curl.exe";
+
+    #[test]
+    fn a_contained_process_cannot_reach_a_loopback_listener() {
+        let profile = a_profile("loopback");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+        listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let port: u16 = listener.local_addr().expect("bound").port();
+
+        let exit = profile.run(
+            CURL,
+            &[
+                "--silent".to_owned(),
+                "--max-time".to_owned(),
+                "5".to_owned(),
+                format!("http://127.0.0.1:{port}/"),
+            ],
+            &system_directory(),
+        );
+        let reached: bool = listener.accept().is_ok();
+        let _ = profile.delete();
+
+        assert!(exit.is_ok(), "curl starts inside the container: {exit:?}");
+        assert!(
+            !reached,
+            "spike check 4a: loopback is closed to a container, so its broker must not be a TCP \
+             port on Windows"
+        );
+    }
 }
