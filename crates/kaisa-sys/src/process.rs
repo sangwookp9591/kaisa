@@ -34,6 +34,9 @@ pub struct OwnedProcess {
     /// Set once Kaisa ends the process, so the exit is reported as [`ProcessExit::Terminated`]
     /// on every OS (Windows reports a killed process as exit code 1).
     ended_by_us: bool,
+    /// The Job Object that contains the process and everything it starts.
+    #[cfg(windows)]
+    job: crate::job::Job,
 }
 
 impl OwnedProcess {
@@ -53,11 +56,48 @@ impl OwnedProcess {
             // together by signalling the group.
             std::os::unix::process::CommandExt::process_group(&mut command, 0);
         }
+        #[cfg(windows)]
+        {
+            // Suspended until it is inside its job, so it cannot start a child outside it.
+            std::os::windows::process::CommandExt::creation_flags(
+                &mut command,
+                crate::job::CREATE_SUSPENDED,
+            );
+        }
         let child: Child = command.spawn()?;
+        Self::adopt(child)
+    }
+
+    #[cfg(not(windows))]
+    fn adopt(child: Child) -> io::Result<Self> {
         Ok(Self {
             child,
             ended_by_us: false,
         })
+    }
+
+    #[cfg(windows)]
+    fn adopt(mut child: Child) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        let contained: io::Result<crate::job::Job> = crate::job::Job::new().and_then(|job| {
+            job.assign(child.as_raw_handle())?;
+            crate::job::resume_threads_of(child.id())?;
+            Ok(job)
+        });
+        match contained {
+            Ok(job) => Ok(Self {
+                child,
+                ended_by_us: false,
+                job,
+            }),
+            Err(error) => {
+                // Never leave a suspended, uncontained process behind.
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(error)
+            }
+        }
     }
 
     /// The operating system's process id. Only meaningful while the process is owned.
@@ -81,28 +121,44 @@ impl OwnedProcess {
             .map_or(ProcessExit::Terminated, ProcessExit::Code))
     }
 
-    /// Ends the process and everything it started (its process group on Unix). Ending a
-    /// process that already exited is not an error; on Unix its leftover children are still
-    /// ended, because an agent may leave background processes behind.
+    /// Ends the process and everything it started (its process group on Unix, its Job Object
+    /// on Windows). Ending a process that already exited is not an error; its leftover
+    /// children are still ended, because an agent may leave background processes behind.
     ///
     /// # Errors
     ///
     /// Returns the operating system's error if the process could not be ended.
     pub fn kill_tree(&mut self) -> io::Result<()> {
         let already_exited: bool = self.child.try_wait()?.is_some();
-        #[cfg(unix)]
-        {
-            unix::kill_process_group(self.child.id())?;
+        if !already_exited {
+            self.ended_by_us = true;
         }
-        if already_exited {
-            return Ok(());
-        }
-        self.ended_by_us = true;
+        self.end_tree()
+    }
+
+    /// Ends the process group led by the child, then the child itself if it still runs.
+    #[cfg(unix)]
+    fn end_tree(&mut self) -> io::Result<()> {
+        unix::kill_process_group(self.child.id())?;
         match self.child.kill() {
-            // The process exited between the check and the kill.
+            // Already exited (and possibly already reaped).
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
             other => other,
         }
+    }
+
+    /// Ends every process in the job, including the child.
+    #[cfg(windows)]
+    fn end_tree(&mut self) -> io::Result<()> {
+        self.job.terminate()
+    }
+}
+
+#[cfg(all(windows, test))]
+impl OwnedProcess {
+    /// How many processes are alive in this process's job.
+    pub(crate) fn processes_in_job(&self) -> io::Result<u32> {
+        self.job.active_processes()
     }
 }
 
@@ -174,6 +230,14 @@ pub(crate) mod test_support {
             ],
             working_directory: std::env::temp_dir(),
         }
+    }
+
+    /// A command shell that starts a background child and keeps running itself.
+    #[cfg(windows)]
+    pub(crate) fn a_process_that_starts_a_background_child_on_windows() -> ProcessSpec {
+        shell(&format!(
+            "start /B ping -n {LONG_RUNNING_SECONDS} 127.0.0.1 > nul & ping -n {LONG_RUNNING_SECONDS} 127.0.0.1 > nul"
+        ))
     }
 
     /// A process that keeps running long enough for a test to end it.
@@ -319,6 +383,68 @@ mod tests {
 
             assert!(
                 disappears_within_patience(grandchild),
+                "a background process left by the agent must not survive cleanup"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows_tree {
+        use std::time::{Duration, Instant};
+
+        use super::super::OwnedProcess;
+        use super::super::test_support::a_process_that_starts_a_background_child_on_windows;
+
+        /// How long the test waits for the job to reach the expected size.
+        const PATIENCE: Duration = Duration::from_secs(10);
+        /// How often it checks while waiting.
+        const POLL_INTERVAL: Duration = Duration::from_millis(20);
+        /// The shell plus the background child it started.
+        const AGENT_AND_ITS_CHILD: u32 = 2;
+        /// A job whose processes have all ended.
+        const NO_PROCESSES: u32 = 0;
+
+        fn job_reaches(agent: &OwnedProcess, expected: impl Fn(u32) -> bool) -> bool {
+            let deadline: Instant = Instant::now() + PATIENCE;
+            while Instant::now() < deadline {
+                if expected(agent.processes_in_job().expect("the job can be queried")) {
+                    return true;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            false
+        }
+
+        #[test]
+        fn the_job_contains_the_agent_and_the_children_it_starts() {
+            let mut agent =
+                OwnedProcess::spawn(&a_process_that_starts_a_background_child_on_windows())
+                    .expect("cmd is available");
+
+            let grew: bool = job_reaches(&agent, |alive| alive >= AGENT_AND_ITS_CHILD);
+            agent.kill_tree().expect("ending the tree succeeds");
+
+            assert!(
+                grew,
+                "a child started by the agent must land in the agent's job"
+            );
+        }
+
+        #[test]
+        fn killing_the_tree_also_ends_a_grandchild() {
+            let mut agent =
+                OwnedProcess::spawn(&a_process_that_starts_a_background_child_on_windows())
+                    .expect("cmd is available");
+            assert!(
+                job_reaches(&agent, |alive| alive >= AGENT_AND_ITS_CHILD),
+                "the background child must start before the test can end it"
+            );
+
+            agent.kill_tree().expect("ending the tree succeeds");
+            agent.wait().expect("the agent is reaped");
+
+            assert!(
+                job_reaches(&agent, |alive| alive == NO_PROCESSES),
                 "a background process left by the agent must not survive cleanup"
             );
         }

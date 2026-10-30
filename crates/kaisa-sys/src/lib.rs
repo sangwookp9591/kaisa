@@ -3,6 +3,8 @@
 //!
 //! Design: `docs/architecture.md` §5.1, §8 and §13.
 
+#[cfg(windows)]
+mod job;
 mod process;
 
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
