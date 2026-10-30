@@ -9,4 +9,6 @@ mod claude;
 mod codex;
 
 pub use claude::{ClaudeLaunch, claude_brokered_argv, first_message};
-pub use codex::{CodexLaunch, CodexLaunchError, TrustMode, codex_observed_argv, codex_trust_mode};
+pub use codex::{
+    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_observed_argv, codex_trust_mode,
+};
