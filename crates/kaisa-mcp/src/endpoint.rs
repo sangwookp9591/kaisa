@@ -79,6 +79,32 @@ impl BrokerEndpoint {
     }
 }
 
+/// Relays an agent's MCP stream to its attempt's broker and back, performing no effects itself:
+/// what `kaisa mcp --attempt` does when the broker runs outside the agent's sandbox.
+///
+/// # Errors
+///
+/// Returns the I/O error if the token cannot be read, the broker cannot be reached, or the
+/// stream breaks.
+pub fn relay(
+    attempt_directory: &Path,
+    mut input: impl io::Read + Send + 'static,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    let token: AttemptToken = AttemptToken::load(attempt_directory)?;
+    let mut stream: UnixStream = UnixStream::connect(attempt_directory.join(BROKER_SOCKET))?;
+    writeln!(stream, "{}", json!({"token": token.as_str()}))?;
+    let mut upstream: UnixStream = stream.try_clone()?;
+    let forward = std::thread::spawn(move || -> io::Result<()> {
+        io::copy(&mut input, &mut upstream)?;
+        upstream.shutdown(std::net::Shutdown::Write)
+    });
+    io::copy(&mut stream, output)?;
+    forward
+        .join()
+        .map_err(|_| io::Error::other("the relay's forwarding thread panicked"))?
+}
+
 impl Drop for BrokerEndpoint {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -94,7 +120,7 @@ mod tests {
     use kaisa_domain::{RepoPath, Role, WriteSet};
     use serde_json::json;
 
-    use super::{BROKER_SOCKET, BrokerEndpoint};
+    use super::{BROKER_SOCKET, BrokerEndpoint, relay};
     use crate::attempt::BridgeConfig;
     use crate::token::AttemptToken;
 
@@ -194,6 +220,54 @@ mod tests {
         assert!(
             reply.contains("another attempt") && !attempt.base.join("w/src/auth/notes.md").exists(),
             "a caller without the capability is refused before any tool runs; got {reply}"
+        );
+    }
+
+    #[test]
+    fn the_relay_performs_no_file_writes_itself() {
+        let attempt = Attempt::new("relay");
+        let listener =
+            std::os::unix::net::UnixListener::bind(attempt.directory().join(BROKER_SOCKET))
+                .expect("a stand-in broker binds");
+        let stand_in = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("the relay connects");
+            let received: Vec<String> = BufReader::new(stream.try_clone().expect("cloned"))
+                .lines()
+                .map(|line| line.expect("readable"))
+                .collect();
+            writeln!(
+                &stream,
+                "{}",
+                json!({"jsonrpc": "2.0", "id": 1, "result": {}})
+            )
+            .expect("sent");
+            received
+        });
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "fs_write", "arguments": {"path": "src/auth/notes.md", "content": "x"}}});
+        let mut agent_sees: Vec<u8> = Vec::new();
+
+        relay(
+            &attempt.directory(),
+            std::io::Cursor::new(format!("{request}\n")),
+            &mut agent_sees,
+        )
+        .expect("the relay runs");
+        let broker_received: Vec<String> = stand_in.join().expect("the stand-in finishes");
+
+        assert_eq!(
+            broker_received.len(),
+            2,
+            "the broker receives the token hello and the agent's request, nothing else"
+        );
+        assert!(
+            broker_received[1].contains("fs_write")
+                && !attempt.base.join("w/src/auth/notes.md").exists(),
+            "the write request was forwarded, and the relay itself changed no file"
+        );
+        assert!(
+            String::from_utf8_lossy(&agent_sees).contains("\"result\""),
+            "the broker's reply reaches the agent"
         );
     }
 }
