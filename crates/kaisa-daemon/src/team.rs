@@ -43,6 +43,9 @@ pub struct VerifiedRequest<'request> {
     /// Whether the developer is an observed agent (Codex), whose writes are checked against
     /// the write set only after it finishes.
     pub observed: bool,
+    /// A light first-pass reviewer on a local model (F37, T33): its blocking findings send the
+    /// candidate back without spending the full review; its approval is only advisory.
+    pub first_pass: Option<AgentLauncher<'request>>,
 }
 
 /// How a verified goal ended.
@@ -184,6 +187,38 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             &candidate,
             request.checks,
         )?;
+        if let Some(first_pass) = request.first_pass {
+            let glanced: GoalOutcome = run_goal(&GoalRequest {
+                repository: request.repository,
+                goal: &review_instruction(request.goal, &candidate),
+                base: &candidate.commit,
+                state_directory: request.state_directory,
+                write_set: &no_paths,
+                role: Role::Reviewer,
+                launch: first_pass,
+                kaisa_executable: request.kaisa_executable,
+                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                egress_hosts: &[],
+                agent_writable: &[],
+                local_model_port: None,
+                observed: false,
+            })?;
+            let glance: Option<ReviewVerdict> =
+                verdict_from(request.state_directory, &glanced, &candidate.tree);
+            attempts.push(glanced);
+            // Only a send-back is acted on; anything else still goes to the full review.
+            if let Some(glance) = glance
+                && let Delivery::Revise(reasons) =
+                    decide_delivery(&candidate, &evidence, Some(&glance))
+            {
+                if !budget.take() {
+                    return Ok(finish(Delivery::Revise(reasons), Some(candidate), attempts));
+                }
+                base = candidate.commit.clone();
+                instruction = revision_goal(request.goal, &reasons);
+                continue;
+            }
+        }
         let reviewed: GoalOutcome = run_goal(&GoalRequest {
             repository: request.repository,
             goal: &review_instruction(request.goal, &candidate),

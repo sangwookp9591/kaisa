@@ -145,6 +145,7 @@ fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
         checks: &[the_projects_test_command()],
         policy: &a_policy(true),
         observed: false,
+        first_pass: None,
     })
     .expect("the team run completes")
 }
@@ -278,6 +279,7 @@ fn an_observed_change_outside_the_write_set_needs_a_person() {
         checks: &[the_projects_test_command()],
         policy: &a_policy(true),
         observed: true,
+        first_pass: None,
     })
     .expect("the team run completes");
 
@@ -285,5 +287,77 @@ fn an_observed_change_outside_the_write_set_needs_a_person() {
         matches!(&outcome.delivery, Delivery::NeedsPerson(reason) if reason.contains(OUTSIDE_THE_WRITE_SET)),
         "a write the broker never saw is caught before delivery and named: {:?}",
         outcome.delivery
+    );
+}
+
+/// A team run with a first-pass reviewer requiring `first_pass_requires` and a full reviewer
+/// requiring `reviewer_requires`.
+fn a_team_run_with_a_first_pass(
+    bench: &Workbench,
+    first_pass_requires: &str,
+    reviewer_requires: &str,
+) -> VerifiedOutcome {
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let developer = |mcp_config: &Path| scripted(mcp_config, &["--fake-write-next", STEP_PREFIX]);
+    let first_pass =
+        |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", first_pass_requires]);
+    let reviewer =
+        |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", reviewer_requires]);
+    run_verified_goal(&VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &bench.base.join("state"),
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[the_projects_test_command()],
+        policy: &a_policy(true),
+        observed: false,
+        first_pass: Some(&first_pass),
+    })
+    .expect("the team run completes")
+}
+
+/// Attempts in a first-pass run: developer, first pass, developer, first pass, full review.
+const ATTEMPTS_WITH_ONE_FIRST_PASS_SEND_BACK: usize = 5;
+/// Attempts when the first pass approves but the full review sends back once: developer,
+/// first pass and full review, twice.
+const ATTEMPTS_WHEN_THE_FULL_REVIEW_OVERRULES: usize = 6;
+
+#[test]
+fn a_first_pass_blocking_finding_revises_without_the_full_review() {
+    let bench = Workbench::new("first-pass-revise");
+
+    let outcome: VerifiedOutcome = a_team_run_with_a_first_pass(&bench, SECOND_STEP, FIRST_STEP);
+
+    assert!(
+        matches!(outcome.delivery, Delivery::Deliver { .. }) && outcome.revisions == 1,
+        "the first pass sent the candidate back once and the revised one was delivered: {:?}",
+        outcome.delivery
+    );
+    assert_eq!(
+        outcome.attempts.len(),
+        ATTEMPTS_WITH_ONE_FIRST_PASS_SEND_BACK,
+        "the full review ran only on the revised candidate, never on the one sent back"
+    );
+}
+
+#[test]
+fn a_first_pass_approval_still_needs_the_full_review() {
+    let bench = Workbench::new("first-pass-advisory");
+
+    let outcome: VerifiedOutcome = a_team_run_with_a_first_pass(&bench, FIRST_STEP, SECOND_STEP);
+
+    assert!(
+        matches!(outcome.delivery, Delivery::Deliver { .. }) && outcome.revisions == 1,
+        "the full reviewer's blocking finding overruled the first pass's approval once: {:?}",
+        outcome.delivery
+    );
+    assert_eq!(
+        outcome.attempts.len(),
+        ATTEMPTS_WHEN_THE_FULL_REVIEW_OVERRULES,
+        "the full review ran after every first-pass approval"
     );
 }

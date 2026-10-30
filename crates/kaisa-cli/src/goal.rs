@@ -204,6 +204,7 @@ impl GoalCommand {
             checks: &checks,
             policy: &policy,
             observed: self.agent.codex,
+            first_pass: None,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
