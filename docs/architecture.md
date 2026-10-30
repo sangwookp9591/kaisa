@@ -249,8 +249,9 @@ The rules that connect the axes:
 
 | Concept | Meaning |
 |---|---|
-| **Run** | A goal with a plan, budget and policy. It holds the coordinator epoch. |
-| **Task** | A unit of work with a self-contained spec (target, change, constraints, ownership, acceptance), a **role** and dependencies. |
+| **Mission** | What the user asked for (`kaisa "<goal>"`). It owns the budget, the policy snapshot and the delivery: a Mission is done only when its result passes the delivery gate (§5.8). |
+| **Run** | A plan under one coordinator epoch. A Mission has one root Run; a large Mission splits into **sub-runs**, each with its own coordinator and a slice of the budget (§5.13). |
+| **Task** | A unit of work with a self-contained spec (target, change, constraints, acceptance), a **role**, dependencies, a **write set** (paths it may change) and a **grade** (§5.10). |
 | **Attempt** | One execution of a Task by one agent or model in one workspace. It carries a `generation`. |
 | **Gate** | A decision that needs **human authority** or policy. It is required at every permission boundary and for every uncertain effect. |
 
@@ -264,7 +265,24 @@ The rules that connect the axes:
 | tester | own worktree | write in worktree, exec via broker | read, write, exec | T1 |
 | reviewer | clean snapshot checkout | read-only, no egress | read, diff, report | T1–T2, different model from the implementer |
 | security | clean snapshot checkout | read-only, no egress | read, diff, report | T2, `never_downgrade` |
+| documentation | own worktree, write set limited to docs paths | write in worktree, no exec | read, write, edit, search | T1 |
 | coordinator | none | no filesystem access; no exec | coordinator MCP tools only | T2 |
+
+**Lightweight attempts.** Read-only roles (researcher, architect, reviewer, security) need no
+worktree of their own: they share one read-only snapshot checkout per revision and one keeper per
+host slot. A heavy attempt (developer, tester, documentation) gets a worktree, a keeper and a
+sandbox. This is what makes large teams affordable (§5.13); the cost of each kind is a measured
+budget (§15).
+
+**Write-set ownership (scheduler invariant).** Every writing Task declares its write set as path
+globs, proposed by the coordinator and checked by Kaisa against the repository index (§5.9).
+- Two Tasks whose write sets overlap are never in progress at the same time. The scheduler orders
+  them; it does not ask the LLM to remember.
+- The broker refuses a write outside the attempt's write set and turns it into a question for the
+  coordinator ("this change also needs `src/auth/session.rs` — widen the write set?").
+- The **impact set** — files that import or test what the write set changes, from the repository
+  index — is added to the Task's verification (§5.8). This is how "fixing A broke B" is caught
+  before delivery instead of after.
 
 **The daemon does the mechanical work.**
 - **Dispatch.** Ready Tasks are dispatched in waves under the concurrency, budget and admission limits (§5.10).
