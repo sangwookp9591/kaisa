@@ -22,7 +22,44 @@ pub fn derive_profile(root: &Path) -> io::Result<ProjectProfile> {
     if package_json.is_file() {
         add_node(&mut profile, root, &std::fs::read_to_string(&package_json)?)?;
     }
+    let pyproject = root.join("pyproject.toml");
+    if pyproject.is_file() {
+        add_python(&mut profile, &std::fs::read_to_string(&pyproject)?);
+    }
+    if root.join("go.mod").is_file() {
+        add_go(&mut profile);
+    }
     Ok(profile)
+}
+
+fn add_python(profile: &mut ProjectProfile, manifest: &str) {
+    profile.languages.push(Language::Python);
+    // A test command only when the project shows it uses pytest; otherwise none is invented.
+    if manifest.contains("[tool.pytest") || manifest.contains("pytest") {
+        profile.commands.push(detected(
+            Language::Python,
+            Purpose::Test,
+            &["python", "-m", "pytest"],
+        ));
+    }
+    if manifest.contains("[tool.ruff") {
+        profile.commands.push(detected(
+            Language::Python,
+            Purpose::Lint,
+            &["ruff", "check", "."],
+        ));
+    }
+}
+
+fn add_go(profile: &mut ProjectProfile) {
+    profile.languages.push(Language::Go);
+    for (purpose, argv) in [
+        (Purpose::Build, &["go", "build", "./..."][..]),
+        (Purpose::Test, &["go", "test", "./..."][..]),
+        (Purpose::Lint, &["go", "vet", "./..."][..]),
+    ] {
+        profile.commands.push(detected(Language::Go, purpose, argv));
+    }
 }
 
 /// What `npm init` writes as the test script: a placeholder, not a test suite.
@@ -109,6 +146,12 @@ mod tests {
     /// What `npm init` leaves behind as the test script.
     const NPM_INIT_PACKAGE_JSON: &str = r#"{ "name": "fresh", "scripts": { "test": "echo \"Error: no test specified\" && exit 1" } }"#;
 
+    /// A Python project configured for pytest.
+    const PYTEST_PYPROJECT: &str =
+        "[project]\nname = \"billing\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n";
+    /// A Go module file.
+    const GO_MOD: &str = "module example.com/payments\n\ngo 1.25\n";
+
     /// The manifest of a small Cargo workspace.
     const CARGO_WORKSPACE_MANIFEST: &str = "[workspace]\nmembers = [\"crates/*\"]\n";
 
@@ -190,6 +233,35 @@ mod tests {
             argv_for(&profile, Purpose::Test),
             None,
             "a script that always fails with 'no test specified' is not a test suite"
+        );
+    }
+
+    #[test]
+    fn a_pyproject_with_pytest_is_detected_as_python() {
+        let project: ScratchProject =
+            ScratchProject::with_files(&[("pyproject.toml", PYTEST_PYPROJECT)]);
+
+        let profile: ProjectProfile =
+            derive_profile(project.root()).expect("the manifest is readable");
+
+        assert_eq!(
+            (profile.languages.clone(), argv_for(&profile, Purpose::Test)),
+            (vec![Language::Python], Some(vec!["python", "-m", "pytest"])),
+            "pytest configuration means the tests run through pytest"
+        );
+    }
+
+    #[test]
+    fn a_go_module_is_detected_as_go() {
+        let project: ScratchProject = ScratchProject::with_files(&[("go.mod", GO_MOD)]);
+
+        let profile: ProjectProfile =
+            derive_profile(project.root()).expect("the manifest is readable");
+
+        assert_eq!(
+            (profile.languages.clone(), argv_for(&profile, Purpose::Test)),
+            (vec![Language::Go], Some(vec!["go", "test", "./..."])),
+            "a Go module tests every package below it"
         );
     }
 }
