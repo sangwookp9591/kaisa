@@ -6,7 +6,7 @@ use std::path::Path;
 use kaisa_domain::{Event, EventKind, RecordedEvent, Sequence};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::chain::{ChainHash, ChainedEvent};
+use crate::chain::{ChainBreak, ChainHash, ChainedEvent, verify_chain};
 
 /// Schema of the event log. Rows are only ever inserted.
 const SCHEMA: &str = "
@@ -33,6 +33,8 @@ pub enum StoreError {
         /// What was wrong with it.
         reason: &'static str,
     },
+    /// The stored events do not form an unbroken chain.
+    ChainBroken(ChainBreak),
 }
 
 impl fmt::Display for StoreError {
@@ -45,6 +47,7 @@ impl fmt::Display for StoreError {
             } => {
                 write!(f, "ledger row {stored_sequence} is corrupt: {reason}")
             }
+            Self::ChainBroken(chain_break) => write!(f, "{chain_break}"),
         }
     }
 }
@@ -54,6 +57,7 @@ impl std::error::Error for StoreError {
         match self {
             Self::Sqlite(error) => Some(error),
             Self::Corrupt { .. } => None,
+            Self::ChainBroken(chain_break) => Some(chain_break),
         }
     }
 }
@@ -140,6 +144,17 @@ impl EventStore {
             })
         })?;
         rows.map(|row| decode_row(row?)).collect()
+    }
+
+    /// Re-reads the whole log and checks that it forms an unbroken hash chain from genesis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::ChainBroken`] at the first inconsistent position, or another
+    /// [`StoreError`] if the log cannot be read.
+    pub fn verify(&self) -> Result<(), StoreError> {
+        let chain: Vec<ChainedEvent> = self.read_from(Sequence::FIRST)?;
+        verify_chain(&chain).map_err(StoreError::ChainBroken)
     }
 
     /// Number of events recorded so far.
@@ -312,6 +327,31 @@ pub(crate) mod test_support {
         )
     }
 
+    /// Someone with file access rewrites the subject of the event at `sequence`, bypassing Kaisa.
+    pub(crate) fn an_attacker_rewrites_the_subject_of(
+        ledger: &std::path::Path,
+        sequence: kaisa_domain::Sequence,
+    ) {
+        let connection = rusqlite::Connection::open(ledger).expect("the ledger file opens");
+        connection
+            .execute(
+                "UPDATE events SET subject = 'att_forged' WHERE sequence = ?1",
+                [i64::try_from(sequence.value()).expect("test sequences are small")],
+            )
+            .expect("the attacker's edit succeeds");
+    }
+
+    /// Someone with file access deletes the event at `sequence`, bypassing Kaisa.
+    pub(crate) fn an_attacker_deletes(ledger: &std::path::Path, sequence: kaisa_domain::Sequence) {
+        let connection = rusqlite::Connection::open(ledger).expect("the ledger file opens");
+        connection
+            .execute(
+                "DELETE FROM events WHERE sequence = ?1",
+                [i64::try_from(sequence.value()).expect("test sequences are small")],
+            )
+            .expect("the attacker's delete succeeds");
+    }
+
     /// A path where no ledger exists yet.
     pub(crate) fn a_ledger_path_that_does_not_exist_yet() -> ScratchLedger {
         let directory: PathBuf = std::env::temp_dir().join(format!(
@@ -328,12 +368,13 @@ pub(crate) mod test_support {
 mod tests {
     use kaisa_domain::{EventKind, Sequence};
 
-    use super::EventStore;
     use super::test_support::{
-        ScratchLedger, a_ledger_path_that_does_not_exist_yet, attempt_41a_admitted,
-        attempt_41a_running, run_41_started,
+        ScratchLedger, a_ledger_path_that_does_not_exist_yet, an_attacker_deletes,
+        an_attacker_rewrites_the_subject_of, attempt_41a_admitted, attempt_41a_running,
+        run_41_started,
     };
-    use crate::chain::{ChainHash, ChainedEvent};
+    use super::{EventStore, StoreError};
+    use crate::chain::{BreakReason, ChainBreak, ChainHash, ChainedEvent};
 
     /// Each call to `append` records exactly this many events.
     const EVENTS_PER_APPEND: u64 = 1;
@@ -575,6 +616,63 @@ mod tests {
             after_restart.hash,
             last_before_restart.hash.link(&after_restart.recorded),
             "the chain continues from the last hash written before the restart"
+        );
+    }
+
+    /// Where in run 41's history the attempt was admitted.
+    fn admission_of(history: &[ChainedEvent]) -> Sequence {
+        history
+            .iter()
+            .find(|chained| chained.recorded.event.kind == EventKind::AttemptAdmitted)
+            .expect("run 41's history contains an admission")
+            .recorded
+            .sequence
+    }
+
+    #[test]
+    fn an_untouched_store_verifies_cleanly() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, _history) = a_ledger_with_run_41_history(&scratch);
+
+        assert!(
+            store.verify().is_ok(),
+            "a ledger written only by Kaisa must verify"
+        );
+    }
+
+    #[test]
+    fn a_row_edited_on_disk_fails_verification_at_that_event() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let edited: Sequence = admission_of(&history);
+
+        an_attacker_rewrites_the_subject_of(&scratch.path(), edited);
+
+        assert!(
+            matches!(
+                store.verify(),
+                Err(StoreError::ChainBroken(ChainBreak { at, reason: BreakReason::HashMismatch }))
+                    if at == edited
+            ),
+            "an edit made outside Kaisa must be reported exactly where it happened"
+        );
+    }
+
+    #[test]
+    fn a_row_deleted_on_disk_fails_verification_at_its_position() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let (store, history) = a_ledger_with_run_41_history(&scratch);
+        let deleted: Sequence = admission_of(&history);
+
+        an_attacker_deletes(&scratch.path(), deleted);
+
+        assert!(
+            matches!(
+                store.verify(),
+                Err(StoreError::ChainBroken(ChainBreak { at, reason: BreakReason::SequenceGap }))
+                    if at == deleted
+            ),
+            "a deletion made outside Kaisa must be reported where the event is missing"
         );
     }
 }
