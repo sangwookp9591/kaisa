@@ -1,7 +1,7 @@
 //! Kaisa command-line front end.
 //!
-//! Design: `docs/user-flows.md` §7. Only `--version` and `--help` exist so far; every
-//! other command reports that it is not implemented yet instead of pretending to work.
+//! Design: `docs/user-flows.md` §7. A goal, `watch`, `agent` and `policy` work; every other
+//! command reports that it is not implemented yet instead of pretending to work.
 
 use std::io;
 use std::io::Write;
@@ -42,16 +42,29 @@ const PLANNED_COMMANDS: [&str; 16] = [
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const HELP: &str = "\
-Kaisa — run coding agents safely (M0: one brokered agent per goal; more is planned)
+Kaisa — run coding agents safely
 
 Usage:
-  kaisa \"<goal>\"     run one agent on the goal in this repository and preserve its work
-  kaisa watch        follow progress       (planned)
-  kaisa review       approve results       (planned)
+  kaisa \"<goal>\"           a developer agent works on the goal, your checks and a reviewer judge
+                           the result, and only a verified candidate is delivered
+  kaisa watch              attempts, their state, tokens and cost, from the ledger
+  kaisa review             approve results       (planned)
+
+More commands:
+  kaisa agent add|list     register a personal agent or a local model server
+  kaisa policy show|set    view or change your personal policy
+
+Goal options:
+  --agent codex            Codex develops (observed); Claude Code reviews
+  --check-program <path> [--check-arg <arg>]...
+                           your own trusted check instead of the project's tests
+  --confine-claude         try a confined Claude Code run (T16.0 trial)
+
+Exit codes: 0 verified, 3 waiting for you, 4 not delivered, 64 usage error.
 
 Options:
-  -h, --help         show this help
-  -V, --version      show the version
+  -h, --help               show this help
+  -V, --version            show the version
 ";
 
 /// Runs the CLI with `args` (excluding the program name) and returns the exit status.
@@ -159,6 +172,23 @@ mod tests {
             assert!(
                 transcript.stdout.contains(verb),
                 "help must teach the three-verb surface (user-flows U1), missing `{verb}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_lists_the_commands_that_work_without_calling_them_planned() {
+        let transcript: Transcript = user_types(&["--help"]);
+
+        for working in ["kaisa watch", "kaisa agent", "kaisa policy"] {
+            let line: &str = transcript
+                .stdout
+                .lines()
+                .find(|line| line.contains(working))
+                .unwrap_or_default();
+            assert!(
+                !line.is_empty() && !line.contains("(planned)"),
+                "`{working}` works, so help lists it and does not call it planned: {line:?}"
             );
         }
     }
