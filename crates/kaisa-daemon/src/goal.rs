@@ -40,7 +40,7 @@ const TRANSCRIPT_CAP: usize = 4 * 1024 * 1024;
 /// Token budget of a developer's context pack in M0.
 const DEVELOPER_PACK_BUDGET: usize = 32_000;
 /// Build output a worktree may contain without being preserved.
-const BUILD_OUTPUT: [&str; 3] = ["target", "node_modules", ".venv"];
+pub(crate) const BUILD_OUTPUT: [&str; 3] = ["target", "node_modules", ".venv"];
 
 /// Builds the agent's command from the path of its MCP config.
 pub type AgentLauncher<'launcher> = &'launcher dyn Fn(&Path) -> ProcessSpec;
@@ -161,7 +161,7 @@ impl fmt::Display for GoalError {
 
 impl std::error::Error for GoalError {}
 
-fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError {
+pub(crate) fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError {
     move |error| GoalError {
         step,
         detail: error.to_string(),
@@ -185,7 +185,7 @@ fn record(
         .map_err(at("recording an event"))
 }
 
-fn record_execution(
+pub(crate) fn record_execution(
     ledger: &mut EventStore,
     attempt: &AttemptId,
     execution: Execution,
@@ -198,7 +198,7 @@ fn record_execution(
     )
 }
 
-fn record_cleanup(
+pub(crate) fn record_cleanup(
     ledger: &mut EventStore,
     attempt: &AttemptId,
     cleanup: Cleanup,

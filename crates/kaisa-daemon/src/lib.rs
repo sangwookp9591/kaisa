@@ -5,9 +5,11 @@
 
 mod goal;
 mod ids;
+mod recover;
 mod sandbox;
 
 pub use goal::{
     AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
     whole_repository,
 };
+pub use recover::{Recovered, recover_abandoned};

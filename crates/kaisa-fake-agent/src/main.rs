@@ -12,7 +12,8 @@
 //! [other flags]`
 //!
 //! `--crash-after-write` aborts the agent right after its brokered write, leaving its bridge
-//! running, as a crashing CLI would (chaos suite, T16.6).
+//! running, as a crashing CLI would; `--hang-after-write` keeps running instead, so a test can
+//! kill Kaisa under a live agent (chaos suite, T16.6).
 //!
 //! The network probes work the same way: `--try-direct-connect` fails the agent if a direct
 //! connection succeeds, and `--expect-proxy-refuses` fails it unless the proxy in
@@ -50,6 +51,9 @@ fn proxy_status_for(host: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())?;
     Ok(status)
 }
+
+/// How long a hanging agent waits: far longer than any test runs.
+const HANG: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
@@ -135,6 +139,9 @@ fn run() -> Result<(), String> {
     }
     if flag_present(&args, "--crash-after-write") {
         std::process::abort();
+    }
+    if flag_present(&args, "--hang-after-write") {
+        std::thread::sleep(HANG);
     }
     let _ = bridge.wait();
     if refused {

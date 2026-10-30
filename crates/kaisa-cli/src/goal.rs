@@ -91,6 +91,14 @@ impl GoalCommand {
         let write_set = whole_repository(&repository)?;
         let kaisa: PathBuf = std::env::current_exe()?;
         let launch = |mcp_config: &Path| self.launch_spec(mcp_config);
+        match kaisa_daemon::recover_abandoned(&repository, &state) {
+            Ok(recovered) => {
+                for attempt in recovered {
+                    writeln!(out, "{}", attempt.summary())?;
+                }
+            }
+            Err(error) => writeln!(err, "kaisa: recovery of earlier attempts failed: {error}")?,
+        }
         writeln!(out, "▶ {}", self.goal)?;
         match run_goal(&GoalRequest {
             repository: &repository,
