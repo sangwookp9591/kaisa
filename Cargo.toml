@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "bin/kaisa",
     "crates/kaisa-cli",
+    "crates/kaisa-context",
     "crates/kaisa-daemon",
     "crates/kaisa-domain",
     "crates/kaisa-keeper",
@@ -24,6 +25,7 @@ publish = false
 [workspace.dependencies]
 kaisa-cli = { path = "crates/kaisa-cli" }
 kaisa-daemon = { path = "crates/kaisa-daemon" }
+kaisa-context = { path = "crates/kaisa-context" }
 kaisa-domain = { path = "crates/kaisa-domain" }
 kaisa-keeper = { path = "crates/kaisa-keeper" }
 kaisa-ledger = { path = "crates/kaisa-ledger" }

@@ -118,6 +118,13 @@ name = "kaisa-cli"
 version = "0.0.0"
 
 [[package]]
+name = "kaisa-context"
+version = "0.0.0"
+dependencies = [
+ "kaisa-domain",
+]
+
+[[package]]
 name = "kaisa-daemon"
 version = "0.0.0"
 

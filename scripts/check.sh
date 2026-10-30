@@ -26,7 +26,7 @@ if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc
   # for MSVC from macOS/Linux. The real Windows CI runner checks everything.
   echo "== clippy (Windows cross-check of crates without C build steps, compile only)"
   cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc \
-    -p kaisa-sys -p kaisa-keeper -p kaisa-domain -p kaisa-protocol -p kaisa-workspace \
+    -p kaisa-sys -p kaisa-keeper -p kaisa-domain -p kaisa-protocol -p kaisa-workspace -p kaisa-context \
     -p kaisa-cli -p kaisa -- -D warnings
 fi
 if [[ "$(uname -s)" != "Linux" ]] && rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
