@@ -27,6 +27,9 @@ pub enum RiskRule {
     CodexApprovalNever,
     /// Codex disables sandbox containment.
     CodexDangerFullAccess,
+    /// A settings file Kaisa could not read as settings (a symlink, oversized, not UTF-8, or
+    /// malformed). An agent may still load it, so it is reported, never skipped.
+    Unscannable,
 }
 
 /// One rule matched in an agent settings file.
@@ -40,12 +43,61 @@ pub struct RiskFinding {
     pub excerpt: String,
 }
 
+/// Which kind of agent settings file a repository path is, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsFile {
+    Claude,
+    Codex,
+    Mcp,
+}
+
+fn settings_file(relative: &Path) -> Option<SettingsFile> {
+    let parent = relative.parent().and_then(Path::file_name);
+    let name = relative.file_name()?;
+    if parent.is_some_and(|parent| parent == ".claude")
+        && (name == "settings.json" || name == "settings.local.json")
+    {
+        Some(SettingsFile::Claude)
+    } else if parent.is_some_and(|parent| parent == ".codex") && name == "config.toml" {
+        Some(SettingsFile::Codex)
+    } else if relative == Path::new(".mcp.json") {
+        Some(SettingsFile::Mcp)
+    } else {
+        None
+    }
+}
+
+fn relative_text(relative: &Path) -> String {
+    relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn bounded_excerpt(excerpt: &str) -> String {
+    let mut end = excerpt.len().min(MAX_RISK_EXCERPT_BYTES);
+    while !excerpt.is_char_boundary(end) {
+        end -= 1;
+    }
+    excerpt[..end].to_owned()
+}
+
+fn unscannable(relative: &Path, why: &str) -> RiskFinding {
+    RiskFinding {
+        path: relative_text(relative),
+        rule: RiskRule::Unscannable,
+        excerpt: why.to_owned(),
+    }
+}
+
 /// Scans Claude and Codex settings throughout a repository and its root `.mcp.json`.
 ///
 /// Findings are sorted by path, then rule, with one finding per rule per file. Symlinks
-/// (including a symlinked repository root), `.git` directories, and files larger than
-/// [`MAX_SETTINGS_FILE_BYTES`] are skipped. Filesystem and malformed-JSON errors are
-/// returned to the caller rather than treating unreadable settings as safe.
+/// are never followed and `.git` is not entered. A settings file Kaisa cannot read as settings
+/// (a symlink, larger than [`MAX_SETTINGS_FILE_BYTES`], not UTF-8, or malformed) is reported as
+/// [`RiskRule::Unscannable`]: an agent may still load it, so it is never silently skipped.
+/// Filesystem errors are returned to the caller.
 ///
 /// This checks symlink metadata before opening files; callers must keep the repository
 /// quiescent during scanning to prevent concurrent replacements of checked paths.
@@ -59,32 +111,30 @@ pub fn scan_settings(repository: &Path) -> io::Result<Vec<RiskFinding>> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             let kind = entry.file_type()?;
+            let path = entry.path();
+            let relative = path.strip_prefix(repository).map_err(io::Error::other)?;
+            let settings: Option<SettingsFile> = settings_file(relative);
             if kind.is_symlink() {
+                // An agent would follow the link; Kaisa never does, so it says so instead.
+                let settings_directory: bool = relative
+                    .file_name()
+                    .is_some_and(|name| name == ".claude" || name == ".codex");
+                if settings.is_some() || settings_directory {
+                    findings.push(unscannable(relative, "a symlink, not followed"));
+                }
                 continue;
             }
-            let path = entry.path();
             if kind.is_dir() {
                 if entry.file_name() != ".git" {
                     directories.push(path);
                 }
                 continue;
             }
-            if !kind.is_file() {
+            let (true, Some(settings)) = (kind.is_file(), settings) else {
                 continue;
-            }
-            let relative = path.strip_prefix(repository).map_err(io::Error::other)?;
-            let parent = relative.parent().and_then(Path::file_name);
-            let name = relative.file_name();
-            let claude = parent.is_some_and(|name| name == ".claude")
-                && name
-                    .is_some_and(|name| name == "settings.json" || name == "settings.local.json");
-            let codex = parent.is_some_and(|name| name == ".codex")
-                && name.is_some_and(|name| name == "config.toml");
-            let mcp = relative == Path::new(".mcp.json");
-            if !claude && !codex && !mcp {
-                continue;
-            }
+            };
             if entry.metadata()?.len() > MAX_SETTINGS_FILE_BYTES as u64 {
+                findings.push(unscannable(relative, "larger than the scan limit"));
                 continue;
             }
             // Bound the actual read too, in case the file grows after the metadata check.
@@ -93,31 +143,27 @@ pub fn scan_settings(repository: &Path) -> io::Result<Vec<RiskFinding>> {
                 .take(MAX_SETTINGS_FILE_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)?;
             if bytes.len() > MAX_SETTINGS_FILE_BYTES {
+                findings.push(unscannable(relative, "larger than the scan limit"));
                 continue;
             }
-            let contents = String::from_utf8(bytes)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let rules = if codex {
-                codex_rules(&contents)
-            } else {
-                json_rules(&contents, mcp).map_err(|error| {
-                    io::Error::new(error.kind(), format!("{}: {error}", relative.display()))
-                })?
+            let Ok(contents) = String::from_utf8(bytes) else {
+                findings.push(unscannable(relative, "not UTF-8"));
+                continue;
             };
-            let relative = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            for (rule, excerpt) in rules {
-                let mut end = excerpt.len().min(MAX_RISK_EXCERPT_BYTES);
-                while !excerpt.is_char_boundary(end) {
-                    end -= 1;
+            let rules = match settings {
+                SettingsFile::Codex => codex_rules(&contents),
+                SettingsFile::Claude | SettingsFile::Mcp => {
+                    match json_rules(&contents, settings == SettingsFile::Mcp) {
+                        Ok(rules) => rules,
+                        Err(error) => vec![(RiskRule::Unscannable, error.to_string())],
+                    }
                 }
+            };
+            for (rule, excerpt) in rules {
                 findings.push(RiskFinding {
-                    path: relative.clone(),
+                    path: relative_text(relative),
                     rule,
-                    excerpt: excerpt[..end].to_owned(),
+                    excerpt: bounded_excerpt(&excerpt),
                 });
             }
         }
@@ -466,7 +512,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_symlinked_settings_file_is_never_followed() {
+    fn a_symlinked_settings_file_is_reported_and_never_followed() {
         let repository = a_repository_with_one_commit_on_main();
         let outside = repository.sibling("outside.json");
         fs::write(&outside, r#"{"hooks":{}}"#).expect("outside fixture is writable");
@@ -478,11 +524,19 @@ mod tests {
             repository.path().join(".codex"),
         )
         .expect("directory symlink can be created");
-        assert!(
-            scan_settings(repository.path())
-                .expect("symlinks are skipped")
-                .is_empty(),
-            "neither settings symlinks nor directory symlinks may be followed"
+
+        let findings = scan_settings(repository.path()).expect("settings can be scanned");
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| (finding.path.as_str(), finding.rule))
+                .collect::<Vec<_>>(),
+            vec![
+                (".claude/settings.json", RiskRule::Unscannable),
+                (".codex", RiskRule::Unscannable),
+            ],
+            "links an agent would follow are reported, and their targets are never read"
         );
     }
 
@@ -595,7 +649,7 @@ sandbox_mode = """danger-full-access"""
     }
 
     #[test]
-    fn oversized_settings_are_skipped_and_malformed_json_returns_an_error() {
+    fn oversized_or_malformed_settings_are_reported_as_unscannable_never_skipped() {
         let repository = a_repository_with_one_commit_on_main();
         write_settings(
             repository.path(),
@@ -603,24 +657,25 @@ sandbox_mode = """danger-full-access"""
             &" ".repeat(MAX_SETTINGS_FILE_BYTES + 1),
             "add oversized settings",
         );
-        assert!(
-            scan_settings(repository.path())
-                .expect("oversized files are skipped")
-                .is_empty(),
-            "oversized settings must not be read or parsed"
-        );
         write_settings(
             repository.path(),
             ".mcp.json",
             "{",
             "add malformed settings",
         );
+
+        let findings = scan_settings(repository.path()).expect("settings can be scanned");
+
         assert_eq!(
-            scan_settings(repository.path())
-                .expect_err("malformed settings cannot pass silently")
-                .kind(),
-            std::io::ErrorKind::InvalidData,
-            "malformed JSON must fail the scan rather than certify safety"
+            findings
+                .iter()
+                .map(|finding| (finding.path.as_str(), finding.rule))
+                .collect::<Vec<_>>(),
+            vec![
+                (".claude/settings.json", RiskRule::Unscannable),
+                (".mcp.json", RiskRule::Unscannable),
+            ],
+            "padding or breaking a settings file must not hide it from the scan"
         );
     }
 }
