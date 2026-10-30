@@ -212,6 +212,7 @@ impl GoalCommand {
             confine_agent: self.agent.program.is_some(),
             egress_hosts: &[],
             agent_writable: &[],
+            local_model_port: None,
         }) {
             Ok(outcome) => {
                 writeln!(out, "{}", outcome.summary())?;

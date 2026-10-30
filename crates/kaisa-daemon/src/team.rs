@@ -108,6 +108,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             confine_agent: request.confine_agent,
             egress_hosts: &[],
             agent_writable: &[],
+            local_model_port: None,
         })?;
         let commit: Option<String> = developed.commit.clone();
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
@@ -147,6 +148,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             confine_agent: request.confine_agent,
             egress_hosts: &[],
             agent_writable: &[],
+            local_model_port: None,
         })?;
         let verdict: Option<ReviewVerdict> =
             verdict_from(request.state_directory, &reviewed, &candidate.tree);

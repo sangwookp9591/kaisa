@@ -101,6 +101,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         confine_agent: true,
         egress_hosts: &[],
         agent_writable: &[],
+        local_model_port: None,
     })
     .expect("the goal runs");
     let preserved_notes: String = git(
@@ -178,6 +179,7 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
         confine_agent: true,
         egress_hosts: &[],
         agent_writable: &[],
+        local_model_port: None,
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -249,6 +251,7 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
         confine_agent: true,
         egress_hosts: &[MODEL_PROVIDER],
         agent_writable: &[],
+        local_model_port: None,
     })
     .expect("the goal runs");
 
@@ -309,6 +312,7 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
         confine_agent: true,
         egress_hosts: &[],
         agent_writable: &[],
+        local_model_port: None,
     })
     .expect("a crashing agent is an outcome, not an error");
     let attempt_directory: String = bench
@@ -390,6 +394,7 @@ fn a_second_session_needs_no_re_explanation() {
         confine_agent: true,
         egress_hosts: &[],
         agent_writable: &[],
+        local_model_port: None,
     })
     .expect("the goal runs");
     let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("reopens");
@@ -449,5 +454,108 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
     assert!(
         !state.join("worktrees").join(attempt).exists(),
         "its worktree does not outlive the interrupted run"
+    );
+}
+
+/// What the scripted local model writes, through the broker.
+const LOCAL_MODEL_NOTES: &str = "written by a local model";
+
+/// A loopback OpenAI-compatible server that answers each request with the next scripted reply.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_scripted_local_model(replies: Vec<String>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+    let port: u16 = listener.local_addr().expect("bound").port();
+    std::thread::spawn(move || {
+        for reply in replies {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request: Vec<u8> = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length: usize = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + "\r\n\r\n".len() + length {
+                        break;
+                    }
+                }
+            }
+            let body = serde_json::json!({"choices": [{"message": {"role": "assistant", "content": reply}}]})
+                .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_local_model_drives_a_confined_attempt_through_the_broker() {
+    let bench = Workbench::new("local-model");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let port: u16 = a_scripted_local_model(vec![
+        serde_json::json!({"tool": "fs_write", "arguments": {"path": NOTES, "content": LOCAL_MODEL_NOTES}}).to_string(),
+        serde_json::json!({"done": "wrote the notes"}).to_string(),
+    ]);
+    let endpoint: String = format!("http://127.0.0.1:{port}/v1");
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: PathBuf::from(env!("CARGO_BIN_EXE_kaisa")),
+        args: vec![
+            "local-agent".to_owned(),
+            "--mcp-config".to_owned(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--endpoint".to_owned(),
+            endpoint.clone(),
+            "--model".to_owned(),
+            "tiny-local".to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        base: "HEAD",
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        role: kaisa_domain::Role::Developer,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+        local_model_port: Some(port),
+    })
+    .expect("the goal runs");
+    let preserved: String = git(
+        &bench.repository(),
+        &["show", &format!("{}:{NOTES}", outcome.branch)],
+    );
+
+    assert!(
+        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        "the local model finished inside the sandbox: {outcome:?}"
+    );
+    assert_eq!(
+        preserved, LOCAL_MODEL_NOTES,
+        "the model's change reached the branch only through the broker"
     );
 }

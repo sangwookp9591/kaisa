@@ -130,6 +130,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
             confine_agent: request.confine_agent,
             egress_hosts: &[],
             agent_writable: &[],
+            local_model_port: None,
         })?;
         let succeeded: bool =
             outcome.exit == Some(ProcessExit::Code(0)) && outcome.kept_back.is_empty();

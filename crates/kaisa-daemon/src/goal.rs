@@ -72,6 +72,9 @@ pub struct GoalRequest<'request> {
     /// Paths outside the worktree the agent must be able to change (for example its own
     /// session files), besides its scratch directory.
     pub agent_writable: &'request [PathBuf],
+    /// The loopback port of a local model server the agent talks to (tier 0, T28b); the
+    /// sandbox allows exactly that port when no egress broker is in use.
+    pub local_model_port: Option<u16>,
 }
 
 /// The file in an attempt directory naming the agent process Kaisa started, so that after a
@@ -364,7 +367,10 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         );
         Some(broker)
     };
-    let egress_port: Option<u16> = egress.as_ref().map(|broker| broker.address().port());
+    let egress_port: Option<u16> = egress
+        .as_ref()
+        .map(|broker| broker.address().port())
+        .or(request.local_model_port);
     let input: String = format!("{}\n", first_message(&pack));
     #[cfg(unix)]
     let sandbox = if request.confine_agent {
