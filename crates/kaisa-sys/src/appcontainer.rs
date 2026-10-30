@@ -511,22 +511,37 @@ mod tests {
     #[test]
     fn a_contained_process_cannot_read_the_users_files_without_a_grant() {
         let profile = a_profile("read");
-        let secret: PathBuf =
-            std::env::temp_dir().join(format!("kaisa-spike-{}.txt", std::process::id()));
+        let directory: PathBuf = a_user_directory("read");
+        let secret: PathBuf = directory.join("secret.txt");
         std::fs::write(&secret, "user data").expect("writable temp dir");
+        // No quotes: CreateProcess-style escaping of `"` is not what cmd.exe parses, and the
+        // temp path on the runner has no spaces.
+        let read = || {
+            profile
+                .run(
+                    CMD,
+                    &["/c".to_owned(), format!("type {}", secret.display())],
+                    &system_directory(),
+                )
+                .expect("the contained process starts")
+        };
 
-        let exit = profile.run(
-            CMD,
-            &["/c".to_owned(), format!("type \"{}\"", secret.display())],
-            &system_directory(),
-        );
-        let _ = std::fs::remove_file(&secret);
+        let before_grant: u32 = read();
+        let granted = profile.grant(&directory, ContainerAccess::ReadExecute);
+        let after_grant: u32 = read();
+        let _ = profile.revoke(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
         let _ = profile.delete();
 
         assert_ne!(
-            exit.expect("the contained process starts"),
-            0,
-            "spike check 2: the user's profile is unreadable until Kaisa grants a path"
+            before_grant, 0,
+            "spike check 2: the user's files are unreadable until Kaisa grants a path"
+        );
+        assert_eq!(
+            (granted.is_ok(), after_grant),
+            (true, 0),
+            "spike check 2 control: the same read succeeds once granted, so the refusal above \
+             was the container's, not the command's"
         );
     }
 
@@ -553,10 +568,7 @@ mod tests {
                     CMD,
                     &[
                         "/c".to_owned(),
-                        format!(
-                            "echo changed> \"{}\"",
-                            directory.join("notes.txt").display()
-                        ),
+                        format!("echo changed> {}", directory.join("notes.txt").display()),
                     ],
                     &system_directory(),
                 )
