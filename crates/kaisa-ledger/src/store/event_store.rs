@@ -19,13 +19,21 @@ const SCHEMA: &str = "
         payload         TEXT    NOT NULL,
         hash            BLOB    NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS outbox (
+        intent_id         TEXT    PRIMARY KEY,
+        effect            TEXT    NOT NULL,
+        detail            TEXT    NOT NULL,
+        state             TEXT    NOT NULL CHECK (state IN ('pending', 'completed')),
+        receipt           TEXT,
+        recorded_sequence INTEGER NOT NULL REFERENCES events (sequence)
+    );
 ";
 
 /// The ledger's event log. Holding an `EventStore` means holding the only write connection;
 /// every mutating method takes `&mut self`.
 #[derive(Debug)]
 pub struct EventStore {
-    connection: Connection,
+    pub(super) connection: Connection,
 }
 
 impl EventStore {
@@ -53,26 +61,9 @@ impl EventStore {
     /// the last stored row cannot be decoded.
     pub fn append(&mut self, event: Event) -> Result<ChainedEvent, StoreError> {
         let transaction: Transaction<'_> = self.connection.transaction()?;
-        let (sequence, previous): (Sequence, ChainHash) = match last_link(&transaction)? {
-            Some((last_sequence, last_hash)) => (last_sequence.next(), last_hash),
-            None => (Sequence::FIRST, ChainHash::genesis()),
-        };
-        let recorded = RecordedEvent { sequence, event };
-        let hash: ChainHash = previous.link(&recorded);
-        transaction.execute(
-            "INSERT INTO events (sequence, kind, subject, payload_version, payload, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                stored_sequence(sequence),
-                recorded.event.kind.code(),
-                recorded.event.subject,
-                recorded.event.payload_version,
-                recorded.event.payload,
-                hash.as_bytes().as_slice(),
-            ],
-        )?;
+        let chained: ChainedEvent = append_in(&transaction, event)?;
         transaction.commit()?;
-        Ok(ChainedEvent { recorded, hash })
+        Ok(chained)
     }
 
     /// Every event at `from` or later, in sequence order.
@@ -142,4 +133,31 @@ impl EventStore {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         Ok(mode.to_lowercase())
     }
+}
+
+/// Appends `event` inside an open transaction, so callers can commit it together with other
+/// writes (the outbox records an intent and its event atomically).
+pub(super) fn append_in(
+    transaction: &Transaction<'_>,
+    event: Event,
+) -> Result<ChainedEvent, StoreError> {
+    let (sequence, previous): (Sequence, ChainHash) = match last_link(transaction)? {
+        Some((last_sequence, last_hash)) => (last_sequence.next(), last_hash),
+        None => (Sequence::FIRST, ChainHash::genesis()),
+    };
+    let recorded = RecordedEvent { sequence, event };
+    let hash: ChainHash = previous.link(&recorded);
+    transaction.execute(
+        "INSERT INTO events (sequence, kind, subject, payload_version, payload, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            stored_sequence(sequence),
+            recorded.event.kind.code(),
+            recorded.event.subject,
+            recorded.event.payload_version,
+            recorded.event.payload,
+            hash.as_bytes().as_slice(),
+        ],
+    )?;
+    Ok(ChainedEvent { recorded, hash })
 }
