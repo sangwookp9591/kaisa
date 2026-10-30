@@ -261,3 +261,46 @@ fn no_resource_is_orphaned_after_random_kills() {
          report {report:?} ({replay})"
     );
 }
+
+#[test]
+fn watch_shows_each_attempts_state_from_the_ledger() {
+    let bench = Workbench::new("watch");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let state: PathBuf = bench.base.join("state");
+    let ran: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            "src/notes.md",
+            GOAL,
+        ])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+    let attempt: String = String::from_utf8_lossy(&ran.stdout)
+        .split_whitespace()
+        .find(|word| word.starts_with("att_"))
+        .expect("the run names its attempt")
+        .to_owned();
+
+    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa watch runs");
+    let view: String = String::from_utf8_lossy(&watched.stdout).into_owned();
+    let line: &str = view
+        .lines()
+        .find(|line| line.starts_with(&attempt))
+        .unwrap_or_default();
+
+    assert!(
+        watched.status.success() && line.contains("exited") && line.contains("reclaimed"),
+        "the finished attempt is listed as exited and reclaimed: {view:?}"
+    );
+}

@@ -8,6 +8,7 @@ use std::io::Write;
 
 mod delivery;
 mod goal;
+mod watch;
 
 pub use delivery::{EXIT_WAITING_FOR_HUMAN, report_delivery};
 
@@ -28,9 +29,9 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 
 /// Command names reserved for later milestones; they answer "not implemented" instead of being
 /// mistaken for a goal.
-const PLANNED_COMMANDS: [&str; 18] = [
-    "watch", "review", "ask", "attach", "steer", "pause", "resume", "cancel", "undo", "restore",
-    "init", "doctor", "status", "console", "memory", "agent", "team", "admin",
+const PLANNED_COMMANDS: [&str; 17] = [
+    "review", "ask", "attach", "steer", "pause", "resume", "cancel", "undo", "restore", "init",
+    "doctor", "status", "console", "memory", "agent", "team", "admin",
 ];
 
 /// The version of this build, taken from the workspace manifest (single source of truth).
@@ -66,6 +67,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
+        Some("watch") => watch::run(out, err),
         Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
             (Some("--attempt"), Some(directory)) => {
                 match kaisa_mcp::bridge(std::path::Path::new(directory), out) {
@@ -156,7 +158,7 @@ mod tests {
 
     #[test]
     fn an_unimplemented_command_fails_honestly_instead_of_pretending_to_work() {
-        let transcript: Transcript = user_types(&["watch"]);
+        let transcript: Transcript = user_types(&["review"]);
 
         assert_eq!(
             transcript.status, EXIT_NOT_IMPLEMENTED,

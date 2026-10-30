@@ -151,25 +151,35 @@ impl EventStore {
     /// Returns [`StoreError::CorruptPayload`] if a stored value cannot be decoded, or
     /// [`StoreError::Sqlite`] if the projection cannot be rebuilt or queried.
     pub fn unfinished_attempts(&mut self) -> Result<Vec<AttemptRow>, StoreError> {
+        Ok(self
+            .all_attempts()?
+            .into_iter()
+            .filter(|row| !matches!(row.cleanup, Cleanup::Reclaimed | Cleanup::Retained))
+            .collect())
+    }
+
+    /// Every attempt the ledger knows, in the order its state last changed (T30a).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::CorruptPayload`] if a stored value cannot be decoded, or
+    /// [`StoreError::Sqlite`] if the projection cannot be rebuilt or queried.
+    pub fn all_attempts(&mut self) -> Result<Vec<AttemptRow>, StoreError> {
         self.rebuild_attempts()?;
         let ids: Vec<String> = {
-            let mut statement = self.connection.prepare(
-                "SELECT attempt_id FROM attempts WHERE cleanup NOT IN (?1, ?2)
-                 ORDER BY last_sequence",
-            )?;
-            let rows = statement.query_map(
-                params![Cleanup::Reclaimed.code(), Cleanup::Retained.code()],
-                |row| row.get::<_, String>(0),
-            )?;
+            let mut statement = self
+                .connection
+                .prepare("SELECT attempt_id FROM attempts ORDER BY last_sequence")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<_, _>>()?
         };
-        let mut unfinished: Vec<AttemptRow> = Vec::new();
+        let mut all: Vec<AttemptRow> = Vec::new();
         for id in ids {
             let attempt = AttemptId::try_new(&id)
                 .map_err(|_| StoreError::CorruptPayload { stored_sequence: 0 })?;
-            unfinished.extend(self.attempt(&attempt)?);
+            all.extend(self.attempt(&attempt)?);
         }
-        Ok(unfinished)
+        Ok(all)
     }
 }
 

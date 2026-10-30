@@ -172,6 +172,7 @@ dependencies = [
  "kaisa-agents",
  "kaisa-daemon",
  "kaisa-domain",
+ "kaisa-ledger",
  "kaisa-mcp",
  "kaisa-sys",
 ]
