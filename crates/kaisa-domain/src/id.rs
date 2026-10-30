@@ -113,10 +113,15 @@ define_id!(
     AttemptId,
     "att"
 );
+define_id!(
+    /// Identifies an outbox intent: one announced external effect.
+    IntentId,
+    "intent"
+);
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptId, IdError, MAX_SUFFIX_LEN, RunId, TaskId};
+    use super::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, RunId, TaskId};
 
     /// Text for a run id whose suffix has exactly `length` valid characters.
     fn run_id_text_with_suffix_of_length(length: usize) -> String {
@@ -239,6 +244,21 @@ mod tests {
             RunId::try_new(&dashed),
             Err(IdError::BadCharacter),
             "only letters and digits are allowed so ids are safe in paths and branch names"
+        );
+    }
+
+    #[test]
+    fn an_intent_id_round_trips_through_display() {
+        let worktree_intent: String = format!("{}_wt41", IntentId::PREFIX);
+
+        let intent: IntentId = worktree_intent
+            .parse()
+            .expect("a valid intent id must parse");
+
+        assert_eq!(
+            intent.to_string(),
+            worktree_intent,
+            "Display must print exactly what was parsed"
         );
     }
 }
