@@ -3,7 +3,7 @@
 //! A pack is a list of sections in priority order. Its canonical bytes are deterministic, so the
 //! same inputs always give the same pack and the same address.
 
-use kaisa_domain::WriteSet;
+use kaisa_domain::{ContentDigest, WriteSet};
 
 use crate::profile::{Confirmation, Language, ProjectProfile, Purpose};
 
@@ -126,6 +126,16 @@ impl ContextPack {
     }
 }
 
+impl ContextPack {
+    /// The pack's content address: the blake3 digest of its canonical bytes. Equal packs have
+    /// equal addresses, and an attempt records this to say exactly what it started from.
+    #[must_use]
+    pub fn digest(&self) -> ContentDigest {
+        let hex: String = blake3::hash(&self.canonical_bytes()).to_hex().to_string();
+        ContentDigest::try_new(&hex).expect("blake3 hex is 64 lowercase hex characters")
+    }
+}
+
 fn push_field(bytes: &mut Vec<u8>, field: &[u8]) {
     let length: u64 = u64::try_from(field.len()).unwrap_or(u64::MAX);
     bytes.extend_from_slice(&length.to_be_bytes());
@@ -227,6 +237,18 @@ mod tests {
             a_pack_for(LOGIN_FIX_SPEC).canonical_bytes(),
             a_pack_for(LOGIN_FIX_SPEC).canonical_bytes(),
             "a pack must be reproducible, or replaying a run would start from different context"
+        );
+    }
+
+    #[test]
+    fn a_pack_is_addressed_by_the_digest_of_its_bytes() {
+        let pack: ContextPack = a_pack_for(LOGIN_FIX_SPEC);
+        let expected: String = blake3::hash(&pack.canonical_bytes()).to_hex().to_string();
+
+        assert_eq!(
+            pack.digest().as_str(),
+            expected,
+            "anyone holding the bytes can check which pack an attempt used"
         );
     }
 
