@@ -104,6 +104,41 @@ pub fn create_worktree(
     })
 }
 
+/// The worktree of `repository` at `path`, as git records it, or `None` if git knows no
+/// worktree there. Recovery uses this to pick up an attempt's worktree after a crash; a
+/// directory git does not list is never treated as an attempt's worktree.
+///
+/// # Errors
+///
+/// Returns [`WorktreeError::Git`] if git fails.
+pub fn open_worktree(repository: &Path, path: &Path) -> Result<Option<Worktree>, WorktreeError> {
+    let Ok(wanted) = path.canonicalize() else {
+        return Ok(None);
+    };
+    let listing: Vec<u8> = run_git(repository, &["worktree", "list", "--porcelain"])?;
+    let listing: String = String::from_utf8_lossy(&listing).into_owned();
+    for block in listing.split("\n\n") {
+        let mut listed: Option<PathBuf> = None;
+        let mut branch: Option<String> = None;
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                listed = Some(PathBuf::from(rest));
+            } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(rest.to_owned());
+            }
+        }
+        if let (Some(listed), Some(branch)) = (listed, branch)
+            && listed.canonicalize().ok().as_ref() == Some(&wanted)
+        {
+            return Ok(Some(Worktree {
+                path: path.to_owned(),
+                branch,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// What would have to be preserved before `worktree` is removed, according to git and
 /// `policy`. Untracked files are listed individually and ignored files are included, so
 /// nothing in the worktree is invisible to the preservation protocol.
@@ -430,6 +465,37 @@ mod tests {
                 .trim_start_matches(['*', '+', ' ']),
             worktree.branch(),
             "the branch may hold the WIP commit, so cleanup must not delete it"
+        );
+    }
+
+    #[test]
+    fn an_attempts_worktree_can_be_opened_again_after_a_crash() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let created: Worktree = a_worktree_for_attempt_41a(&repository);
+
+        let reopened: Option<Worktree> =
+            super::open_worktree(repository.path(), created.path()).expect("git runs");
+
+        assert_eq!(
+            reopened,
+            Some(created),
+            "recovery finds the same worktree on the same branch"
+        );
+    }
+
+    #[test]
+    fn a_directory_git_does_not_list_is_not_an_attempts_worktree() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let stray: PathBuf = repository.sibling("stray-directory");
+        std::fs::create_dir_all(&stray).expect("writable");
+
+        let opened: Option<Worktree> =
+            super::open_worktree(repository.path(), &stray).expect("git runs");
+        let _ = std::fs::remove_dir_all(&stray);
+
+        assert_eq!(
+            opened, None,
+            "recovery never preserves or deletes a directory git does not own"
         );
     }
 }
