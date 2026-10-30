@@ -201,6 +201,7 @@ name = "kaisa-supervisor"
 version = "0.0.0"
 dependencies = [
  "kaisa-domain",
+ "kaisa-workspace",
 ]
 
 [[package]]
