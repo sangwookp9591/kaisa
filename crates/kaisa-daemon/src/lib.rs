@@ -8,6 +8,7 @@ mod ids;
 mod mission;
 mod recover;
 mod sandbox;
+mod verify;
 
 pub use goal::{
     AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
@@ -15,3 +16,4 @@ pub use goal::{
 };
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
 pub use recover::{Recovered, recover_abandoned};
+pub use verify::{Evidence, run_trusted_checks};
