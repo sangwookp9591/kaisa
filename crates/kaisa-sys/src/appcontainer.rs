@@ -190,6 +190,39 @@ impl AppContainerProfile {
         }
     }
 
+    /// The container's SID as text (`S-1-15-2-…`), for security descriptors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the SID cannot be converted.
+    pub fn sid_string(&self) -> io::Result<String> {
+        let mut text: *mut u16 = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: `sid` is a valid SID owned by `self`; `text` receives a LocalAlloc'd string.
+        let converted: i32 = unsafe {
+            windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW(
+                self.sid,
+                &raw mut text,
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut length: usize = 0;
+        #[allow(unsafe_code)]
+        // SAFETY: Windows returned a NUL-terminated string; it is read up to the NUL, copied,
+        // and freed once with LocalFree.
+        let sid: String = unsafe {
+            while *text.add(length) != 0 {
+                length += 1;
+            }
+            let copied = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+            LocalFree(text as HLOCAL);
+            copied
+        };
+        Ok(sid)
+    }
+
     /// Deletes the profile (its settings and storage, not files it was granted).
     ///
     /// # Errors
@@ -513,6 +546,118 @@ mod tests {
             !reached,
             "spike check 4a: loopback is closed to a container, so its broker must not be a TCP \
              port on Windows"
+        );
+    }
+
+    /// A one-shot inbound named pipe whose security descriptor admits `container_sid`.
+    /// AppContainers run at low integrity, so the pipe also carries a low mandatory label.
+    fn a_pipe_admitting(name: &str, container_sid: &str) -> std::fs::File {
+        use std::os::windows::io::FromRawHandle;
+
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+        use windows_sys::Win32::System::Pipes::{
+            CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let sddl: Vec<u16> = super::wide(std::ffi::OsStr::new(&format!(
+            "D:(A;;GA;;;OW)(A;;GRGW;;;{container_sid})S:(ML;;NW;;;LW)"
+        )));
+        let mut descriptor: *mut std::ffi::c_void = std::ptr::null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: `sddl` is NUL-terminated; `descriptor` receives a LocalAlloc'd descriptor that
+        // lives until the end of the test process (test-only leak).
+        let parsed: i32 = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            parsed,
+            0,
+            "the pipe's SDDL parses: {}",
+            std::io::Error::last_os_error()
+        );
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("small"),
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let wide_name: Vec<u16> = super::wide(std::ffi::OsStr::new(name));
+        #[allow(unsafe_code)]
+        // SAFETY: the name is NUL-terminated and the attributes point at a live descriptor.
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide_name.as_ptr(),
+                PIPE_ACCESS_INBOUND,
+                PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                PIPE_BUFFER,
+                PIPE_BUFFER,
+                0,
+                &raw const attributes,
+            )
+        };
+        assert_ne!(
+            handle,
+            windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+            "the pipe is created: {}",
+            std::io::Error::last_os_error()
+        );
+        #[allow(unsafe_code)]
+        // SAFETY: a fresh, valid handle that nothing else owns.
+        unsafe {
+            std::fs::File::from_raw_handle(handle)
+        }
+    }
+
+    /// Bytes each direction of the test pipe buffers.
+    const PIPE_BUFFER: u32 = 4096;
+    /// What the contained process writes to the broker pipe.
+    const HELLO: &str = "hello-broker";
+
+    #[test]
+    fn a_contained_process_reaches_a_named_pipe_that_admits_its_sid() {
+        use std::io::Read;
+        let profile = a_profile("pipe");
+        let name: String = format!(r"\\.\pipe\kaisa-spike-{}", std::process::id());
+        let mut pipe = a_pipe_admitting(&name, &profile.sid_string().expect("convertible"));
+        let server = std::thread::spawn(move || {
+            #[allow(unsafe_code)]
+            // SAFETY: the handle is a live, unconnected pipe instance.
+            unsafe {
+                windows_sys::Win32::System::Pipes::ConnectNamedPipe(
+                    std::os::windows::io::AsRawHandle::as_raw_handle(&pipe),
+                    std::ptr::null_mut(),
+                );
+            }
+            let mut received = String::new();
+            let _ = pipe.read_to_string(&mut received);
+            received
+        });
+
+        let exit = profile.run(
+            CMD,
+            &["/c".to_owned(), format!("echo {HELLO}> {name}")],
+            &system_directory(),
+        );
+        if exit.as_ref().map_or(true, |code| *code != 0) {
+            // Release the server if the client never connected.
+            let _ = std::fs::OpenOptions::new().write(true).open(&name);
+        }
+        let received: String = server.join().expect("the server thread finishes");
+        let _ = profile.delete();
+
+        assert!(
+            received.contains(HELLO),
+            "spike check 4b: a pipe admitting the container's SID is its way to the broker; \
+             exit {exit:?}, received {received:?}"
         );
     }
 }
