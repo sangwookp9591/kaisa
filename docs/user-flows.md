@@ -522,6 +522,9 @@ The default (marked ★) is always the safe choice.
 - **Effect:** summaries, classification and first-pass reviews go to it automatically when the router
   grades them as light work; F04's status line says `model: local (light work)`. Code edits and security reviews never
   go to a tool-less model.
+- **As built (M1, T33).** Light work is the **first-pass review**: when a T0 model is registered, it reviews each
+  candidate before the full review. Its blocking findings send the candidate back without spending the full review;
+  its approval is advisory, so the full review still decides. The run prints `first pass: model: local (light work)`.
 
 #### F31 Repository not ready
 - **Dirty working tree.** "You have uncommitted changes. Kaisa works on a copy of **committed** state." The options:

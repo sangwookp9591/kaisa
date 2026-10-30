@@ -48,8 +48,27 @@ style guide: "context strings in `assert!`").
   once more than one crate needs it.
 - Integration tests live in `tests/` with the same naming rules.
 
+## Platform-specific tests
+
+A test that only runs on some platforms is gated with `#[cfg(...)]`, and so is every constant or
+helper only that test uses; otherwise the other platforms fail on an unused item. The binary's
+integration tests are not part of the local Windows cross-check (SQLite needs a C build), so CI is
+where such a miss shows up.
+
+## Security tests are mutation-checked
+
+A test that guards a security or correctness property must fail when the guard is removed. Before
+committing such a test, remove or weaken the guard, run the test, and confirm it fails **for the
+reason the test names**; then restore the guard. Examples: confining an observed agent must break the
+observed-run test; dropping the write-set check after an observed run must let the outside write
+through.
+
 ## Before every commit
 
 Run `scripts/check.sh` (or `scripts/check.sh --fix` to format first). It runs exactly what CI runs:
-stable and nightly rustfmt, clippy with `-D warnings`, and the tests. It stops at the first
-failure, so a failing check cannot be hidden by a pipe.
+stable and nightly rustfmt, clippy with `-D warnings`, the tests, and compile-only cross-checks for
+Windows and Linux. It stops at the first failure.
+
+Capture its exit code and commit only on zero, for example
+`scripts/check.sh --fix > check.log 2>&1; ec=$?`. Never pipe it into another command before an
+`&&`-chained commit, because the pipe hides the failure. Stage explicit paths, never `git add -A`.

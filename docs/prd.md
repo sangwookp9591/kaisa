@@ -5,7 +5,7 @@
 | Status | v1.1 draft (team-intelligence requirements added) |
 | Date | 2026-10-30 |
 | Sources | [`user-flows.md`](user-flows.md) v0.2 (what users do) · [`architecture.md`](architecture.md) v0.6 (how it works) · [`research/ruflo-control.md`](research/ruflo-control.md) |
-| Task breakdown | [`tasks/M0.md`](tasks/M0.md) (current milestone) |
+| Task breakdown | [`tasks/M0.md`](tasks/M0.md) (done) · [`tasks/M1.md`](tasks/M1.md) (engine done, user flows partly done) |
 
 ## 1. Problem
 

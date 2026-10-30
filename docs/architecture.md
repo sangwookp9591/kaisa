@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| Status | Draft v0.6.1 — M0 substrate in progress (ledger, keeper, workspace, PTY); everything else is design |
+| Status | v0.6.1 — **M0 implemented; M1 engine implemented** ([`tasks/M1.md`](tasks/M1.md), CI green on 3 OSes). M1 user flows are partly done (see the task file's flow coverage). Open: T16.0 (confined Claude Code on Linux and Windows) |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
-| Date | 2026-10-30 |
+| Date | 2026-10-30 (status updated 2026-10-31) |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
 | Core language | Rust (stable 1.99.1, edition 2024) |
 | Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) · [`research/ruflo-control.md`](research/ruflo-control.md) (how ruflo enforces, or only records, its capabilities) |
@@ -1475,6 +1475,13 @@ Stability is validated **after implementation** with:
 Each milestone ends with a measured go/no-go review. Staffing and duration estimates belong in the project plan, not
 here. The flows each milestone must complete end to end are listed in [`user-flows.md`](user-flows.md) §9. Its
 usability targets (§10) are part of every milestone's exit criteria.
+
+**Implementation status (2026-10-31).** M0 is done on all three OSes. M1's engine scope below is done and
+its exit criteria each have a test that passes on all three OSes ([`tasks/M1.md`](tasks/M1.md)). Decisions made
+while building it: light work (F37) is a first-pass review on a registered T0 local model, advisory except for
+blocking findings; an observed agent (Codex) is checked against its write set after it finishes, before the
+delivery gate; the personal policy is a validated `policy.json` in the state directory, snapshotted and recorded
+per run. Still reduced: Claude Code everywhere until T16.0, and checks and local models on Windows.
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
