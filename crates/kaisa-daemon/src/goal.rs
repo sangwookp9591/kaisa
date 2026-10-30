@@ -324,8 +324,12 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     } else {
         AgentSandbox::Unconfined
     };
+    // Windows confinement (AppContainer) is T15.5; until then the run is reported as reduced.
     #[cfg(not(unix))]
-    let sandbox = AgentSandbox::Unconfined;
+    let sandbox = {
+        let _ = egress_port;
+        AgentSandbox::Unconfined
+    };
     let finished: CapturedRun = run_captured(
         &agent,
         &sandbox.confinement(),
