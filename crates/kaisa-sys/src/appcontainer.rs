@@ -128,6 +128,12 @@ impl AppContainerProfile {
     }
 
     fn change_dacl(&self, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
+        // Read-modify-write of a DACL: two attempts granting the same directory (their shared
+        // program directory) at once would otherwise lose one grant, and that agent could not
+        // start. Serialized within this process; across Kaisa processes see T15.5e.
+        let _serialized = DACL_CHANGES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let name: Vec<u16> = wide(path.as_os_str());
         let mut old_dacl: *mut ACL = null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
@@ -310,6 +316,14 @@ impl AppContainerProfile {
     }
 }
 
+// SAFETY: the SID is written once when the profile is created and only read afterwards; it is
+// freed once, on drop, by whichever thread owns the profile then.
+#[allow(unsafe_code)]
+unsafe impl Send for AppContainerProfile {}
+// SAFETY: as above; every method only reads the SID, and DACL changes are serialized.
+#[allow(unsafe_code)]
+unsafe impl Sync for AppContainerProfile {}
+
 impl Drop for AppContainerProfile {
     fn drop(&mut self) {
         if !self.sid.is_null() {
@@ -464,6 +478,9 @@ fn environment_block(overrides: &[(String, String)]) -> Option<Vec<u16>> {
 const INHERIT_LISTED_HANDLES: i32 = 1;
 /// Security capabilities and the inherited-handle list.
 const TWO_ATTRIBUTES: u32 = 2;
+
+/// Serializes DACL changes made by this process.
+static DACL_CHANGES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A low mandatory label that does not forbid low writers, inherited by everything below.
 const LOW_LABEL_INHERITED: &str = "S:(ML;OICI;NW;;;LW)";
@@ -944,4 +961,52 @@ mod tests {
             "spike check 5: the agent runtime can run contained; if not, Windows runs are reduced"
         );
     }
+
+    #[test]
+    fn concurrent_grants_on_one_directory_keep_every_containers_access() {
+        let shared: PathBuf = a_user_directory("shared-programs");
+        std::fs::write(shared.join("tool.txt"), "shared tool").expect("writable");
+        let profiles: Vec<AppContainerProfile> = (0..CONCURRENT_ATTEMPTS)
+            .map(|index| a_profile(&format!("concurrent{index}")))
+            .collect();
+
+        std::thread::scope(|scope| {
+            for profile in &profiles {
+                scope.spawn(|| {
+                    profile
+                        .grant(&shared, ContainerAccess::ReadExecute)
+                        .expect("granted");
+                });
+            }
+        });
+        let readable: Vec<u32> = profiles
+            .iter()
+            .map(|profile| {
+                profile
+                    .run(
+                        CMD,
+                        &[
+                            "/c".to_owned(),
+                            format!("type {}", shared.join("tool.txt").display()),
+                        ],
+                        &system_directory(),
+                    )
+                    .expect("starts")
+            })
+            .collect();
+        for profile in profiles {
+            let _ = profile.revoke(&shared);
+            let _ = profile.delete();
+        }
+        let _ = std::fs::remove_dir_all(&shared);
+
+        assert_eq!(
+            readable,
+            vec![0; CONCURRENT_ATTEMPTS],
+            "no attempt's grant on a shared directory is lost to another attempt's grant"
+        );
+    }
+
+    /// Attempts granting the same directory at the same moment.
+    const CONCURRENT_ATTEMPTS: usize = 4;
 }
