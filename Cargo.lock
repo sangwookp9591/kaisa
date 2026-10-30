@@ -122,6 +122,7 @@ name = "kaisa-context"
 version = "0.0.0"
 dependencies = [
  "kaisa-domain",
+ "kaisa-sys",
  "serde_json",
 ]
 
