@@ -537,6 +537,11 @@ the attempt starts — the agent, `exec`, interpreters, build scripts and test r
 **Egress broker.** Each attempt gets an HTTP(S) proxy with a domain allow-list, for example package registries and git remotes. This is needed
 because the OS layers alone cannot filter by domain. All direct network access is denied by the sandbox. Verification and
 `exec` run under the same profile.
+- **No way back to the host (v0.6.1, review M4).** After DNS resolution, and again on every redirect,
+  the broker refuses destinations that are loopback, private, link-local or the host's own addresses,
+  unless the policy names that exact address and port for this role. The control endpoint, the web
+  console and other attempts' keepers are never nameable. MCP servers (§5.6) and model endpoints use
+  the same check.
 
 **Policy snapshots (review M5).**
 - **Snapshots.** Policy is compiled into immutable files named by their content hash. Each one carries a MAC with a daemon key, an epoch and an expiry, and is published with an atomic rename.
@@ -885,9 +890,18 @@ same ledger, outbox and authority rules as the engine cores.
 until that command runs (P14).
 - **Transport.** The daemon binds `127.0.0.1` on a random port for the console's lifetime. A
   per-launch 256-bit token is passed in the URL fragment and exchanged once for an `HttpOnly`,
-  `SameSite=Strict` session cookie. Every request checks the `Host` and `Origin` headers (against
-  DNS rebinding) and the console sends a strict Content Security Policy. Remote binding is not
-  offered in v1.
+  `SameSite=Strict` session cookie; the token is single-use and expires after 60 seconds unused.
+  Every request must carry the exact `Host` (address and port) and, for state-changing requests, the
+  exact `Origin` and a CSRF token. The console sends a strict Content Security Policy. Remote binding
+  is not offered in v1.
+- **Lifetime.** The server stops when `kaisa console` exits, when the last tab's heartbeat stops for
+  a policy-set period, or at a hard TTL. Sessions die with it.
+- **Rendering.** Terminal transcripts are rendered from the terminal model, never as raw bytes:
+  ANSI sequences are interpreted, HTML is escaped, and links are inert. Server-sent events have
+  resumable ids, a per-client buffer limit and a slow-consumer cut-off.
+- **Residual risk.** A malicious process running as the same OS user can read the cookie store or
+  the terminal the token was printed to. The console does not protect against that user's own
+  malware; the agent sandbox (§5.7) is what keeps agents from being that process.
 - **Authority.** The console is read-only by default: a projection of the event stream over
   server-sent events. Human actions (answer, approve, cancel) are sent as control-endpoint operations
   with the same authority rules and presence checks as the CLI (§5.12); an agent can never reach it,
