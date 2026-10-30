@@ -751,6 +751,18 @@ endpoint (for example a local Ollama server). Such rows are tool-less: they serv
 no file access — classification, summaries, first-pass review of a diff Kaisa supplies. Their usage
 is recorded in tokens even when it costs nothing.
 
+**Trusting an endpoint (v0.6.1, review M5).** A model endpoint receives code, so it is configured,
+not discovered:
+- the row pins the endpoint — a loopback address checked by peer identity, or an HTTPS URL with a
+  pinned certificate — and the model name and digest the server must report; redirects are refused;
+- the row states the **data classification** it may receive; policy decides which repositories and
+  which kinds of content (diffs, secrets-scanned excerpts, summaries only) may go to it;
+- requests have time, size, token and concurrency limits, and a failing endpoint is isolated: its
+  Tasks fall back to the next option in the grade, and the endpoint is marked unhealthy;
+- usage reported by a local server is labelled "reported by endpoint", never treated as billing truth.
+The local embedding model follows the same rule: its checksum comes from Kaisa's signed release
+manifest, and its inference runs in a separate worker so a native crash cannot take the daemon down.
+
 - **Routing policy.** Policy is data. A task's grade and its required capabilities map to the
   eligible agents, models, efforts and a candidate count N; the learned choice picks among them.
 - **Fallback chains** exist for the coordinator and for workers, and each is filtered by capability.
@@ -780,7 +792,16 @@ failover = "preserve"     # §5.5 protocol
 
 **Admission control and enforcement**
 
-- **Cost reservation.** Before admitting an attempt, the Router reserves an estimated cost against the run and team budget. Actual usage is reconciled afterwards.
+- **Cost reservation (v0.6.1, review M3).** Before admitting an attempt, the Router reserves an
+  estimated cost **atomically** along the whole chain — Mission, sub-run, user and team — in one ledger
+  transaction, so concurrent admissions cannot each see room that only one of them has. Actual usage is
+  reconciled afterwards.
+- **Per-request ceilings.** Every model request carries a maximum output size (and, through a gateway,
+  a maximum cost) so one request cannot overrun the remaining reservation by much.
+- **Hard caps are a capability, not a promise.** An adapter or gateway that can refuse a request before
+  it is billed declares `hard_cap`. Without it, the budget is enforced at the next admission and the UI
+  shows the largest possible overrun ("may exceed by up to $0.40: Claude subscription reports usage after
+  the turn"). Kaisa never calls such a budget hard.
 - **Per-request usage.** Adapters report usage per model request from the agent's structured stream (or from the gateway), not per turn, so cost is attributed to the attempt, role and tool that caused it. Where an agent exposes only turn totals, the figure is labelled as estimated.
 - **Separate caps.** Unpriced usage and subscription usage are capped separately.
 - **Optional gateway enforcement.** This is ruflo ADR-508. Kaisa writes a budget file and can configure an LLM gateway, such as LiteLLM, with **per-attempt virtual keys**. The gateway enforces hard limits. Kaisa keeps attribution per attempt, role and tool.
@@ -1361,7 +1382,7 @@ usability targets (§10) are part of every milestone's exit criteria.
 |---|---|---|
 | **M0 — Safe single attempt** | domain (v0.6 types: mission, run hierarchy, write set, grade, knowledge, context pack, route decision), sys, ledger + outbox, keeper, PTY, supervisor (state axes, leases, reconnect), workspace + preservation, authority split, minimum sandbox + egress broker on 3 OSes, **project profile + context pack v1** (spec + profile), Claude adapter in brokered mode, CLI, dependency evidence gate | Issue → attempt → exit → preserve → reclaim on all 3 OSes. The attempt starts from a recorded context pack and a confirmed project profile, with no setup. Negative tests pass. Daemon restart keeps attempts. The chaos suite shows zero orphans and zero unreceipted loss. |
 | **M1 — Verified team** | scheduler (missions, roles incl. documentation, pipelines, write-set ownership, gates, cursors, receipts), verification loop + delivery gate + bounded revision, repository index + impact sets + full context packs, knowledge (lessons, decisions, trajectories; hybrid retrieval behind the evidence gate), router grader + catalog grades + `openai-compatible` local models + tier 0, Codex adapter, observed mode, policy snapshots, settings risk scanner, TUI | Nothing reaches the user without fresh evidence. Tampered candidates are never delivered. Blocking review findings are fixed by revision without a human in the common case. A second session on the same repository needs no re-explanation (its packs carry the profile and lessons). Pipelines advance without an LLM. Unknown is never retried. |
-| **M2 — Resilient, learning, at scale** | coordinator epochs + handoff, worker failover, quota classification, admission + budgets (+ optional gateway), learned route priors, injection usefulness scoring, sub-runs + roll-ups + measured slots, web console, Hermes adapter, brokered user MCP servers | A Claude → GPT handoff mid-run with no loss of plan, work or workers. Budgets are enforced. Cost per verified task falls over a recorded benchmark set as priors learn. The 100-agent benchmark meets its budgets. |
+| **M2 — Resilient, learning, at scale** | coordinator epochs + handoff, worker failover, quota classification, admission + budgets (hard with a gateway or `hard_cap` adapters, otherwise bounded and labelled), learned route priors, injection usefulness scoring, sub-runs + roll-ups + measured slots, web console, Hermes adapter, brokered user MCP servers | A Claude → GPT handoff mid-run with no loss of plan, work or workers. Budgets hold within their stated bound. Cost per verified task falls over a recorded benchmark set as priors learn. The 100-agent benchmark meets its budgets. |
 | **M3 — Extended** | best-of-N, team-shared knowledge, desktop (spike result), team server mode, remote workers, Mojo accelerator spike | Pilot team in production. |
 
 ---
