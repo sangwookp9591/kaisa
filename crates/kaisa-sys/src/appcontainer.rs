@@ -14,11 +14,22 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS,
+    SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    TRUSTEE_W,
+};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
+use windows_sys::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
@@ -88,6 +99,95 @@ impl AppContainerProfile {
             hresult(created)?;
         }
         Ok(Self { name, sid })
+    }
+
+    /// Grants the container `access` to `path` and, for a directory, everything created in it.
+    /// The grant is an ACE on the path itself; [`Self::revoke`] removes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the path's DACL cannot be read or written.
+    pub fn grant(&self, path: &Path, access: ContainerAccess) -> io::Result<()> {
+        self.change_dacl(path, access.rights(), GRANT_ACCESS)
+    }
+
+    /// Removes every ACE this container has on `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the path's DACL cannot be read or written.
+    pub fn revoke(&self, path: &Path) -> io::Result<()> {
+        self.change_dacl(path, 0, REVOKE_ACCESS)
+    }
+
+    fn change_dacl(&self, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
+        let name: Vec<u16> = wide(path.as_os_str());
+        let mut old_dacl: *mut ACL = null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: `name` is NUL-terminated; the out-pointers are live locals; the descriptor
+        // returned owns `old_dacl` and is released with LocalFree below.
+        let read: u32 = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &raw mut old_dacl,
+                null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        if read != 0 {
+            return Err(io::Error::from_raw_os_error(read as i32));
+        }
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: rights,
+            grfAccessMode: mode,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_UNKNOWN,
+                ptstrName: self.sid.cast::<u16>(),
+            },
+        };
+        let mut new_dacl: *mut ACL = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: one live entry whose trustee is this profile's SID; `old_dacl` is owned by
+        // `descriptor`, still alive; the new ACL is released with LocalFree below.
+        let merged: u32 =
+            unsafe { SetEntriesInAclW(1, &raw const entry, old_dacl, &raw mut new_dacl) };
+        let written: u32 = if merged == 0 {
+            #[allow(unsafe_code)]
+            // SAFETY: `name` is NUL-terminated and `new_dacl` is the ACL just built.
+            unsafe {
+                SetNamedSecurityInfoW(
+                    name.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    new_dacl,
+                    null(),
+                )
+            }
+        } else {
+            merged
+        };
+        #[allow(unsafe_code)]
+        // SAFETY: both were allocated by the calls above (or are null) and are freed once.
+        unsafe {
+            LocalFree(new_dacl as HLOCAL);
+            LocalFree(descriptor as HLOCAL);
+        }
+        if written == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(written as i32))
+        }
     }
 
     /// Deletes the profile (its settings and storage, not files it was granted).
@@ -183,6 +283,24 @@ impl Drop for AppContainerProfile {
     }
 }
 
+/// What a container may do with a granted path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerAccess {
+    /// Read files and run programs: the worktree, toolchains, the agent's own install.
+    ReadExecute,
+    /// Also create, change and delete: the write set and the scratch directory.
+    Modify,
+}
+
+impl ContainerAccess {
+    fn rights(self) -> u32 {
+        match self {
+            Self::ReadExecute => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            Self::Modify => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE | FILE_GENERIC_WRITE | DELETE,
+        }
+    }
+}
+
 /// A process-thread attribute list holding security capabilities, deleted on drop.
 struct AttributeList {
     /// Backing memory; `u64` elements keep it aligned for the pointers Windows stores in it.
@@ -252,7 +370,7 @@ impl Drop for AttributeList {
 mod tests {
     use std::path::PathBuf;
 
-    use super::AppContainerProfile;
+    use super::{AppContainerProfile, ContainerAccess};
 
     /// What the contained command exits with, so the test knows it really ran.
     const CONTAINED_EXIT: u32 = 7;
@@ -305,6 +423,63 @@ mod tests {
             exit.expect("the contained process starts"),
             0,
             "spike check 2: the user's profile is unreadable until Kaisa grants a path"
+        );
+    }
+
+    /// A fresh directory under the user's temporary directory, outside every system grant.
+    fn a_user_directory(name: &str) -> PathBuf {
+        let directory: PathBuf =
+            std::env::temp_dir().join(format!("kaisa-spike-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("writable temp dir");
+        directory
+    }
+
+    #[test]
+    fn a_granted_directory_is_writable_and_its_sibling_is_not() {
+        let profile = a_profile("grant");
+        let write_set: PathBuf = a_user_directory("owned");
+        let sibling: PathBuf = a_user_directory("not-owned");
+        profile
+            .grant(&write_set, ContainerAccess::Modify)
+            .expect("a user can grant their own directory to the container");
+        let write_into = |directory: &PathBuf| {
+            profile
+                .run(
+                    CMD,
+                    &[
+                        "/c".to_owned(),
+                        format!(
+                            "echo changed> \"{}\"",
+                            directory.join("notes.txt").display()
+                        ),
+                    ],
+                    &system_directory(),
+                )
+                .expect("the contained process starts")
+        };
+
+        let _ = write_into(&write_set);
+        let _ = write_into(&sibling);
+        let wrote_owned: bool = write_set.join("notes.txt").exists();
+        let wrote_sibling: bool = sibling.join("notes.txt").exists();
+        let revoked = profile.revoke(&write_set);
+        for directory in [&write_set, &sibling] {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        let _ = profile.delete();
+
+        assert!(
+            wrote_owned,
+            "spike check 3a: a granted directory is writable from inside"
+        );
+        assert!(
+            !wrote_sibling,
+            "spike check 3b: an ungranted sibling is not writable"
+        );
+        assert!(
+            revoked.is_ok(),
+            "spike check 6: the grant can be removed again"
         );
     }
 }

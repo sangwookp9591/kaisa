@@ -35,7 +35,7 @@ mod windows_child;
 mod windows_command_line;
 
 #[cfg(windows)]
-pub use appcontainer::AppContainerProfile;
+pub use appcontainer::{AppContainerProfile, ContainerAccess};
 pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
