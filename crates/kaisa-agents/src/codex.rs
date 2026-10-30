@@ -58,7 +58,8 @@ impl<'launch> CodexLaunch<'launch> {
         if !is_safe_launch_value(model) {
             return Err(CodexLaunchError::InvalidModel);
         }
-        if !is_safe_launch_value(effort) {
+        // The effort lands inside a TOML string, so it is one of Codex's own levels, never text.
+        if !CODEX_EFFORTS.contains(&effort) {
             return Err(CodexLaunchError::InvalidEffort);
         }
         Ok(Self { model, effort })
@@ -81,6 +82,9 @@ pub fn codex_observed_argv(launch: &CodexLaunch<'_>) -> Vec<String> {
         "-".to_owned(),
     ]
 }
+
+/// The reasoning levels Codex CLI 0.165 accepts for `model_reasoning_effort`.
+pub const CODEX_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 fn is_safe_launch_value(value: &str) -> bool {
     !value.is_empty()
@@ -202,6 +206,19 @@ mod tests {
                 "-",
             ],
             "the observed adapter emits exactly the audited sandboxed command"
+        );
+    }
+
+    #[test]
+    fn an_effort_outside_the_known_levels_is_refused() {
+        let trailing_escape = r"medium\";
+
+        let launch = super::CodexLaunch::try_new("gpt-6.1-sol", trailing_escape);
+
+        assert_eq!(
+            launch.err(),
+            Some(super::CodexLaunchError::InvalidEffort),
+            "an effort is one of Codex's levels, so it can never break the TOML string it sits in"
         );
     }
 }
