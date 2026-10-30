@@ -451,6 +451,22 @@ There are two trust modes, and they replace the v0.2 "interactive / headless" sp
 
 Any other tool comes from the catalog and is policy-gated.
 
+**Catalog kinds (v0.6).**
+
+| Kind | Examples | Can edit files | Used for |
+|---|---|---|---|
+| `cli-agent` | Claude Code, Codex, Hermes, any agent CLI that passes the conformance check (`admin agent add`, §5.11) | yes, through the broker | every role |
+| `openai-compatible` | a local Ollama, vLLM or LM Studio server; a company gateway | no (tool-less) | T1 work Kaisa can hand over as text: classification, summaries, first-pass review of a supplied diff (§5.10) |
+
+A new agent is a catalog row plus a passing conformance run, never new engine code. Hermes and other
+agents join the same way as Claude Code and Codex did.
+
+**User MCP servers.** A project or policy pack may list MCP servers (GitHub, a database, a browser).
+Agents never connect to them directly: the broker starts or connects to each server, exposes its
+tools to the attempt under the role's tool policy, injects credentials from the keychain so the
+agent never sees them, and records every call through the same chokepoint as built-in tools. A
+server that is not listed does not exist for the agent.
+
 **Compaction snapshot.** This is ruflo ADR-505. Where the agent exposes a pre-compaction hook, the keeper keeps
 a bounded snapshot of the context about to be compacted. That snapshot feeds a re-injection after compaction and
 the handoff packet.
@@ -783,6 +799,25 @@ same ledger, outbox and authority rules as the engine cores.
 - On first run it shows onboarding.
 - Afterwards it shows the **Needs you** lane, then run cards with the plan tree, live cost, the current action of each agent, the review queue and pending questions.
 
+**Web console (v0.6).** `kaisa console` opens the same information in a browser; nothing listens
+until that command runs (P14).
+- **Transport.** The daemon binds `127.0.0.1` on a random port for the console's lifetime. A
+  per-launch 256-bit token is passed in the URL fragment and exchanged once for an `HttpOnly`,
+  `SameSite=Strict` session cookie. Every request checks the `Host` and `Origin` headers (against
+  DNS rebinding) and the console sends a strict Content Security Policy. Remote binding is not
+  offered in v1.
+- **Authority.** The console is read-only by default: a projection of the event stream over
+  server-sent events. Human actions (answer, approve, cancel) are sent as control-endpoint operations
+  with the same authority rules and presence checks as the CLI (§5.12); an agent can never reach it,
+  because agents have no route to loopback outside their broker (§5.7).
+- **Views.** Missions and their sub-runs; the team as a role × status grid that stays readable at
+  100+ agents, with drill-down to one agent's live terminal (read-only replay from the keeper's
+  transcript); tokens and cost per request, role, model and Mission, with `n/a` wherever a number
+  was not measured; the Needs-you queue; the verification loop of each Task; and the knowledge items
+  each attempt received.
+- **Build.** The page is static HTML, CSS and TypeScript compiled at build time and embedded in the
+  binary, so there is no Node runtime (TypeScript 7 is used for type checking only, ADR-0001).
+
 ### 5.12 Decisions, answers and effect previews
 
 **Two kinds of human input (user-flows U9).** v0.4 had a single Gate type. It is now split into two.
@@ -1024,6 +1059,7 @@ Kaisa takes:
 | Phase | Client | Technology |
 |---|---|---|
 | M0–M2 | CLI + TUI | `clap` 4.6, `ratatui` 0.30, `alacritty_terminal` + a Kaisa terminal widget |
+| M2 | Local web console | embedded static page over the event stream (§5.11); loopback, per-launch token |
 | M3 | Desktop | **GPUI** + `gpui-component` 0.8 (pinned git revision), or **Slint** 1.18, decided by a spike |
 
 **Spike exit criteria (review Q1).** Each criterion must pass on all three OSes:
