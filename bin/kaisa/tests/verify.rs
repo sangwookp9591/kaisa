@@ -138,3 +138,36 @@ fn a_passing_check_is_recorded_against_the_candidate_tree() {
         "passing evidence names exactly the tree it was produced on: {evidence:?}"
     );
 }
+
+#[test]
+fn a_candidate_changed_after_review_needs_new_evidence() {
+    let bench = Workbench::new("tamper");
+    std::fs::write(bench.repository().join(REQUIRED_FILE), "committed").expect("written");
+    commit_all(&bench.repository(), "reviewed candidate");
+    let reviewed: Candidate = freeze_candidate(&bench.repository(), "HEAD").expect("frozen");
+    let evidence: Vec<Evidence> = run_trusted_checks(
+        &bench.repository(),
+        &bench.base.join("state"),
+        "main",
+        &reviewed,
+        &[the_projects_test_command()],
+    )
+    .expect("the checks run");
+    std::fs::write(
+        bench.repository().join("src/lib.rs"),
+        "pub fn login() { todo!() }\n",
+    )
+    .expect("written");
+    commit_all(&bench.repository(), "changed after review");
+
+    let changed: Candidate = freeze_candidate(&bench.repository(), "HEAD").expect("frozen");
+
+    assert!(
+        evidence.iter().all(|piece| piece.applies_to(&reviewed)),
+        "the evidence holds for the candidate it was produced on"
+    );
+    assert!(
+        !evidence.iter().any(|piece| piece.applies_to(&changed)),
+        "after any change the old evidence says nothing about the new content"
+    );
+}

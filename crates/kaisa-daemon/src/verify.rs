@@ -41,6 +41,13 @@ impl Evidence {
     pub fn passed(&self) -> bool {
         self.exit == Some(ProcessExit::Code(0))
     }
+
+    /// True if this evidence was produced on exactly `candidate`'s content. Any change to the
+    /// candidate after the check, even one line, makes it stale (T21d).
+    #[must_use]
+    pub fn applies_to(&self, candidate: &Candidate) -> bool {
+        self.candidate_tree == candidate.tree
+    }
 }
 
 /// Runs every test command in `checks` on a clean checkout of `candidate`, noting which check
