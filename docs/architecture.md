@@ -1232,6 +1232,11 @@ Versions were checked on crates.io, npm and ziglang.org on 2026-10-30.
 | Work lost after the chaos suite | 0 bytes not covered by a receipt | preservation audit |
 | Coordinator handoff (signal → successor reconciled) | < 60 s, excluding agent startup | failover tests |
 | Per-role tool catalog + preamble | < 2k tokens | CI footprint report |
+| Light (read-only) attempt overhead, excluding the agent CLI | < 4 MB, no worktree | load tests |
+| 100 concurrent scripted agents on the reference host | daemon RSS < 200 MB, event append p99 < 5 ms, admission decision < 50 ms | scale benchmark (CI nightly, 10/50/100/200 agents) |
+| Context-pack assembly on a 10k-file repository | p95 < 300 ms | criterion |
+| Hybrid retrieval over 50k knowledge items | p95 < 50 ms | criterion |
+| Embedding model asset | < 100 MB, fetched once, checksum-verified | release check |
 
 ---
 
@@ -1265,6 +1270,14 @@ Stability is validated **after implementation** with:
 - **Property tests.** Epoch fencing, cursor monotonicity and contiguity, receipt payload conflicts, outbox recovery,
   "never auto-retry Unknown".
 - **Verification tamper corpus.** One case per ruflo ADR-503 gaming pattern. Each case must yield `Tampered`.
+- **Team-intelligence properties (v0.6).**
+  - nothing is delivered without every required evidence item on the exact source digest;
+  - two Tasks with overlapping write sets are never in progress together;
+  - the revision loop stops at its budget and on a repeated finding;
+  - no route goes below a `never_downgrade` grade;
+  - every knowledge item an agent received is in `injections`;
+  - a secret corpus never survives into `knowledge`;
+  - with the embedding model missing, retrieval reports "vector search off" instead of failing or pretending.
 - **Mutation testing.** `cargo-mutants` with a minimum score on the keeper, supervisor, scheduler, coordinator, policy,
   verify and ledger crates.
 - **Cross-OS CI.** Every PR runs on macOS, Linux and Windows. CI also runs the catalog and schema digest checks and the
@@ -1280,10 +1293,10 @@ usability targets (§10) are part of every milestone's exit criteria.
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M0 — Safe single attempt** | domain, sys, ledger + outbox, keeper, supervisor (state axes, leases, reconnect), workspace + preservation, authority split, minimum sandbox + egress broker on 3 OSes, Claude adapter in brokered mode, CLI, dependency evidence gate | Issue → attempt → exit → preserve → reclaim on all 3 OSes. Negative tests pass. Daemon restart keeps attempts. The chaos suite shows zero orphans and zero unreceipted loss. |
-| **M1 — Supervised runs** | scheduler (roles, pipelines, gates, cursors, receipts), Verify Gate with tamper detection, Codex adapter, observed mode, policy snapshots, settings risk scanner, TUI | Tampered candidates are never approved. Pipelines advance without an LLM. Unknown is never retried. |
-| **M2 — Resilient runs** | coordinator epochs + handoff, worker failover, quota classification, admission + budgets (+ optional gateway), tier 0 | A Claude → GPT handoff mid-run with no loss of plan, work or workers. Budgets are enforced. |
-| **M3 — Extended** | best-of-N, knowledge (BM25, then optional vectors), desktop (spike result), team server mode, remote peers | Pilot team in production. |
+| **M0 — Safe single attempt** | domain (v0.6 types: mission, run hierarchy, write set, grade, knowledge, context pack, route decision), sys, ledger + outbox, keeper, PTY, supervisor (state axes, leases, reconnect), workspace + preservation, authority split, minimum sandbox + egress broker on 3 OSes, **project profile + context pack v1** (spec + profile), Claude adapter in brokered mode, CLI, dependency evidence gate | Issue → attempt → exit → preserve → reclaim on all 3 OSes. The attempt starts from a recorded context pack and a confirmed project profile, with no setup. Negative tests pass. Daemon restart keeps attempts. The chaos suite shows zero orphans and zero unreceipted loss. |
+| **M1 — Verified team** | scheduler (missions, roles incl. documentation, pipelines, write-set ownership, gates, cursors, receipts), verification loop + delivery gate + bounded revision, repository index + impact sets + full context packs, knowledge (lessons, decisions, trajectories; hybrid retrieval behind the evidence gate), router grader + catalog grades + `openai-compatible` local models + tier 0, Codex adapter, observed mode, policy snapshots, settings risk scanner, TUI | Nothing reaches the user without fresh evidence. Tampered candidates are never delivered. Blocking review findings are fixed by revision without a human in the common case. A second session on the same repository needs no re-explanation (its packs carry the profile and lessons). Pipelines advance without an LLM. Unknown is never retried. |
+| **M2 — Resilient, learning, at scale** | coordinator epochs + handoff, worker failover, quota classification, admission + budgets (+ optional gateway), learned route priors, injection usefulness scoring, sub-runs + roll-ups + measured slots, web console, Hermes adapter, brokered user MCP servers | A Claude → GPT handoff mid-run with no loss of plan, work or workers. Budgets are enforced. Cost per verified task falls over a recorded benchmark set as priors learn. The 100-agent benchmark meets its budgets. |
+| **M3 — Extended** | best-of-N, team-shared knowledge, desktop (spike result), team server mode, remote workers, Mojo accelerator spike | Pilot team in production. |
 
 ---
 
@@ -1291,7 +1304,7 @@ usability targets (§10) are part of every milestone's exit criteria.
 
 | ADR | Decision | Status |
 |---|---|---|
-| 0001 | Rust core; Zig only for cross-linking; Mojo excluded in v1; TypeScript off the core path | Proposed |
+| 0001 | Rust core; Zig only for cross-linking; Mojo only as an optional accelerator (ADR-0033); TypeScript off the core path | Proposed (amended in v0.6) |
 | 0002 | One core binary, one daemon, one protocol; desktop as a separate GUI package | Proposed |
 | 0003 | SQLite event log + projections + outbox, single writer, signed checkpoints, upcast events | Proposed |
 | 0004 | tokio async (documented deviation from the guide's `[chrome]` rule) | Proposed |
@@ -1299,7 +1312,7 @@ usability targets (§10) are part of every milestone's exit criteria.
 | 0006 | Keep Orca's safety invariants; replace its operating model with Run / Task / Attempt / Gate and system-carried obligations | Proposed |
 | 0007 | Hooks are advisory; enforcement at the execution broker and the OS boundary; brokered vs observed trust modes | Proposed |
 | 0008 | Containment matrix with minimum OS versions; reduced modes need a Gate; egress through a per-attempt broker | Proposed |
-| 0009 | Learn only from verification receipts plus merge; learned changes are proposals, never self-promoted | Proposed |
+| 0009 | Learn only from verification receipts plus merge; learned changes are proposals, never self-promoted | Amended by 0031 and 0032: knowledge and route priors adapt automatically inside bounds; policy changes stay proposals |
 | 0010 | UI: TUI first; desktop GPUI or Slint decided by spike criteria; no Electron | Proposed |
 | 0011 | Lease-based lifecycle with four state axes; preservation protocol before reclamation; retain by request | Proposed |
 | 0012 | Coordinator epochs; daemon-assembled handoff packet; quiescent coordinator and worker failover | Proposed |
@@ -1318,6 +1331,14 @@ usability targets (§10) are part of every milestone's exit criteria.
 | 0025 | Path-based approval rules (self / second-person / codeowners / n-of-m) with recorded reassignment | Proposed |
 | 0026 | CI exit-code contract (0/3/4/5/6), a versioned JSON schema, and `run --resume` | Proposed |
 | 0027 | Admin lifecycle: hardware-backed enrollment, simulated validation, staged rollout, anti-replay rollback, offboarding receipts, agent conformance | Proposed |
+| 0028 | Missions own delivery and budget; large Missions split into sub-runs with daemon-built roll-ups | Proposed |
+| 0029 | Write-set ownership is a scheduler invariant; impact sets join verification | Proposed |
+| 0030 | Verification loop: schema-validated review verdicts, bounded automatic revision, one delivery gate on fresh evidence | Proposed |
+| 0031 | Knowledge and context engine are first-class and on by default; content-addressed context packs; every injection logged and scored | Proposed |
+| 0032 | Router on the spawn path: deterministic grader, per-category priors from verified outcomes, escalation by model before effort | Proposed |
+| 0033 | Local embeddings and vector search in Rust by default; Mojo only as an optional macOS/Linux accelerator, because Windows parity is a release blocker | Proposed |
+| 0034 | Local web console: loopback only, started by `kaisa console`, per-launch token, read-only by default | Proposed |
+| 0035 | Agent catalog kinds (`cli-agent`, `openai-compatible`); user MCP servers only through the broker | Proposed |
 
 ---
 
@@ -1361,6 +1382,15 @@ usability targets (§10) are part of every milestone's exit criteria.
 | Q2 upgrade evidence | §5.4 event versioning and upcasting; §16 replay tests |
 
 ## Appendix B. ruflo strengths adopted
+
+**v0.6.** The eight capabilities people use ruflo for are rebuilt so that Kaisa enforces each one
+where it executes (P17), based on [`research/ruflo-control.md`](research/ruflo-control.md):
+team splitting → missions, sub-runs and write-set ownership (§5.2, §5.13); cross-checking →
+verification loop and delivery gate (§5.8); project memory and self-learning retrieval → knowledge
+and context engine (§5.9); cost routing → router on the spawn path (§5.10); MCP and ecosystem →
+catalog kinds and brokered user MCP servers (§5.6); TUI and web console (§5.11).
+
+**v0.3.**
 
 Role table (§5.2), event-driven pipeline advance (§5.2), verified-outcome learning (§5.9), gaming
 defences (§5.8), compaction snapshot (§5.6, §5.3), cost ladder and gateway budgets (§5.10), risky-settings
