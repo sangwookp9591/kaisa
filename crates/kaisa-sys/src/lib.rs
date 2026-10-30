@@ -11,6 +11,8 @@ mod console_process;
 mod job;
 #[cfg(unix)]
 mod openpty;
+#[cfg(unix)]
+mod peer;
 #[cfg(target_os = "linux")]
 mod pidfd;
 mod process;
@@ -22,6 +24,8 @@ mod windows_child;
 #[cfg(any(windows, test))]
 mod windows_command_line;
 
+#[cfg(unix)]
+pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
 #[cfg(unix)]
