@@ -220,5 +220,71 @@ mod tests {
                 "the sandbox must not stop the work the agent was given"
             );
         }
+
+        /// A loopback listener a test can check for connections.
+        fn a_loopback_listener() -> (std::net::TcpListener, u16) {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+            listener
+                .set_nonblocking(true)
+                .expect("the listener can be polled");
+            let port: u16 = listener.local_addr().expect("bound").port();
+            (listener, port)
+        }
+
+        /// True if `listener` received a connection.
+        fn was_reached(listener: &std::net::TcpListener) -> bool {
+            listener.accept().is_ok()
+        }
+
+        /// An agent that opens a TCP connection to `port`, as any tool could.
+        fn an_agent_connecting_to(port: u16) -> ProcessSpec {
+            ProcessSpec {
+                program: PathBuf::from("/bin/bash"),
+                args: vec![
+                    "-c".to_owned(),
+                    format!("echo hello > /dev/tcp/127.0.0.1/{port}"),
+                ],
+                working_directory: std::env::temp_dir(),
+            }
+        }
+
+        fn a_policy_with_broker(port: u16) -> SeatbeltPolicy {
+            SeatbeltPolicy {
+                broker_port: Some(port),
+                ..SeatbeltPolicy::default()
+            }
+        }
+
+        #[test]
+        fn a_sandboxed_agent_cannot_open_a_direct_connection() {
+            let (_broker, broker_port) = a_loopback_listener();
+            let (elsewhere, elsewhere_port) = a_loopback_listener();
+
+            run_sandboxed(
+                &an_agent_connecting_to(elsewhere_port),
+                &a_policy_with_broker(broker_port),
+            );
+
+            assert!(
+                !was_reached(&elsewhere),
+                "an agent must not reach anything but its broker, not even on this machine"
+            );
+        }
+
+        #[test]
+        fn a_sandboxed_agent_can_reach_its_broker() {
+            let (broker, broker_port) = a_loopback_listener();
+
+            let exit: ProcessExit = run_sandboxed(
+                &an_agent_connecting_to(broker_port),
+                &a_policy_with_broker(broker_port),
+            );
+
+            assert_eq!(
+                (exit, was_reached(&broker)),
+                (ProcessExit::Code(0), true),
+                "the broker is the agent's one way out, and it must work"
+            );
+        }
     }
 }
