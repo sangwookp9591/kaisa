@@ -10,6 +10,7 @@ mod outbox;
 #[cfg(test)]
 mod outbox_tests;
 mod rows;
+mod tasks;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -19,3 +20,4 @@ pub use attempts::AttemptRow;
 pub use error::{CorruptReason, StoreError};
 pub use event_store::EventStore;
 pub use outbox::{Completion, Intent, PendingIntent};
+pub use tasks::TaskProgress;
