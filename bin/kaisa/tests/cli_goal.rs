@@ -451,3 +451,33 @@ fn kaisa_without_evidence_delivers_nothing_and_exits_four() {
         "the user is told plainly: {stdout:?}"
     );
 }
+
+#[test]
+fn a_cli_agent_that_does_not_run_is_not_registered() {
+    let bench = Workbench::new("agent-conformance");
+    let state: PathBuf = bench.base.join("state");
+    let missing: String = bench
+        .base
+        .join("no-such-agent")
+        .to_string_lossy()
+        .into_owned();
+
+    let refused = kaisa_agent(
+        &state,
+        &["add", "ghost", "--program", &missing, "--model", "m=T1"],
+    );
+    let accepted = kaisa_agent(
+        &state,
+        &["add", "vcs", "--program", "git", "--model", "m=T1"],
+    );
+
+    assert!(
+        !refused.status.success(),
+        "a program that cannot start is never offered to the router"
+    );
+    assert!(
+        accepted.status.success(),
+        "a program that answers --version is registered: {:?}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+}

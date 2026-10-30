@@ -91,6 +91,36 @@ fn save(state: &Path, catalog: &Catalog) -> io::Result<()> {
     std::fs::write(state.join(CATALOG_FILE), Value::Array(entries).to_string())
 }
 
+/// How long a CLI agent may take to answer `--version`.
+const CONFORMANCE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+/// Output kept from the conformance run, in bytes.
+const CONFORMANCE_OUTPUT_CAP: usize = 4096;
+
+/// The conformance check run before an entry is saved (user-flows F37): a CLI agent must start
+/// and answer `--version`. A local model endpoint is checked once its client lands (T28b).
+fn conforms(entry: &AgentEntry) -> Result<(), String> {
+    let AgentKind::CliAgent { program } = &entry.kind else {
+        return Ok(());
+    };
+    let spec = kaisa_sys::ProcessSpec {
+        program: PathBuf::from(program),
+        args: vec!["--version".to_owned()],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+    match kaisa_sys::run_captured(
+        &spec,
+        &kaisa_sys::Confinement::Unconfined,
+        &[],
+        CONFORMANCE_DEADLINE,
+        CONFORMANCE_OUTPUT_CAP,
+    ) {
+        Ok(run) if run.exit == Some(kaisa_sys::ProcessExit::Code(0)) => Ok(()),
+        Ok(_) => Err(format!("{program} --version did not succeed")),
+        Err(error) => Err(format!("{program} does not run: {error}")),
+    }
+}
+
 /// Parsed `kaisa agent add <name> (--program <p> | --endpoint <url>) --model <id>=<T0..T3>…`.
 fn parse_add(args: &[String]) -> Result<AgentEntry, String> {
     let name: String = args.first().ok_or("missing agent name")?.clone();
@@ -155,6 +185,10 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
                     return Ok(crate::EXIT_USAGE);
                 }
             };
+            if let Err(problem) = conforms(&entry) {
+                writeln!(err, "kaisa agent add: {problem}")?;
+                return Ok(crate::EXIT_FAILURE);
+            }
             let mut catalog = load(&state)?;
             let name: String = entry.name.clone();
             if let Err(refused) = catalog.add(entry) {
