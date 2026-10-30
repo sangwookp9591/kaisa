@@ -235,15 +235,10 @@ impl OwnedProcess {
     /// Ends the process group led by the child, then the child itself if it still runs.
     #[cfg(unix)]
     fn end_tree(&mut self) -> io::Result<()> {
-        match unix::kill_process_group(self.child.id()) {
-            Ok(()) => {}
-            // macOS answers EPERM, not ESRCH, when the group holds only exited, unreaped
-            // members: there is nothing left to end once the leader is known to have exited.
-            Err(error)
-                if error.raw_os_error() == Some(libc::EPERM)
-                    && self.child.try_wait()?.is_some() => {}
-            Err(error) => return Err(error),
-        }
+        let killed: io::Result<()> = unix::kill_process_group(self.child.id());
+        // Only asked when the kill failed: whether the leader has exited, which reaps it.
+        let leader_exited: bool = killed.is_err() && self.child.try_wait()?.is_some();
+        group_kill_outcome(killed, leader_exited)?;
         #[cfg(target_os = "linux")]
         if let Some(pidfd) = &self.pidfd {
             // Addresses exactly our child, even if its PID was reused.
@@ -260,6 +255,17 @@ impl OwnedProcess {
     #[cfg(windows)]
     fn end_tree(&mut self) -> io::Result<()> {
         self.job.terminate()
+    }
+}
+
+/// The result of killing an agent's process group. macOS answers EPERM, not ESRCH, when the
+/// group holds only exited, unreaped members, which happens when the agent exits between
+/// Kaisa's last look and the kill: once the leader is known to have exited, nothing is left.
+#[cfg(unix)]
+fn group_kill_outcome(killed: io::Result<()>, leader_exited: bool) -> io::Result<()> {
+    match killed {
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) && leader_exited => Ok(()),
+        other => other,
     }
 }
 
@@ -551,22 +557,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn killing_the_tree_of_an_exited_unreaped_agent_is_not_an_error() {
-        let mut process: OwnedProcess = started(&a_process_that_exits_with(AGENT_FAILURE_CODE));
-        // Leave it unreaped long enough to be a zombie: the state a drained agent is in.
-        std::thread::sleep(ZOMBIE_SETTLE);
+    fn a_group_of_only_exited_members_is_nothing_left_to_kill() {
+        let eperm = || std::io::Error::from_raw_os_error(libc::EPERM);
 
-        let killed = process.kill_tree();
+        let after_exit = super::group_kill_outcome(Err(eperm()), LEADER_EXITED);
+        let while_running = super::group_kill_outcome(Err(eperm()), LEADER_RUNNING);
 
         assert!(
-            killed.is_ok(),
-            "cleanup of an agent that already ended must not fail: {killed:?}"
+            after_exit.is_ok(),
+            "macOS's EPERM for a zombie-only group means done"
+        );
+        assert!(
+            while_running.is_err(),
+            "EPERM while the agent still runs is a real refusal and must surface"
         );
     }
 
-    /// Long enough for a process that exits at once to have exited.
+    /// The agent's group leader has exited.
     #[cfg(unix)]
-    const ZOMBIE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+    const LEADER_EXITED: bool = true;
+    /// The agent's group leader still runs.
+    #[cfg(unix)]
+    const LEADER_RUNNING: bool = false;
 
     #[cfg(unix)]
     mod unix_tree {
