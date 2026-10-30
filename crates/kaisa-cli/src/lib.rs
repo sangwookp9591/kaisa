@@ -12,6 +12,12 @@ pub const EXIT_SUCCESS: u8 = 0;
 /// Exit status for a command that has not been implemented yet.
 pub const EXIT_NOT_IMPLEMENTED: u8 = 2;
 
+/// Exit status for a command that ran and failed.
+pub const EXIT_FAILURE: u8 = 1;
+
+/// Exit status for a command used with the wrong arguments.
+pub const EXIT_USAGE: u8 = 64;
+
 /// The version of this build, taken from the workspace manifest (single source of truth).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -45,6 +51,22 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
+        Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
+            (Some("--attempt"), Some(directory)) => {
+                let stdin = io::stdin();
+                match kaisa_mcp::serve_attempt(std::path::Path::new(directory), stdin.lock(), out) {
+                    Ok(()) => Ok(EXIT_SUCCESS),
+                    Err(error) => {
+                        writeln!(err, "kaisa mcp: {error}")?;
+                        Ok(EXIT_FAILURE)
+                    }
+                }
+            }
+            _ => {
+                writeln!(err, "usage: kaisa mcp --attempt <attempt directory>")?;
+                Ok(EXIT_USAGE)
+            }
+        },
         Some(command) => {
             writeln!(
                 err,

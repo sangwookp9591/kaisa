@@ -5,10 +5,12 @@
 //! reuses `kaisa-protocol`'s bounded frame reader. M0 implements the three methods an agent
 //! needs (`initialize`, `tools/list`, `tools/call`); anything else gets a JSON-RPC error.
 
+mod attempt;
 mod broker;
 mod server;
 mod tools;
 
+pub use attempt::{BRIDGE_CONFIG_FILE, BridgeConfig, serve_attempt};
 pub use broker::{ExecSandbox, FileBroker};
 pub use server::{McpServer, ToolHandler, ToolOutcome};
 pub use tools::{ToolDescription, tools_for};

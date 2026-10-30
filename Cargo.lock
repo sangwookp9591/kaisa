@@ -160,6 +160,9 @@ dependencies = [
 [[package]]
 name = "kaisa-cli"
 version = "0.0.0"
+dependencies = [
+ "kaisa-mcp",
+]
 
 [[package]]
 name = "kaisa-context"
