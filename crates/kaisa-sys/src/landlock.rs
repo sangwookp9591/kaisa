@@ -43,6 +43,23 @@ const RULE_NET_PORT: libc::c_int = 2;
 /// The first ABI with network rules.
 const NETWORK_ABI: i64 = 4;
 
+/// `AUDIT_ARCH_*` of this build's architecture (kernel ABI, `linux/audit.h`); the seccomp
+/// filter kills any process whose syscalls arrive under another architecture.
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: Option<u32> = Some(0xC000_003E);
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: Option<u32> = Some(0xC000_00B7);
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const AUDIT_ARCH: Option<u32> = None;
+/// Byte offsets into `struct seccomp_data`: syscall number, architecture, and the low halves
+/// of the first two arguments (little-endian).
+const SECCOMP_NR: u32 = 0;
+const SECCOMP_ARCH: u32 = 4;
+const SECCOMP_ARG0_LOW: u32 = 16;
+const SECCOMP_ARG1_LOW: u32 = 24;
+/// The bits of a socket type that name the type, without `SOCK_NONBLOCK` and `SOCK_CLOEXEC`.
+const SOCK_TYPE_MASK: u32 = 0xF;
+
 /// Every write-like right of ABI 1.
 const WRITES_ABI_1: u64 = ACCESS_FS_WRITE_FILE
     | ACCESS_FS_REMOVE_DIR
@@ -81,14 +98,78 @@ struct PathBeneathAttr {
 #[derive(Debug)]
 pub struct LandlockRuleset {
     fd: OwnedFd,
-    /// True when outgoing TCP is limited to the broker (ABI 4 and later). UDP is never covered.
+    /// True when outgoing TCP is limited to the broker (ABI 4 and later).
     pub tcp_confined: bool,
+    /// The seccomp program that refuses internet datagram sockets, when the architecture is
+    /// supported. Landlock does not cover UDP; this closes that gap.
+    udp_filter: Option<Vec<libc::sock_filter>>,
 }
 
 impl LandlockRuleset {
     pub(crate) fn raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
+
+    /// True when internet datagram sockets are refused.
+    #[must_use]
+    pub fn udp_confined(&self) -> bool {
+        self.udp_filter.is_some()
+    }
+
+    /// The seccomp program as an address and length, for the child to install without
+    /// allocating. The vector outlives the spawn, and fork copies it into the child.
+    pub(crate) fn udp_filter_parts(&self) -> Option<(usize, u16)> {
+        let filter = self.udp_filter.as_ref()?;
+        let length: u16 = u16::try_from(filter.len()).ok()?;
+        Some((filter.as_ptr() as usize, length))
+    }
+}
+
+fn statement(code: u32, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code: u16::try_from(code).unwrap_or(u16::MAX),
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code: u16::try_from(code).unwrap_or(u16::MAX),
+        jt,
+        jf,
+        k,
+    }
+}
+
+/// A seccomp program refusing `socket(AF_INET or AF_INET6, SOCK_DGRAM, …)` with `EACCES` and
+/// allowing everything else. `None` on an architecture without a known audit value.
+fn udp_filter() -> Option<Vec<libc::sock_filter>> {
+    let arch: u32 = AUDIT_ARCH?;
+    let load: u32 = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+    let equals: u32 = libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K;
+    let socket_nr: u32 = u32::try_from(libc::SYS_socket).ok()?;
+    let inet: u32 = u32::try_from(libc::AF_INET).ok()?;
+    let inet6: u32 = u32::try_from(libc::AF_INET6).ok()?;
+    let datagram: u32 = u32::try_from(libc::SOCK_DGRAM).ok()?;
+    let refuse: u32 = libc::SECCOMP_RET_ERRNO | u32::try_from(libc::EACCES).ok()?;
+    Some(vec![
+        statement(load, SECCOMP_ARCH),
+        jump(equals, arch, 1, 0),
+        statement(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_KILL_PROCESS),
+        statement(load, SECCOMP_NR),
+        jump(equals, socket_nr, 1, 0),
+        statement(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
+        statement(load, SECCOMP_ARG0_LOW),
+        jump(equals, inet, 1, 0),
+        jump(equals, inet6, 0, 4),
+        statement(load, SECCOMP_ARG1_LOW),
+        statement(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, SOCK_TYPE_MASK),
+        jump(equals, datagram, 0, 1),
+        statement(libc::BPF_RET | libc::BPF_K, refuse),
+        statement(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
+    ])
 }
 
 /// The kernel's Landlock ABI version, or `None` when Landlock is unavailable.
@@ -164,6 +245,7 @@ pub fn write_ruleset(
     let ruleset = LandlockRuleset {
         fd: owned,
         tcp_confined,
+        udp_filter: udp_filter(),
     };
     for path in writable
         .iter()
@@ -240,9 +322,9 @@ fn allow_beneath(ruleset: &LandlockRuleset, path: &Path, access: u64) -> io::Res
     Ok(())
 }
 
-/// Runs in the forked child before `exec`: no new privileges, then the ruleset. Only
-/// async-signal-safe calls are made.
-pub(crate) fn restrict_self(ruleset_fd: RawFd) -> io::Result<()> {
+/// Runs in the forked child before `exec`: no new privileges, the ruleset, then the UDP filter
+/// when there is one. Only async-signal-safe calls are made.
+pub(crate) fn restrict_self(ruleset_fd: RawFd, udp_filter: Option<(usize, u16)>) -> io::Result<()> {
     let one: libc::c_ulong = 1;
     let zero: libc::c_ulong = 0;
     #[allow(unsafe_code)]
@@ -259,6 +341,21 @@ pub(crate) fn restrict_self(ruleset_fd: RawFd) -> io::Result<()> {
         unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, no_flags) };
     if restricted != 0 {
         return Err(io::Error::last_os_error());
+    }
+    if let Some((address, length)) = udp_filter {
+        let program = libc::sock_fprog {
+            len: length,
+            filter: address as *mut libc::sock_filter,
+        };
+        let mode: libc::c_ulong = libc::SECCOMP_MODE_FILTER.into();
+        #[allow(unsafe_code)]
+        // SAFETY: `program` points at the filter vector the parent built, which fork copied into
+        // this child and which stays alive until exec; no new privileges is already set.
+        let installed: libc::c_int =
+            unsafe { libc::prctl(libc::PR_SET_SECCOMP, mode, &raw const program, zero, zero) };
+        if installed != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     Ok(())
 }
@@ -417,6 +514,37 @@ mod tests {
             (exit, broker.accept().is_ok()),
             (ProcessExit::Code(0), true),
             "the broker is the agent's one way out, and it must work"
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_agent_cannot_send_a_datagram() {
+        let receiver = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("loopback works");
+        receiver
+            .set_nonblocking(true)
+            .expect("the receiver can be polled");
+        let port: u16 = receiver.local_addr().expect("bound").port();
+        let (_broker, broker_port) = a_loopback_listener();
+        let ruleset: LandlockRuleset = a_broker_only_ruleset(broker_port);
+        assert!(
+            ruleset.udp_confined(),
+            "CI runs on an architecture the UDP filter supports"
+        );
+        let agent = ProcessSpec {
+            program: PathBuf::from("/bin/bash"),
+            args: vec![
+                "-c".to_owned(),
+                format!("echo hello > /dev/udp/127.0.0.1/{port}"),
+            ],
+            working_directory: std::env::temp_dir(),
+        };
+
+        run_confined(&agent, &ruleset);
+        let mut buffer = [0_u8; 64];
+
+        assert!(
+            receiver.recv(&mut buffer).is_err(),
+            "an agent must not leak data in datagrams such as DNS queries"
         );
     }
 }

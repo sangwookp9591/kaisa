@@ -99,11 +99,13 @@ impl OwnedProcess {
         let mut command: Command = command_for(spec);
         command.process_group(0);
         let fd = ruleset.raw_fd();
+        let udp_filter: Option<(usize, u16)> = ruleset.udp_filter_parts();
         #[allow(unsafe_code)]
         // SAFETY: the closure runs in the forked child before `exec` and only calls `prctl` and
-        // the `landlock_restrict_self` syscall, which are async-signal-safe.
+        // the `landlock_restrict_self` syscall, which are async-signal-safe; the filter it
+        // installs lives in `ruleset`, which outlives this spawn.
         unsafe {
-            command.pre_exec(move || crate::landlock::restrict_self(fd));
+            command.pre_exec(move || crate::landlock::restrict_self(fd, udp_filter));
         }
         Self::spawn_prepared(command)
     }
