@@ -74,7 +74,9 @@ impl ContainedAttempt {
         for program in programs {
             // A bare program name ("claude") is found on PATH; there is no directory to grant.
             if let Some(directory) = program.parent().filter(|path| !path.as_os_str().is_empty()) {
-                self.grant(directory, ReadExecute)?;
+                // Granted to the shared capability and never revoked: idempotent, and no
+                // other attempt's access can be lost to it.
+                self.programs.grant(directory, ReadExecute)?;
             }
         }
         Ok(())
