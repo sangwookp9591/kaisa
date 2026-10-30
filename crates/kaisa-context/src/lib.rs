@@ -3,12 +3,14 @@
 
 mod confirm;
 mod detect;
+mod pack;
 mod profile;
 #[cfg(test)]
 mod test_support;
 
 pub use confirm::confirm;
 pub use detect::{INSTRUCTION_EXCERPT_LIMIT, derive_profile};
+pub use pack::{ContextPack, PackInputs, Section, SectionKind};
 pub use profile::{
     Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
 };
