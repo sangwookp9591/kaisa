@@ -6,6 +6,7 @@ mod attempts_tests;
 mod context_packs;
 mod error;
 mod event_store;
+mod knowledge;
 mod outbox;
 #[cfg(test)]
 mod outbox_tests;
@@ -19,5 +20,6 @@ mod tests;
 pub use attempts::AttemptRow;
 pub use error::{CorruptReason, StoreError};
 pub use event_store::EventStore;
+pub use knowledge::TrustedKnowledge;
 pub use outbox::{Completion, Intent, PendingIntent};
 pub use tasks::TaskProgress;
