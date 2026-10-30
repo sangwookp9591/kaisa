@@ -5,6 +5,7 @@
 
 mod goal;
 mod ids;
+mod sandbox;
 
 pub use goal::{
     AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
