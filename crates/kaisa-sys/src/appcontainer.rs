@@ -108,7 +108,13 @@ impl AppContainerProfile {
     ///
     /// Returns the error Windows reports if the path's DACL cannot be read or written.
     pub fn grant(&self, path: &Path, access: ContainerAccess) -> io::Result<()> {
-        self.change_dacl(path, access.rights(), GRANT_ACCESS)
+        self.change_dacl(path, access.rights(), GRANT_ACCESS)?;
+        if access == ContainerAccess::Modify {
+            // A container runs at low integrity; without a low label the path's default medium
+            // label forbids it to write ("no write up"), whatever the DACL says (spike check 3a).
+            set_label(path, LOW_LABEL_INHERITED)?;
+        }
+        Ok(())
     }
 
     /// Removes every ACE this container has on `path`.
@@ -117,7 +123,8 @@ impl AppContainerProfile {
     ///
     /// Returns the error Windows reports if the path's DACL cannot be read or written.
     pub fn revoke(&self, path: &Path) -> io::Result<()> {
-        self.change_dacl(path, 0, REVOKE_ACCESS)
+        self.change_dacl(path, 0, REVOKE_ACCESS)?;
+        set_label(path, NO_EXPLICIT_LABEL)
     }
 
     fn change_dacl(&self, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
@@ -313,6 +320,70 @@ impl Drop for AppContainerProfile {
                 FreeSid(self.sid);
             }
         }
+    }
+}
+
+/// A low mandatory label that does not forbid low writers, inherited by everything below.
+const LOW_LABEL_INHERITED: &str = "S:(ML;OICI;NW;;;LW)";
+/// No explicit label: the object falls back to the default (medium) label.
+const NO_EXPLICIT_LABEL: &str = "S:";
+
+/// Replaces the mandatory label of `path` with the one in `sddl`.
+fn set_label(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{GetSecurityDescriptorSacl, LABEL_SECURITY_INFORMATION};
+
+    let wide_sddl: Vec<u16> = wide(OsStr::new(sddl));
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: `wide_sddl` is NUL-terminated; the descriptor is LocalAlloc'd and freed below.
+    let parsed: i32 = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            null_mut(),
+        )
+    };
+    if parsed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut present: i32 = 0;
+    let mut defaulted: i32 = 0;
+    let mut sacl: *mut ACL = null_mut();
+    let name: Vec<u16> = wide(path.as_os_str());
+    #[allow(unsafe_code)]
+    // SAFETY: `descriptor` is the live descriptor parsed above and owns `sacl`; `name` is
+    // NUL-terminated; the descriptor is freed once after the call.
+    let written: u32 = unsafe {
+        let read: i32 = GetSecurityDescriptorSacl(
+            descriptor,
+            &raw mut present,
+            &raw mut sacl,
+            &raw mut defaulted,
+        );
+        let written: u32 = if read == 0 {
+            u32::MAX
+        } else {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null(),
+                sacl,
+            )
+        };
+        LocalFree(descriptor as HLOCAL);
+        written
+    };
+    match written {
+        0 => Ok(()),
+        u32::MAX => Err(io::Error::other("the label SDDL has no SACL")),
+        code => Err(io::Error::from_raw_os_error(code as i32)),
     }
 }
 

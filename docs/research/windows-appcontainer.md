@@ -28,6 +28,15 @@ spike (T15.5s), not a design fact.
   local IPC endpoint (named pipe) with an ACE for the container SID is the candidate, to be
   confirmed by the spike.
 
+## Verified on a non-admin Windows CI runner (T15.5s)
+
+- Check 1 ✓: a profile is created and a process runs inside it without administrator rights.
+- Check 2 ✓: without a grant, a contained process cannot read a file in the user's temp dir.
+- Check 4a ✓: a contained process cannot reach a loopback TCP listener.
+- Check 3a ✗ at first: a DACL grant alone did not make a directory writable. The container
+  runs at low integrity and the directory's default medium label forbids writing up, so a
+  write grant must also set a low mandatory label (`S:(ML;OICI;NW;;;LW)`); revoking restores it.
+
 ## Spike checklist (T15.5s, Windows CI runner, non-admin)
 
 1. Create a profile, start `cmd /c` inside it, confirm it runs. Record whether ConPTY works.
