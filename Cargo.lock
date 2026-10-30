@@ -149,6 +149,7 @@ dependencies = [
  "kaisa-context",
  "kaisa-daemon",
  "kaisa-domain",
+ "kaisa-ledger",
  "kaisa-mcp",
  "kaisa-sys",
  "kaisa-workspace",

@@ -8,6 +8,7 @@ mod goal;
 mod ids;
 mod learn;
 mod mission;
+mod recall;
 mod recover;
 mod review;
 mod revision;
@@ -22,6 +23,7 @@ pub use goal::{
 };
 pub use learn::learn_from_delivery;
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
+pub use recall::{MAX_LESSONS_PER_PACK, relevant_lessons};
 pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict};
 pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};

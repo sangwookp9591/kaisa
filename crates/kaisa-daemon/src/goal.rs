@@ -13,8 +13,8 @@ use std::time::Duration;
 use kaisa_agents::first_message;
 use kaisa_context::{ContextPack, PackInputs, ProjectProfile, derive_profile};
 use kaisa_domain::{
-    AttemptId, AttemptState, Cleanup, Event, EventKind, Execution, ExitStatus, MissionId, RepoPath,
-    Role, RunId, TaskId, WriteSet,
+    AttemptId, AttemptState, Cleanup, ContentDigest, Event, EventKind, Execution, ExitStatus,
+    MissionId, RepoPath, Role, RunId, TaskId, WriteSet,
 };
 use kaisa_keeper::{ExitRecord, write_exit_record};
 use kaisa_ledger::EventStore;
@@ -253,6 +253,10 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
 
     let profile: ProjectProfile =
         derive_profile(request.repository).map_err(at("deriving the project profile"))?;
+    let recalled: Vec<(ContentDigest, String)> =
+        crate::recall::relevant_lessons(&ledger, request.goal, request.write_set)
+            .map_err(at("recalling lessons"))?;
+    let lesson_texts: Vec<String> = recalled.iter().map(|(_, text)| text.clone()).collect();
     let pack: ContextPack = ContextPack::assemble(PackInputs {
         spec: request.goal,
         acceptance: &[],
@@ -261,6 +265,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         findings: &[],
         impact: &[],
         diff: "",
+        lessons: &lesson_texts,
     })
     .fit(kaisa_context::budget_for(request.role))
     .map_err(at("fitting the context pack"))?;
@@ -268,6 +273,13 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     ledger
         .record_context_pack(&attempt, &digest, &pack.canonical_bytes())
         .map_err(at("recording the context pack"))?;
+    // Only lessons that survived the budget were given; only those are on the record (T26a).
+    if !pack.cut().contains(&kaisa_context::SectionKind::Lessons) {
+        let given: Vec<ContentDigest> = recalled.into_iter().map(|(digest, _)| digest).collect();
+        ledger
+            .record_injection(&attempt, &given)
+            .map_err(at("recording injected lessons"))?;
+    }
 
     let branch: String = format!("kaisa/{attempt}");
     let worktree_path: PathBuf = request

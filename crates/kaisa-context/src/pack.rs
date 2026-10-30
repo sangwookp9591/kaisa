@@ -67,6 +67,8 @@ pub enum SectionKind {
     WriteSet,
     /// Languages and confirmed commands.
     Profile,
+    /// Trusted lessons from earlier verified work on this repository, quoted (T25c).
+    Lessons,
     /// Files the change can affect, for context; the first to be cut (T24a).
     Impact,
     /// Quoted excerpts of the repository's instruction files.
@@ -84,6 +86,7 @@ impl SectionKind {
             Self::Diff => "diff",
             Self::WriteSet => "write_set",
             Self::Profile => "profile",
+            Self::Lessons => "lessons",
             Self::Impact => "impact",
             Self::Instructions => "instructions",
         }
@@ -116,6 +119,8 @@ pub struct PackInputs<'inputs> {
     pub impact: &'inputs [RepoPath],
     /// For a reviewer: the candidate's diff against its base; empty for other roles.
     pub diff: &'inputs str,
+    /// Trusted lessons retrieved for this task, most relevant first (T25c).
+    pub lessons: &'inputs [String],
 }
 
 /// The context an attempt starts from.
@@ -169,6 +174,14 @@ impl ContextPack {
                 text: profile_summary(inputs.profile),
             },
             Section {
+                kind: SectionKind::Lessons,
+                text: inputs
+                    .lessons
+                    .iter()
+                    .map(|lesson| format!("- {}\n", lesson.replace('\n', " ")))
+                    .collect(),
+            },
+            Section {
                 kind: SectionKind::Impact,
                 text: inputs
                     .impact
@@ -183,6 +196,7 @@ impl ContextPack {
             SectionKind::Findings
             | SectionKind::Diff
             | SectionKind::Profile
+            | SectionKind::Lessons
             | SectionKind::Impact => !section.text.is_empty(),
             _ => true,
         });
@@ -234,7 +248,7 @@ impl ContextPack {
         let mut message: String = String::new();
         for section in &self.sections {
             match section.kind {
-                SectionKind::Findings | SectionKind::Diff => {
+                SectionKind::Findings | SectionKind::Diff | SectionKind::Lessons => {
                     message.push_str(&format!("## {}\n", heading(section.kind)));
                     message.push_str(UNTRUSTED_NOTICE);
                     for line in section.text.lines() {
@@ -355,6 +369,7 @@ fn heading(kind: SectionKind) -> &'static str {
         SectionKind::Diff => "Changes under review",
         SectionKind::WriteSet => "You may change only",
         SectionKind::Profile => "Project",
+        SectionKind::Lessons => "Learned on this repository",
         SectionKind::Impact => "Files this change can affect",
         SectionKind::Instructions => "Repository instructions",
     }
@@ -459,6 +474,7 @@ mod tests {
             findings: &[],
             impact: &[],
             diff: "",
+            lessons: &[],
         })
     }
 
@@ -483,6 +499,7 @@ mod tests {
             findings: &[],
             impact: &[],
             diff: "",
+            lessons: &[],
         })
     }
 
@@ -584,6 +601,7 @@ mod tests {
             findings: &[],
             impact: &[],
             diff: "",
+            lessons: &[],
         });
 
         let message: String = pack.render();
@@ -656,6 +674,7 @@ mod tests {
             findings: &findings,
             impact: &impact,
             diff: "",
+            lessons: &[],
         });
         let required_only: usize = full
             .sections()
@@ -695,6 +714,7 @@ mod tests {
             findings: &[],
             impact: &[],
             diff,
+            lessons: &[],
         })
         .fit(super::budget_for(kaisa_domain::Role::Reviewer))
         .expect("a small diff fits a reviewer's budget");

@@ -339,3 +339,73 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
         "the crashed agent's bridge does not outlive it"
     );
 }
+
+/// What the first session learned about the login code.
+const TOKEN_LESSON: &str =
+    "The login flow must wait for the token refresh before reading the session.";
+
+#[test]
+fn a_second_session_needs_no_re_explanation() {
+    let bench = Workbench::new("second-session");
+    let state: PathBuf = bench.state();
+    std::fs::create_dir_all(&state).expect("writable");
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
+    let first_session_candidate = kaisa_workspace::Candidate {
+        commit: "1f2e3d4c5b6a79881726354453627180918a7b6c".to_owned(),
+        tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+    };
+    let taught = kaisa_daemon::learn_from_delivery(
+        &mut ledger,
+        &kaisa_daemon::Delivery::Deliver { reduced: false },
+        &first_session_candidate,
+        TOKEN_LESSON,
+        &["src".to_owned()],
+    )
+    .expect("recorded")
+    .expect("a delivered lesson is trusted");
+    drop(ledger);
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: the_fake_agent(),
+        args: vec![
+            "--mcp-config".to_owned(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".to_owned(),
+            NOTES.to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: "Fix the login token refresh race.",
+        base: "HEAD",
+        state_directory: &state,
+        write_set: &write_set,
+        role: kaisa_domain::Role::Developer,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+    })
+    .expect("the goal runs");
+    let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("reopens");
+    let pack: Vec<u8> = ledger
+        .context_pack(&kaisa_domain::ContentDigest::try_new(&outcome.context_pack).expect("digest"))
+        .expect("readable")
+        .expect("the attempt's pack is stored");
+    let given = ledger.injections_for(&outcome.attempt).expect("readable");
+
+    assert!(
+        String::from_utf8_lossy(&pack).contains(TOKEN_LESSON),
+        "the second session starts from what the first one learned"
+    );
+    assert_eq!(
+        given,
+        vec![taught],
+        "the lesson given to the attempt is on its record, to be scored against its outcome"
+    );
+}

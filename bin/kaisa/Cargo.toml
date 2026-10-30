@@ -16,6 +16,7 @@ path = "src/main.rs"
 kaisa-cli.workspace = true
 
 [dev-dependencies]
+kaisa-ledger.workspace = true
 kaisa-context.workspace = true
 kaisa-workspace.workspace = true
 kaisa-daemon.workspace = true

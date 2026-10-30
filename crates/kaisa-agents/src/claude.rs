@@ -77,6 +77,7 @@ mod tests {
             findings: &[],
             impact: &[],
             diff: "",
+            lessons: &[],
         })
     }
 
