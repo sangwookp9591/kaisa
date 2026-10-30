@@ -9,6 +9,7 @@ mod ids;
 mod mission;
 mod recover;
 mod review;
+mod revision;
 mod sandbox;
 mod verify;
 
@@ -20,4 +21,5 @@ pub use goal::{
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
 pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict};
+pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};
 pub use verify::{Evidence, run_trusted_checks};
