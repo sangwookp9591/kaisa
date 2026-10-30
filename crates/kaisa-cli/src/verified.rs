@@ -15,6 +15,36 @@ use kaisa_sys::ProcessSpec;
 /// The model Claude Code runs when the catalog offers nothing for a grade.
 const FALLBACK_CLAUDE_MODEL: &str = "sonnet";
 
+/// The provider Claude Code must reach during a confined run.
+#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
+pub(crate) const CLAUDE_PROVIDER_HOST: &str = "api.anthropic.com";
+
+/// The egress and session-state permissions needed by a confined Claude Code run.
+#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
+pub(crate) struct ClaudeConfinement {
+    /// The provider followed by the policy's additional allowed hosts.
+    pub(crate) egress_hosts: Vec<String>,
+    /// Only Claude Code's session directory and session file under the home directory.
+    pub(crate) writable: Vec<PathBuf>,
+}
+
+/// Adds the policy's hosts to Claude Code's provider and grants its session-state writes.
+///
+/// Host order is preserved; empty hosts and exact duplicates grant no additional access.
+#[cfg_attr(not(test), expect(dead_code, reason = "T35c wires the trial switch"))]
+pub(crate) fn claude_confinement(home: &Path, policy_hosts: &[String]) -> ClaudeConfinement {
+    let mut egress_hosts = vec![CLAUDE_PROVIDER_HOST.to_owned()];
+    for host in policy_hosts {
+        if !host.is_empty() && !egress_hosts.contains(host) {
+            egress_hosts.push(host.clone());
+        }
+    }
+    ClaudeConfinement {
+        egress_hosts,
+        writable: vec![home.join(".claude"), home.join(".claude.json")],
+    }
+}
+
 /// A tool-less local model used only for advisory first-pass review.
 pub(crate) struct LocalRoute {
     /// The registered OpenAI-compatible endpoint.
@@ -134,11 +164,26 @@ pub(crate) fn trusted_checks(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use kaisa_domain::{
         AgentEntry, AgentKind, Catalog, CatalogModel, Grade, RepoPath, Role, WriteSet,
     };
 
-    use super::{first_pass_route, routed_model};
+    use super::{CLAUDE_PROVIDER_HOST, claude_confinement, first_pass_route, routed_model};
+
+    /// A home directory supplied by the caller rather than read from the environment.
+    const CLAUDE_HOME: &str = "confined-user-home";
+    /// Claude Code's session directory relative to its home.
+    const CLAUDE_SESSION_DIRECTORY: &str = ".claude";
+    /// Claude Code's session file relative to its home.
+    const CLAUDE_SESSION_FILE: &str = ".claude.json";
+    /// The first additional host admitted by the policy.
+    const FIRST_POLICY_HOST: &str = "api.openai.com";
+    /// A later host retains its policy position rather than alphabetical order.
+    const LATER_POLICY_HOST: &str = "api.example.com";
+    /// A differently spelled host remains distinct under exact-string deduplication.
+    const DISTINCT_PROVIDER_HOST: &str = "API.ANTHROPIC.COM";
 
     /// The endpoint of the first registered local agent.
     const LOCAL_ENDPOINT: &str = "http://localhost:11434/v1";
@@ -154,6 +199,72 @@ mod tests {
     const CODE_MODEL: &str = "haiku";
     /// Claude Code's model for security review.
     const SECURITY_MODEL: &str = "opus";
+
+    #[test]
+    fn claude_needs_its_provider_and_session_files() {
+        let home = Path::new(CLAUDE_HOME);
+        let confinement = claude_confinement(home, &[]);
+
+        assert_eq!(
+            confinement.egress_hosts,
+            vec![CLAUDE_PROVIDER_HOST],
+            "Claude Code needs its provider even when the policy adds no hosts"
+        );
+        assert_eq!(
+            confinement.writable,
+            vec![
+                home.join(CLAUDE_SESSION_DIRECTORY),
+                home.join(CLAUDE_SESSION_FILE)
+            ],
+            "Claude Code needs both its session directory and its session file"
+        );
+    }
+
+    #[test]
+    fn policy_hosts_follow_the_provider_without_duplicates() {
+        let policy_hosts = [
+            "",
+            FIRST_POLICY_HOST,
+            CLAUDE_PROVIDER_HOST,
+            LATER_POLICY_HOST,
+            FIRST_POLICY_HOST,
+            "",
+            DISTINCT_PROVIDER_HOST,
+            LATER_POLICY_HOST,
+        ]
+        .map(str::to_owned);
+        let confinement = claude_confinement(Path::new(CLAUDE_HOME), &policy_hosts);
+
+        assert_eq!(
+            confinement.egress_hosts,
+            vec![
+                CLAUDE_PROVIDER_HOST,
+                FIRST_POLICY_HOST,
+                LATER_POLICY_HOST,
+                DISTINCT_PROVIDER_HOST,
+            ],
+            "the provider leads policy hosts in admission order, skipping empty hosts and exact duplicates"
+        );
+    }
+
+    #[test]
+    fn nothing_else_in_the_home_directory_is_writable() {
+        let home = Path::new(CLAUDE_HOME);
+        let confinement = claude_confinement(home, &[FIRST_POLICY_HOST.to_owned()]);
+
+        assert_eq!(
+            confinement.writable,
+            vec![
+                home.join(CLAUDE_SESSION_DIRECTORY),
+                home.join(CLAUDE_SESSION_FILE)
+            ],
+            "policy egress grants no home writes beyond Claude Code's two session-state paths"
+        );
+        assert!(
+            confinement.writable.iter().all(|path| path != home),
+            "the home directory itself must never become writable"
+        );
+    }
 
     /// A personal registration offering the given model grade.
     fn local_agent(name: &str, grade: Grade) -> AgentEntry {
