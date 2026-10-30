@@ -8,6 +8,7 @@ members = [
     "crates/kaisa-daemon",
     "crates/kaisa-domain",
     "crates/kaisa-egress",
+    "crates/kaisa-fake-agent",
     "crates/kaisa-keeper",
     "crates/kaisa-ledger",
     "crates/kaisa-mcp",

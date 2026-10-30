@@ -146,6 +146,9 @@ name = "kaisa"
 version = "0.0.0"
 dependencies = [
  "kaisa-cli",
+ "kaisa-domain",
+ "kaisa-mcp",
+ "serde_json",
 ]
 
 [[package]]
@@ -185,6 +188,13 @@ version = "0.0.0"
 [[package]]
 name = "kaisa-egress"
 version = "0.0.0"
+
+[[package]]
+name = "kaisa-fake-agent"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "kaisa-keeper"

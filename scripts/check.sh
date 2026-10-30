@@ -20,6 +20,8 @@ cargo +nightly fmt --all -- --check --config "$nightly_fmt_config"
 echo "== clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 echo "== tests"
+# The end-to-end tests run the test-only fake agent as a real process next to `kaisa`.
+cargo build --locked -q -p kaisa-fake-agent
 cargo test --workspace --locked
 if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc"; then
   # Only crates without C build steps: blake3 (assembly) and SQLite cannot be cross-compiled
