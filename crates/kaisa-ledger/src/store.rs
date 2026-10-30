@@ -3,7 +3,10 @@
 use std::fmt;
 use std::path::Path;
 
-use rusqlite::Connection;
+use kaisa_domain::{Event, RecordedEvent, Sequence};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+use crate::chain::{ChainHash, ChainedEvent};
 
 /// Schema of the event log. Rows are only ever inserted.
 const SCHEMA: &str = "
@@ -23,12 +26,25 @@ const SCHEMA: &str = "
 pub enum StoreError {
     /// SQLite reported an error.
     Sqlite(rusqlite::Error),
+    /// A stored row cannot be decoded into an event.
+    Corrupt {
+        /// The stored sequence of the bad row.
+        stored_sequence: i64,
+        /// What was wrong with it.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite(error) => write!(f, "ledger database error: {error}"),
+            Self::Corrupt {
+                stored_sequence,
+                reason,
+            } => {
+                write!(f, "ledger row {stored_sequence} is corrupt: {reason}")
+            }
         }
     }
 }
@@ -37,6 +53,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(error) => Some(error),
+            Self::Corrupt { .. } => None,
         }
     }
 }
@@ -68,6 +85,37 @@ impl EventStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(SCHEMA)?;
         Ok(Self { connection })
+    }
+
+    /// Records `event` at the next sequence, linked to the previous event's hash. Assigning the
+    /// sequence, computing the hash and inserting the row happen in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the transaction fails, or [`StoreError::Corrupt`] if
+    /// the last stored row cannot be decoded.
+    pub fn append(&mut self, event: Event) -> Result<ChainedEvent, StoreError> {
+        let transaction: Transaction<'_> = self.connection.transaction()?;
+        let (sequence, previous): (Sequence, ChainHash) = match last_link(&transaction)? {
+            Some((last_sequence, last_hash)) => (last_sequence.next(), last_hash),
+            None => (Sequence::FIRST, ChainHash::genesis()),
+        };
+        let recorded = RecordedEvent { sequence, event };
+        let hash: ChainHash = previous.link(&recorded);
+        transaction.execute(
+            "INSERT INTO events (sequence, kind, subject, payload_version, payload, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                stored_sequence(sequence),
+                recorded.event.kind.code(),
+                recorded.event.subject,
+                recorded.event.payload_version,
+                recorded.event.payload,
+                hash.as_bytes().as_slice(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(ChainedEvent { recorded, hash })
     }
 
     /// Number of events recorded so far.
@@ -104,6 +152,42 @@ impl EventStore {
     }
 }
 
+/// The sequence and hash of the last stored event, if any.
+fn last_link(transaction: &Transaction<'_>) -> Result<Option<(Sequence, ChainHash)>, StoreError> {
+    let row: Option<(i64, Vec<u8>)> = transaction
+        .query_row(
+            "SELECT sequence, hash FROM events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    row.map(|(stored, hash)| Ok((decode_sequence(stored)?, decode_hash(stored, hash)?)))
+        .transpose()
+}
+
+/// Converts a sequence to SQLite's signed integer type.
+fn stored_sequence(sequence: Sequence) -> i64 {
+    i64::try_from(sequence.value()).expect("sequences stay below i64::MAX")
+}
+
+fn decode_sequence(stored: i64) -> Result<Sequence, StoreError> {
+    u64::try_from(stored)
+        .ok()
+        .and_then(Sequence::from_stored)
+        .ok_or(StoreError::Corrupt {
+            stored_sequence: stored,
+            reason: "sequence is not positive",
+        })
+}
+
+fn decode_hash(stored_sequence: i64, bytes: Vec<u8>) -> Result<ChainHash, StoreError> {
+    let bytes: [u8; blake3::OUT_LEN] = bytes.try_into().map_err(|_| StoreError::Corrupt {
+        stored_sequence,
+        reason: "hash has the wrong length",
+    })?;
+    Ok(ChainHash::from_bytes(bytes))
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::path::PathBuf;
@@ -131,6 +215,46 @@ pub(crate) mod test_support {
         }
     }
 
+    use kaisa_domain::{Event, EventKind};
+
+    const CURRENT_PAYLOAD_VERSION: u16 = 1;
+
+    fn event(kind: EventKind, subject: &str, payload: &str) -> Event {
+        Event {
+            kind,
+            subject: subject.to_owned(),
+            payload_version: CURRENT_PAYLOAD_VERSION,
+            payload: payload.to_owned(),
+        }
+    }
+
+    /// Run 41 was started to fix the login test.
+    pub(crate) fn run_41_started() -> Event {
+        event(
+            EventKind::RunStarted,
+            "run_41",
+            r#"{"goal":"fix login test"}"#,
+        )
+    }
+
+    /// Run 41's first attempt was admitted.
+    pub(crate) fn attempt_41a_admitted() -> Event {
+        event(
+            EventKind::AttemptAdmitted,
+            "att_41a",
+            r#"{"task":"task_41"}"#,
+        )
+    }
+
+    /// Run 41's first attempt started running.
+    pub(crate) fn attempt_41a_running() -> Event {
+        event(
+            EventKind::AttemptStateChanged,
+            "att_41a",
+            r#"{"execution":"running"}"#,
+        )
+    }
+
     /// A path where no ledger exists yet.
     pub(crate) fn a_ledger_path_that_does_not_exist_yet() -> ScratchLedger {
         let directory: PathBuf = std::env::temp_dir().join(format!(
@@ -145,8 +269,21 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use kaisa_domain::Sequence;
+
     use super::EventStore;
-    use super::test_support::{ScratchLedger, a_ledger_path_that_does_not_exist_yet};
+    use super::test_support::{
+        ScratchLedger, a_ledger_path_that_does_not_exist_yet, attempt_41a_admitted,
+        attempt_41a_running, run_41_started,
+    };
+    use crate::chain::{ChainHash, ChainedEvent};
+
+    /// Each call to `append` records exactly this many events.
+    const EVENTS_PER_APPEND: u64 = 1;
+
+    fn an_open_empty_ledger(scratch: &ScratchLedger) -> EventStore {
+        EventStore::open(&scratch.path()).expect("a new ledger opens")
+    }
 
     /// The journal mode that makes committed events crash-safe without blocking readers.
     const WRITE_AHEAD_LOGGING: &str = "wal";
@@ -193,6 +330,88 @@ mod tests {
             store.journal_mode().expect("the journal mode is readable"),
             WRITE_AHEAD_LOGGING,
             "WAL keeps committed events durable while readers keep reading"
+        );
+    }
+
+    #[test]
+    fn the_first_appended_event_gets_the_first_sequence() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let mut store: EventStore = an_open_empty_ledger(&scratch);
+
+        let chained: ChainedEvent = store.append(run_41_started()).expect("append succeeds");
+
+        assert_eq!(
+            chained.recorded.sequence,
+            Sequence::FIRST,
+            "history starts at the first sequence"
+        );
+    }
+
+    #[test]
+    fn each_appended_event_gets_the_sequence_after_the_previous_one() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let mut store: EventStore = an_open_empty_ledger(&scratch);
+        let started: ChainedEvent = store.append(run_41_started()).expect("append succeeds");
+
+        let admitted: ChainedEvent = store
+            .append(attempt_41a_admitted())
+            .expect("append succeeds");
+
+        assert_eq!(
+            admitted.recorded.sequence,
+            started.recorded.sequence.next(),
+            "sequences have no gaps"
+        );
+    }
+
+    #[test]
+    fn an_appended_event_is_linked_to_the_previous_hash() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let mut store: EventStore = an_open_empty_ledger(&scratch);
+        let admitted: ChainedEvent = {
+            store.append(run_41_started()).expect("append succeeds");
+            store
+                .append(attempt_41a_admitted())
+                .expect("append succeeds")
+        };
+
+        let running: ChainedEvent = store
+            .append(attempt_41a_running())
+            .expect("append succeeds");
+
+        assert_eq!(
+            running.hash,
+            admitted.hash.link(&running.recorded),
+            "each hash covers the previous one, which makes the log tamper-evident"
+        );
+    }
+
+    #[test]
+    fn the_first_appended_event_is_linked_to_genesis() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let mut store: EventStore = an_open_empty_ledger(&scratch);
+
+        let started: ChainedEvent = store.append(run_41_started()).expect("append succeeds");
+
+        assert_eq!(
+            started.hash,
+            ChainHash::genesis().link(&started.recorded),
+            "the chain is anchored at the genesis hash"
+        );
+    }
+
+    #[test]
+    fn appending_an_event_increases_the_ledger_length_by_one() {
+        let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+        let mut store: EventStore = an_open_empty_ledger(&scratch);
+        let before: u64 = store.len().expect("the count is readable");
+
+        store.append(run_41_started()).expect("append succeeds");
+
+        assert_eq!(
+            store.len().expect("the count is readable"),
+            before + EVENTS_PER_APPEND,
+            "one append records exactly one event"
         );
     }
 }
