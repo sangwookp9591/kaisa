@@ -16,7 +16,9 @@ path = "src/main.rs"
 kaisa-cli.workspace = true
 
 [dev-dependencies]
+kaisa-daemon.workspace = true
 kaisa-domain.workspace = true
+kaisa-sys.workspace = true
 kaisa-mcp.workspace = true
 serde_json.workspace = true
 

@@ -146,8 +146,10 @@ name = "kaisa"
 version = "0.0.0"
 dependencies = [
  "kaisa-cli",
+ "kaisa-daemon",
  "kaisa-domain",
  "kaisa-mcp",
+ "kaisa-sys",
  "serde_json",
 ]
 
@@ -180,6 +182,18 @@ dependencies = [
 [[package]]
 name = "kaisa-daemon"
 version = "0.0.0"
+dependencies = [
+ "kaisa-agents",
+ "kaisa-context",
+ "kaisa-domain",
+ "kaisa-keeper",
+ "kaisa-ledger",
+ "kaisa-mcp",
+ "kaisa-supervisor",
+ "kaisa-sys",
+ "kaisa-workspace",
+ "serde_json",
+]
 
 [[package]]
 name = "kaisa-domain"
