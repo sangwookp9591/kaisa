@@ -8,9 +8,11 @@
 mod attempt;
 mod broker;
 mod server;
+mod token;
 mod tools;
 
 pub use attempt::{BRIDGE_CONFIG_FILE, BridgeConfig, serve_attempt};
 pub use broker::{ExecSandbox, FileBroker};
 pub use server::{McpServer, ToolHandler, ToolOutcome};
+pub use token::{AttemptToken, TOKEN_FILE};
 pub use tools::{ToolDescription, tools_for};

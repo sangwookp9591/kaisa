@@ -42,10 +42,10 @@ pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
 pub use random::fill_random;
 pub use seatbelt::{SeatbeltPolicy, sandboxed_spec, seatbelt_profile};
-#[cfg(unix)]
-pub use state_dir::PRIVATE_MODE;
 pub use state_dir::{
     CONTROL_SOCKET_NAME, ControlEndpoint, STATE_DIR_OVERRIDE, StateLocation,
     ensure_private_directory, state_location,
 };
+#[cfg(unix)]
+pub use state_dir::{PRIVATE_FILE_MODE, PRIVATE_MODE};
 pub use terminal::Terminal;

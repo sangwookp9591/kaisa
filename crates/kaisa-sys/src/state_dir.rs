@@ -130,6 +130,10 @@ pub fn ensure_private_directory(directory: &std::path::Path) -> io::Result<()> {
 #[cfg(unix)]
 pub const PRIVATE_MODE: u32 = 0o700;
 
+/// Permissions of a private file: read and write for the owner only.
+#[cfg(unix)]
+pub const PRIVATE_FILE_MODE: u32 = 0o600;
+
 /// The permission bits of a Unix mode (owner, group, others).
 #[cfg(all(unix, test))]
 const PERMISSION_BITS: u32 = 0o777;
