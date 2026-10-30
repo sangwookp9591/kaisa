@@ -891,7 +891,7 @@ same ledger, outbox and authority rules as the engine cores.
   - Answering a question and allow-once map to Human operations. They require the OS **presence check** (Touch ID, Windows Hello, polkit/password) whenever the policy marks the action as presence-required.
   - Otherwise the notification only opens the TUI.
 
-**Issue-tracker connector.** Used by F08 (GitHub in M1, Linear in M2).
+**Issue-tracker connector.** Used by F08 (GitHub in M1, Linear in M3).
 - **Trigger.** A label or a mention creates a run request.
 - **Authorization.** The labeler must be on the repository allow-list. Otherwise the request waits for a Human Gate.
 - **Untrusted input.** Issue text, comments and attachments are untrusted. They are screened by policy and passed to agents as quoted data, never as instructions.
@@ -1335,7 +1335,7 @@ crates/
   kaisa-router       tier 0, grader, learned priors, escalation, admission, slots, budgets, gateway
   kaisa-console      local web console: loopback server, session token, SSE projection, static page
   kaisa-notify       OS notifications, presence checks, status-line files
-  kaisa-integrations GitHub App (M1), Linear (M2), untrusted-input screening
+  kaisa-integrations GitHub App (M1), Linear (M3), untrusted-input screening
   kaisa-packs        policy pack fetch/verify, templates, approval delegation
   kaisa-i18n         Fluent message catalog (ko, en), plain-language event renderer
   kaisa-protocol     KRPC types + framing
@@ -1473,8 +1473,8 @@ usability targets (§10) are part of every milestone's exit criteria.
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M0 — Safe single attempt** | domain (v0.6 types: mission, run hierarchy, write set, grade, knowledge, context pack, route decision), sys, ledger + outbox, keeper, PTY, supervisor (state axes, leases, reconnect), workspace + preservation, authority split, minimum sandbox + egress broker on 3 OSes, **project profile + context pack v1** (spec + profile), Claude adapter in brokered mode, CLI, dependency evidence gate | Issue → attempt → exit → preserve → reclaim on all 3 OSes. The attempt starts from a recorded context pack and a confirmed project profile, with no setup. Negative tests pass. Daemon restart keeps attempts. The chaos suite shows zero orphans and zero unreceipted loss. |
-| **M1 — Verified team** | scheduler (missions, roles incl. documentation, pipelines, write-set ownership, gates, cursors, receipts), verification loop + delivery gate + bounded revision, repository index + impact sets + full context packs, knowledge (lessons, decisions, trajectories; hybrid retrieval behind the evidence gate), router grader + catalog grades + `openai-compatible` local models + tier 0, Codex adapter, observed mode, policy snapshots, settings risk scanner, TUI | Nothing reaches the user without fresh evidence. Tampered candidates are never delivered. Blocking review findings are fixed by revision without a human in the common case. A second session on the same repository needs no re-explanation (its packs carry the profile and lessons). Pipelines advance without an LLM. Unknown is never retried. |
+| **M0 — Safe single attempt** (its first result is *preserved*, not yet *verified*: verification arrives in M1, and the 10-minute "first verified result" target is measured from M1) | domain (v0.6 types: mission, run hierarchy, write set, grade, knowledge, context pack, route decision), sys, ledger + outbox, keeper, PTY, supervisor (state axes, leases, reconnect), workspace + preservation, authority split, minimum sandbox + egress broker on 3 OSes, **project profile + context pack v1** (spec + profile), Claude adapter in brokered mode, CLI, dependency evidence gate | Issue → attempt → exit → preserve → reclaim on all 3 OSes. The attempt starts from a recorded context pack and a confirmed project profile, with no setup. Negative tests pass. Daemon restart keeps attempts. The chaos suite shows zero orphans and zero unreceipted loss. |
+| **M1 — Verified team** (personal agent registration `kaisa agent add` and personal default policy ship here, so F37 needs no admin) | scheduler (missions, roles incl. documentation, pipelines, write-set ownership, gates, cursors, receipts), verification loop + delivery gate + bounded revision, repository index + impact sets + full context packs, knowledge (lessons, decisions, trajectories; hybrid retrieval behind the evidence gate), router grader + catalog grades + `openai-compatible` local models + tier 0, Codex adapter, observed mode, policy snapshots, settings risk scanner, TUI | Nothing reaches the user without fresh evidence. Tampered candidates are never delivered. Blocking review findings are fixed by revision without a human in the common case. A second session on the same repository needs no re-explanation (its packs carry the profile and lessons). Pipelines advance without an LLM. Unknown is never retried. |
 | **M2 — Resilient, learning, at scale** | coordinator epochs + handoff, worker failover, quota classification, admission + budgets (hard with a gateway or `hard_cap` adapters, otherwise bounded and labelled), learned route priors, injection usefulness scoring, sub-runs + roll-ups + measured slots, web console, Hermes adapter, brokered user MCP servers | A Claude → GPT handoff mid-run with no loss of plan, work or workers. Budgets hold within their stated bound. Cost per verified task falls over a recorded benchmark set as priors learn. The 100-agent benchmark meets its budgets. |
 | **M3 — Extended** | best-of-N, team-shared knowledge, desktop (spike result), team server mode, remote workers, Mojo accelerator spike | Pilot team in production. |
 
@@ -1525,7 +1525,8 @@ usability targets (§10) are part of every milestone's exit criteria.
 ## 19. Open questions
 
 1. Do Claude Code and Codex fully support **brokered** mode, meaning built-in tools disabled and every tool served over MCP, on all
-   three OSes? If not, which agents are observed-only?
+   three OSes? If not, which agents are observed-only? (v0.6.1, review M10: answered by a conformance spike on all
+   three OSes that is a go/no-go **before** the Claude adapter task in M0, not after it.)
 2. Which providers expose readable subscription usage, so that switching can be proactive?
 3. Can cgroup v2 delegation be expected on company Linux machines and CI runners? If it cannot, the reduced mode is the default there.
 4. Does the AppContainer + egress-broker profile let package managers and the agent CLIs' own login flows work?

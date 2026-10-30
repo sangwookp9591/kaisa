@@ -58,7 +58,7 @@ Kaisa is a single cross-platform binary that:
 
 | Goal | Metric | Target |
 |---|---|---|
-| G1 Easy to use | Time from install to the first verified result, for a new user without docs | ≤ 10 min |
+| G1 Easy to use | Time from install to the first verified result, for a new user without docs — counting install, agent login, the one-time model download and verification (measured from M1) | ≤ 10 min |
 | G1 | Commands a P1 user needs for daily work | 3 |
 | G2 Nothing is lost | Resources orphaned and work lost without a receipt, after the chaos suite | 0 / 0 |
 | G3 Safe | Negative security tests passing on every OS | 100% |
@@ -166,7 +166,7 @@ Each requirement links to the flow that motivates it and to the milestone where 
 
 | Risk | Mitigation |
 |---|---|
-| Agents may not support brokered mode on every OS | Observed mode as the labelled fallback; record support per agent with a conformance check (open question §19.1) |
+| Agents may not support brokered mode on every OS | A conformance spike on all three OSes is a go/no-go before the Claude adapter task (M0); observed mode is the labelled fallback (architecture §19.1) |
 | Sandbox capabilities differ by OS version | Minimum version matrix, reduced mode behind a Decision, negative tests per OS |
-| Scope creep | Milestone exit criteria are measured; optional engines (vectors, WASM, desktop) stay off until M3 |
+| Scope creep | Milestone exit criteria are measured; vector search ships behind its dependency evidence gate (M1) with a labelled BM25-only mode; WASM guards and the desktop stay off until M3 |
 | Prior-art licensing (LearnHarness is AGPL) | Ideas only; no code or prompts copied |

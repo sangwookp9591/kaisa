@@ -86,7 +86,7 @@
 |---|---|---|---|
 | Terminal / TUI | `kaisa …`, `kaisa` | Human | M0 / M1 |
 | Inside Claude Code / Codex | `/kaisa <goal>`, or just ask | **Requester** | M1 |
-| Issue tracker | GitHub label `kaisa`, or `kaisa run --issue 123` | Request on behalf of the labeler (allow-list) | M1 GitHub, M2 Linear |
+| Issue tracker | GitHub label `kaisa`, or `kaisa run --issue 123` | Request on behalf of the labeler (allow-list) | M1 GitHub, M3 Linear |
 | CI | `kaisa run --headless --json` | Requester under the CI policy | M2 |
 | Notification action | Click or tap | Human, with a presence check when policy requires it | M1 |
 | Desktop / mobile | GUI | Human | M3 / later |
@@ -221,9 +221,10 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Kaisa:** picks the cheapest way that works. A script or codemod is used when it can do the job.
   One status line says what it did, so nothing about routing or memory is hidden:
   ```
-    context: project profile · 2 lessons (login tests) · 6 related files    routed: T1 light model (small, checkable)
+    context: project profile · 2 lessons (login tests) · 6 related files    model: light (small, checkable change)
   ```
-  Nothing to configure: the profile and lessons come from earlier runs on this repository.
+  Nothing to configure: the profile and lessons come from earlier runs on this repository. Grade names
+  such as T1 appear only with `--verbose` or `--json` (U5).
 - **Variants:** `--n 3`, `--agents claude` (one or more; this is the only agent flag), `--plan`, `--watch`, `--budget 5`,
   `--issue 123`.
 - **Question-shaped goals.** A goal like "why …" or "how does …" is routed to F09 automatically. Kaisa says so and shows the cost ceiling.
@@ -282,7 +283,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   - A duplicate label on an issue that already has an active run adds a comment linking to that run and does not start a second one.
 - **Variants:**
   - **Bulk:** `kaisa run --issues "label:good-first"` queues runs under a concurrency cap.
-  - **Linear:** M2.
+  - **Linear:** M3.
 
 #### F09 A question, no code change
 - `kaisa ask "why is checkout slow on Windows?"`, or a question-shaped goal (F04).
@@ -469,6 +470,7 @@ The default (marked ★) is always the safe choice.
   | `3` | **waiting for a human**. The JSON contains the decision link, and the PR or check shows "needs approval". |
   | `4` | failed, with the reason in the JSON. |
   | `5` | blocked by policy. |
+  | `6` | infrastructure unavailable: provider, network or sandbox. Safe to retry later. |
 - **Continuing.** `kaisa run --resume <id>` continues after a human decides. A Gate is never auto-approved in CI.
 
 #### F27 Monorepo and multi-repo
@@ -515,10 +517,10 @@ The default (marked ★) is always the safe choice.
   one card with a fix option, not as a flood of agent events.
 
 #### F37 Light work on a local model
-- **Setup:** an admin or user adds a local model server once (`kaisa admin agent add ollama`, which runs
-  the conformance check).
+- **Setup:** you add a local model server once with `kaisa agent add ollama` (personal, M1), which runs the
+  conformance check; an admin can do the same for everyone with `kaisa admin agent add`.
 - **Effect:** summaries, classification and first-pass reviews go to it automatically when the router
-  grades them T1; F04's status line says `routed: T1 local model`. Code edits and security reviews never
+  grades them as light work; F04's status line says `model: local (light work)`. Code edits and security reviews never
   go to a tool-less model.
 
 #### F31 Repository not ready
@@ -559,7 +561,7 @@ The default (marked ★) is always the safe choice.
 |---|---|
 | Everyone | `kaisa "<goal>"` · `kaisa watch` · `kaisa review` · `kaisa` (Home) |
 | Also reachable as keys in watch/review | take over `[t]`, hand back `[h]`, steer `[s]`, pause `[p]`, undo `[u]`, keep `[k]` |
-| Common commands | `ask`, `attach`, `steer`, `pause`, `resume`, `cancel`, `undo`, `restore`, `init`, `doctor`, `status`, `console`, `memory` |
+| Common commands | `ask`, `attach`, `steer`, `pause`, `resume`, `cancel`, `undo`, `restore`, `init`, `doctor`, `status`, `console`, `memory`, `agent add` |
 | Advanced | `run` flags `--n`, `--agents`, `--template`, `--plan`, `--budget`, `--issue`, `--issues`; `retain`, `gc`, `handoff` (planner), `handback` (attempt), `wrap` |
 | Team / admin | `team`, `admin enroll`, `admin pack validate\|publish\|rollback`, `admin budget set`, `admin delegate`, `admin offboard`, `admin template new\|test`, `admin agent add`, `admin knowledge share on\|off`, `admin cost export`, `audit verify`, `audit export` |
 | Automation | `run --headless --json`, `run --resume` |
