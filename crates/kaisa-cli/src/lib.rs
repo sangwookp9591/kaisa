@@ -6,6 +6,9 @@
 use std::io;
 use std::io::Write;
 
+/// Exit status for a command that completed successfully.
+pub const EXIT_SUCCESS: u8 = 0;
+
 /// Exit status for a command that has not been implemented yet.
 pub const EXIT_NOT_IMPLEMENTED: u8 = 2;
 
@@ -36,11 +39,11 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             out.write_all(HELP.as_bytes())?;
-            Ok(0)
+            Ok(EXIT_SUCCESS)
         }
         Some("-V" | "--version" | "version") => {
             writeln!(out, "kaisa {VERSION}")?;
-            Ok(0)
+            Ok(EXIT_SUCCESS)
         }
         Some(command) => {
             writeln!(
@@ -54,50 +57,75 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{EXIT_NOT_IMPLEMENTED, run};
+    use super::{EXIT_NOT_IMPLEMENTED, EXIT_SUCCESS, VERSION, run};
 
-    fn run_with(args: &[&str]) -> (u8, String, String) {
-        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        let mut out: Vec<u8> = Vec::new();
-        let mut err: Vec<u8> = Vec::new();
-        let status: u8 = run(&args, &mut out, &mut err).expect("writing to a Vec cannot fail");
-        let out = String::from_utf8(out).expect("help and version output is UTF-8");
-        let err = String::from_utf8(err).expect("diagnostics are UTF-8");
-        (status, out, err)
+    /// What a user sees after running one `kaisa` command line.
+    struct Transcript {
+        status: u8,
+        stdout: String,
+        stderr: String,
+    }
+
+    /// Runs the CLI as if the user typed `kaisa <words…>`.
+    fn user_types(words: &[&str]) -> Transcript {
+        let args: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let status: u8 =
+            run(&args, &mut stdout, &mut stderr).expect("writing to memory cannot fail");
+        Transcript {
+            status,
+            stdout: String::from_utf8(stdout).expect("CLI output is UTF-8"),
+            stderr: String::from_utf8(stderr).expect("CLI diagnostics are UTF-8"),
+        }
     }
 
     #[test]
-    fn version_prints_the_workspace_version() {
-        let (status, out, _) = run_with(&["--version"]);
-        assert_eq!(status, 0, "--version must succeed");
+    fn asking_for_the_version_prints_the_workspace_version_and_succeeds() {
+        let transcript: Transcript = user_types(&["--version"]);
+
         assert_eq!(
-            out,
-            format!("kaisa {}\n", env!("CARGO_PKG_VERSION")),
-            "version line"
+            transcript.status, EXIT_SUCCESS,
+            "showing the version is not an error"
         );
-    }
-
-    #[test]
-    fn no_arguments_prints_help() {
-        let (status, out, _) = run_with(&[]);
-        assert_eq!(status, 0, "bare `kaisa` must succeed");
-        assert!(
-            out.contains("kaisa watch"),
-            "help must list the three verbs"
-        );
-    }
-
-    #[test]
-    fn unknown_commands_are_not_faked() {
-        let (status, out, err) = run_with(&["watch"]);
         assert_eq!(
-            status, EXIT_NOT_IMPLEMENTED,
-            "unimplemented commands must fail"
+            transcript.stdout,
+            format!("kaisa {VERSION}\n"),
+            "the version comes from the workspace manifest, the single source of truth"
         );
-        assert!(out.is_empty(), "nothing may be printed to stdout");
+    }
+
+    #[test]
+    fn running_kaisa_without_arguments_shows_help_with_the_three_verbs() {
+        let transcript: Transcript = user_types(&[]);
+
+        assert_eq!(
+            transcript.status, EXIT_SUCCESS,
+            "bare `kaisa` must not fail"
+        );
+        for verb in ["kaisa \"<goal>\"", "kaisa watch", "kaisa review"] {
+            assert!(
+                transcript.stdout.contains(verb),
+                "help must teach the three-verb surface (user-flows U1), missing `{verb}`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unimplemented_command_fails_honestly_instead_of_pretending_to_work() {
+        let transcript: Transcript = user_types(&["watch"]);
+
+        assert_eq!(
+            transcript.status, EXIT_NOT_IMPLEMENTED,
+            "scripts must be able to tell that nothing happened"
+        );
         assert!(
-            err.contains("not implemented yet"),
-            "the user must be told why"
+            transcript.stdout.is_empty(),
+            "no fake output may appear on stdout"
+        );
+        assert!(
+            transcript.stderr.contains("not implemented yet"),
+            "the user must be told why nothing happened"
         );
     }
 }

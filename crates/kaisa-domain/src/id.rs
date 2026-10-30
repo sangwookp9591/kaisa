@@ -8,7 +8,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Maximum length of the part after the prefix.
-const MAX_SUFFIX_LEN: usize = 32;
+pub const MAX_SUFFIX_LEN: usize = 32;
 
 /// Why a string is not a valid identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,58 +116,129 @@ define_id!(
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptId, IdError, RunId, TaskId};
+    use super::{AttemptId, IdError, MAX_SUFFIX_LEN, RunId, TaskId};
+
+    /// Text for a run id whose suffix has exactly `length` valid characters.
+    fn run_id_text_with_suffix_of_length(length: usize) -> String {
+        format!("{}_{}", RunId::PREFIX, "a".repeat(length))
+    }
+
+    /// The text of the 41st run, as a user would type it.
+    fn run_forty_one() -> &'static str {
+        "run_41"
+    }
 
     #[test]
-    fn parses_and_formats_valid_identifiers() {
-        let run: RunId = "run_41".parse().expect("valid run id should parse");
+    fn a_run_id_with_a_valid_suffix_round_trips_through_display() {
+        let typed_by_user: &str = run_forty_one();
+
+        let run: RunId = typed_by_user.parse().expect("a valid run id must parse");
+
         assert_eq!(
             run.as_str(),
-            "run_41",
-            "as_str must return the original text"
-        );
-        assert_eq!(run.to_string(), "run_41", "Display must round-trip");
-
-        let task = TaskId::try_new("task_a1b2c3").expect("valid task id should parse");
-        assert_eq!(task.to_string(), "task_a1b2c3", "Display must round-trip");
-    }
-
-    #[test]
-    fn rejects_the_wrong_prefix() {
-        assert_eq!(
-            RunId::try_new("task_41"),
-            Err(IdError::WrongPrefix { expected: "run" }),
-            "a task id must not parse as a run id"
+            typed_by_user,
+            "as_str must return exactly what was typed"
         );
         assert_eq!(
-            AttemptId::try_new("att41"),
-            Err(IdError::WrongPrefix { expected: "att" }),
-            "the underscore after the prefix is required"
+            run.to_string(),
+            typed_by_user,
+            "Display must print exactly what was typed"
         );
     }
 
     #[test]
-    fn rejects_bad_suffixes() {
+    fn a_task_id_with_letters_and_digits_is_accepted() {
+        let task_text: String = format!("{}_a1b2c3", TaskId::PREFIX);
+
+        let task: Result<TaskId, IdError> = TaskId::try_new(&task_text);
+
+        assert!(
+            task.is_ok(),
+            "lowercase letters and digits are valid suffix characters"
+        );
+    }
+
+    #[test]
+    fn a_task_id_is_rejected_where_a_run_id_is_expected() {
+        let task_text: String = format!("{}_41", TaskId::PREFIX);
+
+        let parsed: Result<RunId, IdError> = RunId::try_new(&task_text);
+
         assert_eq!(
-            RunId::try_new("run_"),
+            parsed,
+            Err(IdError::WrongPrefix {
+                expected: RunId::PREFIX
+            }),
+            "ids of one kind must never be accepted as another kind"
+        );
+    }
+
+    #[test]
+    fn an_attempt_id_without_the_underscore_separator_is_rejected() {
+        let missing_separator: String = format!("{}41", AttemptId::PREFIX);
+
+        let parsed: Result<AttemptId, IdError> = AttemptId::try_new(&missing_separator);
+
+        assert_eq!(
+            parsed,
+            Err(IdError::WrongPrefix {
+                expected: AttemptId::PREFIX
+            }),
+            "the underscore after the prefix is part of the format"
+        );
+    }
+
+    #[test]
+    fn an_empty_suffix_is_rejected_as_bad_length() {
+        let empty_suffix: String = run_id_text_with_suffix_of_length(0);
+
+        assert_eq!(
+            RunId::try_new(&empty_suffix),
             Err(IdError::BadLength),
-            "empty suffix"
+            "an id must name something after its prefix"
         );
-        let too_long = format!("run_{}", "a".repeat(33));
+    }
+
+    #[test]
+    fn a_suffix_of_exactly_the_maximum_length_is_accepted() {
+        let longest_allowed: String = run_id_text_with_suffix_of_length(MAX_SUFFIX_LEN);
+
+        assert!(
+            RunId::try_new(&longest_allowed).is_ok(),
+            "the maximum length itself is inside the allowed range"
+        );
+    }
+
+    #[test]
+    fn a_suffix_longer_than_the_maximum_is_rejected_as_bad_length() {
+        let one_too_long: String = run_id_text_with_suffix_of_length(MAX_SUFFIX_LEN + 1);
+
         assert_eq!(
-            RunId::try_new(&too_long),
+            RunId::try_new(&one_too_long),
             Err(IdError::BadLength),
-            "33-character suffix"
+            "ids are bounded so they stay readable and cheap to store"
         );
+    }
+
+    #[test]
+    fn a_suffix_with_uppercase_letters_is_rejected_as_bad_character() {
+        let shouting: String = format!("{}_AB", RunId::PREFIX);
+
         assert_eq!(
-            RunId::try_new("run_AB"),
+            RunId::try_new(&shouting),
             Err(IdError::BadCharacter),
-            "uppercase is invalid"
+            "ids are lowercase so they compare and display the same everywhere"
         );
+    }
+
+    #[test]
+    fn a_suffix_with_a_dash_is_rejected_as_bad_character() {
+        let dashed: String = format!("{}_a-b", RunId::PREFIX);
+
         assert_eq!(
-            RunId::try_new("run_a-b"),
+            RunId::try_new(&dashed),
             Err(IdError::BadCharacter),
-            "dash is invalid"
+            "only letters and digits are allowed so ids are safe in paths and branch names"
         );
     }
 }

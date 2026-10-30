@@ -4,4 +4,4 @@
 
 mod id;
 
-pub use id::{AttemptId, IdError, RunId, TaskId};
+pub use id::{AttemptId, IdError, MAX_SUFFIX_LEN, RunId, TaskId};
