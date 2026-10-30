@@ -593,6 +593,10 @@ criteria and enter its context pack (§5.9). The revision budget is per Task; a 
 with the same id and location after a revision goes straight to a human, because the loop is not
 converging. Revisions are charged to the Mission budget like any attempt.
 
+**What counts as a candidate.** A Task's result, every integration merge, every conflict revision
+and the final Mission result are all candidates. Each needs its own evidence on its own source
+digest; evidence is never inherited from the parts (§5.13).
+
 **Delivery gate.** One check, at the single exit to the user (approve, merge, PR, `kaisa review`):
 - every required evidence item exists for the **exact source digest** being delivered: checks
   passed, review approved, security review approved when required;
@@ -929,8 +933,12 @@ agents any better than one developer can; that is context collapse moved up a le
   gate (§5.8).
 - A merge conflict becomes a revision Task for the role that owns the conflicting paths, with both
   sides in its context pack. Only a conflict that the revision cannot resolve reaches a human.
-- The sub-run's integration branch is verified as a whole (Checks with the combined impact set)
-  before it merges into its parent.
+- Every integration result is a candidate of its own and goes through the **whole** loop (§5.8):
+  checks with the combined impact set, review of the combined diff, and security review whenever the
+  combined diff touches listed paths — applicability is recomputed on the combined diff, because two
+  safe changes can make an unsafe pair. This applies to each merge, to each conflict revision and to
+  the final Mission result. Child receipts are inputs to the reviewer, never a substitute: evidence is
+  valid only for the exact source digest it was produced on.
 
 **Beyond one host (M3).** Remote workers add slots on other machines through the team-server
 mode; the hierarchy and the admission rules do not change.
