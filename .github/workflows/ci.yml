@@ -48,26 +48,6 @@ jobs:
           set -e
           test "$status" -eq 2 || { echo "expected exit 2 for an unimplemented command, got $status"; exit 1; }
 
-  # PTY library comparison (ADR 0005): the same conformance scenarios against portable-pty.
-  # Informational only: it never blocks a merge, and it is time-boxed because a compared
-  # library may hang.
-  pty-comparison:
-    name: pty comparison (${{ matrix.os }})
-    continue-on-error: true
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: conformance scenarios against portable-pty
-        run: cargo test --locked -p kaisa-sys --test pty_conformance -- --ignored
-
   # Google Rust style guide import rules need nightly-only rustfmt options.
   fmt-imports:
     name: rustfmt import granularity (nightly)

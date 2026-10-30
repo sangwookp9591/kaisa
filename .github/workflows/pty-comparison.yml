@@ -1,0 +1,42 @@
+name: PTY comparison
+
+# The same PTY conformance scenarios against portable-pty (ADR 0005). Informational only: it
+# never gates a merge, runs only when the PTY layer changes (or weekly / on demand), and is
+# time-boxed because a compared library may hang. Running it on every push filled the runner
+# queue on 2026-10-30.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/kaisa-sys/**"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pty-comparison
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compare:
+    name: pty comparison (${{ matrix.os }})
+    continue-on-error: true
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: conformance scenarios against portable-pty
+        run: cargo test --locked -p kaisa-sys --test pty_conformance -- --ignored
