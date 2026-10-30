@@ -1,12 +1,13 @@
 //! A deterministic, language-agnostic first pass at the files a change can affect.
 
 use std::collections::BTreeSet;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use kaisa_domain::RepoPath;
 
 use crate::RepositoryIndex;
-use crate::index::git_output;
 
 /// Largest blob scanned for module references: one mebibyte. Larger blobs are not read.
 pub const IMPACT_TEXT_LIMIT_BYTES: u64 = 1024 * 1024;
@@ -18,22 +19,24 @@ pub const IMPACT_TEXT_LIMIT_BYTES: u64 = 1024 * 1024;
 /// A private copy of `index` is refreshed to `revision`, so symbolic revisions and indexes from
 /// an earlier revision cannot cause worktree edits or stale blobs to enter the result. Only
 /// UTF-8 blobs of at most [`IMPACT_TEXT_LIMIT_BYTES`] are scanned for references; directory
-/// neighbors are included regardless of their contents. Git read failures skip that blob;
-/// if the revision itself cannot be read, only the supplied changed paths are returned.
-#[must_use]
+/// neighbors are included regardless of their contents. A missing individual blob is skipped:
+/// its absence does not invalidate the readable tree or prevent scanning the other blobs.
+///
+/// # Errors
+///
+/// Returns an error if the revision cannot be indexed or the batch reader cannot complete.
+/// The revision is checked even when `changed` is empty.
 pub fn impact_set(
     index: &RepositoryIndex,
     repository: &Path,
     revision: &str,
     changed: &[RepoPath],
-) -> Vec<RepoPath> {
+) -> io::Result<Vec<RepoPath>> {
     let mut impacted: BTreeSet<RepoPath> = changed.iter().cloned().collect();
-    if changed.is_empty() {
-        return Vec::new();
-    }
     let mut snapshot = index.clone();
-    if snapshot.refresh(repository, revision).is_err() {
-        return impacted.into_iter().collect();
+    snapshot.refresh(repository, revision)?;
+    if changed.is_empty() {
+        return Ok(Vec::new());
     }
     let directories: BTreeSet<&str> = changed.iter().map(directory).collect();
     let modules: BTreeSet<&str> = changed
@@ -45,6 +48,7 @@ pub fn impact_set(
         })
         .filter(|stem| !stem.is_empty())
         .collect();
+    let mut blobs = BatchBlobReader::spawn(repository)?;
     for (path, file) in snapshot.files() {
         if directories.contains(directory(path)) {
             impacted.insert(path.clone());
@@ -53,7 +57,7 @@ pub fn impact_set(
         if file.size_bytes > IMPACT_TEXT_LIMIT_BYTES {
             continue;
         }
-        let Ok(bytes) = git_output(repository, &["cat-file", "blob", &file.digest]) else {
+        let Some(bytes) = blobs.read_blob(&file.digest)? else {
             continue;
         };
         let Ok(text) = std::str::from_utf8(&bytes) else {
@@ -63,7 +67,111 @@ pub fn impact_set(
             impacted.insert(path.clone());
         }
     }
-    impacted.into_iter().collect()
+    blobs.finish()?;
+    Ok(impacted.into_iter().collect())
+}
+
+#[cfg(test)]
+thread_local! {
+    static BATCH_PROCESS_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Requests one blob at a time so neither pipe can fill while the other side is blocked.
+struct BatchBlobReader {
+    child: Child,
+    input: Option<ChildStdin>,
+    output: BufReader<ChildStdout>,
+}
+
+impl BatchBlobReader {
+    fn spawn(repository: &Path) -> io::Result<Self> {
+        let mut child = Command::new("git")
+            .current_dir(repository)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        #[cfg(test)]
+        BATCH_PROCESS_SPAWNS.with(|count| count.set(count.get() + 1));
+        let input = child
+            .stdin
+            .take()
+            .expect("the batch input pipe was requested");
+        let output = child
+            .stdout
+            .take()
+            .expect("the batch output pipe was requested");
+        Ok(Self {
+            child,
+            input: Some(input),
+            output: BufReader::new(output),
+        })
+    }
+
+    fn read_blob(&mut self, digest: &str) -> io::Result<Option<Vec<u8>>> {
+        let input = self.input.as_mut().expect("the batch reader is still open");
+        writeln!(input, "{digest}")?;
+        input.flush()?;
+        let mut header = String::new();
+        self.output.read_line(&mut header)?;
+        // Git reports missing objects without a content record. Keep the stream aligned
+        // and continue with the other files in this otherwise readable revision.
+        if header.trim_end() == format!("{digest} missing") {
+            return Ok(None);
+        }
+        let fields: Vec<_> = header.split_whitespace().collect();
+        if fields.len() != 3 || fields[0] != digest || fields[1] != "blob" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid batch blob header",
+            ));
+        }
+        let size: u64 = fields[2]
+            .parse()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // The index excludes large blobs before requesting them. Also bound allocation if
+        // Git unexpectedly reports a different size in the batch response.
+        let mut bytes = Vec::new();
+        let mut content = self.output.by_ref().take(size);
+        if size <= IMPACT_TEXT_LIMIT_BYTES {
+            content.read_to_end(&mut bytes)?;
+        } else {
+            io::copy(&mut content, &mut io::sink())?;
+        }
+        if content.limit() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete batch blob",
+            ));
+        }
+        let mut delimiter = [0];
+        self.output.read_exact(&mut delimiter)?;
+        if delimiter != *b"\n" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid batch blob delimiter",
+            ));
+        }
+        Ok((size <= IMPACT_TEXT_LIMIT_BYTES).then_some(bytes))
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        drop(self.input.take());
+        if !self.child.wait()?.success() {
+            return Err(io::Error::other("git cat-file --batch failed"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BatchBlobReader {
+    fn drop(&mut self) {
+        // Early I/O errors must not leave a child waiting forever for another request.
+        drop(self.input.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn directory(path: &RepoPath) -> &str {
@@ -91,7 +199,7 @@ fn is_word_character(character: char) -> bool {
 mod tests {
     use kaisa_domain::RepoPath;
 
-    use super::{IMPACT_TEXT_LIMIT_BYTES, impact_set};
+    use super::{BATCH_PROCESS_SPAWNS, BatchBlobReader, IMPACT_TEXT_LIMIT_BYTES, impact_set};
     use crate::RepositoryIndex;
     use crate::index::tests::{GitProject, SESSION_PATH, session_path};
 
@@ -104,6 +212,9 @@ mod tests {
     const LARGE_IMPORTER: &str = "docs/large.txt";
     const LIMIT_IMPORTER: &str = "docs/at_limit.txt";
     const ONE_BYTE_OVER_LIMIT: usize = 1;
+    const LARGE_REPOSITORY_CONSUMERS: usize = 256;
+    const ONE_BATCH_PROCESS: usize = 1;
+    const UNREADABLE_REVISION: &str = "refs/heads/nonexistent-impact-revision";
 
     fn path(name: &str) -> RepoPath {
         RepoPath::try_new(name).expect("the fixture names a file inside the repository")
@@ -127,12 +238,97 @@ mod tests {
             .expect("the committed project is indexable")
     }
 
+    fn a_large_repository_with_session_consumers() -> GitProject {
+        let mut files = vec![(SESSION_PATH.to_owned(), SESSION_SOURCE.to_owned())];
+        files.extend((0..LARGE_REPOSITORY_CONSUMERS).map(|number| {
+            (
+                format!("src/consumers/consumer_{number}.rs"),
+                format!("// Consumer {number} imports session\n"),
+            )
+        }));
+        let files: Vec<_> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        GitProject::with_files(&files)
+    }
+
+    #[test]
+    fn the_impact_set_of_a_large_repository_uses_one_git_process() {
+        let repository = a_large_repository_with_session_consumers();
+        let index = index_for(&repository);
+        let expected_paths: Vec<_> = index.files().map(|(path, _)| path.clone()).collect();
+        BATCH_PROCESS_SPAWNS.with(|count| count.set(0));
+
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the large revision is readable");
+
+        assert_eq!(
+            impacted, expected_paths,
+            "every consumer must be scanned through the shared batch reader"
+        );
+        BATCH_PROCESS_SPAWNS.with(|count| {
+            assert_eq!(
+                count.get(),
+                ONE_BATCH_PROCESS,
+                "reading many candidate blobs must spawn exactly one batch process"
+            );
+        });
+    }
+
+    #[test]
+    fn an_unreadable_revision_is_an_error_not_a_smaller_impact_set() {
+        let repository = a_repository_with_session_consumers();
+        let index = index_for(&repository);
+        let changes = [session_path()];
+
+        for changed in [changes.as_slice(), &[]] {
+            let impacted = impact_set(&index, repository.root(), UNREADABLE_REVISION, changed);
+
+            assert!(
+                impacted.is_err(),
+                "an unreadable revision must fail even with no changes, rather than claim a partial impact set"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_blob_is_skipped_without_losing_the_next_readable_blob() {
+        let repository = a_repository_with_session_consumers();
+        let index = index_for(&repository);
+        let session = index.get(&session_path()).expect("the session is indexed");
+        let missing_digest = "0".repeat(session.digest.len());
+        let mut blobs = BatchBlobReader::spawn(repository.root())
+            .expect("the readable repository supports batch requests");
+
+        let missing = blobs
+            .read_blob(&missing_digest)
+            .expect("Git reports a missing object");
+        let readable = blobs
+            .read_blob(&session.digest)
+            .expect("the session remains readable");
+        blobs
+            .finish()
+            .expect("a missing object does not fail the batch process");
+
+        assert!(
+            missing.is_none(),
+            "an individual missing blob cannot provide text references"
+        );
+        assert_eq!(
+            readable.as_deref(),
+            Some(SESSION_SOURCE.as_bytes()),
+            "the next request must read its own bytes after a missing-object response"
+        );
+    }
+
     #[test]
     fn a_change_impacts_the_files_that_import_it() {
         let repository = a_repository_with_session_consumers();
         let index = index_for(&repository);
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()]);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the requested revision and its blobs are readable");
 
         assert!(
             impacted.contains(&path(SESSION_IMPORTER)),
@@ -153,7 +349,8 @@ mod tests {
         let repository = a_repository_with_session_consumers();
         let index = index_for(&repository);
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()]);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the requested revision and its blobs are readable");
 
         assert!(
             !impacted.contains(&path(LONGER_NAME_SOURCE)),
@@ -169,7 +366,8 @@ mod tests {
         let mut expected = vec![session_path(), path(AUTH_NEIGHBOR), path(SESSION_IMPORTER)];
         expected.sort();
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &changes);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &changes)
+            .expect("the requested revision and its blobs are readable");
 
         assert_eq!(
             impacted, expected,
@@ -198,7 +396,8 @@ mod tests {
         repository.commit();
         let index = index_for(&repository);
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()]);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the requested revision and its blobs are readable");
 
         assert!(
             !impacted.contains(&path(BINARY_IMPORTER)),
@@ -230,7 +429,8 @@ mod tests {
         )
         .expect("the worktree can diverge");
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()]);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the requested revision and its blobs are readable");
 
         assert!(
             !impacted.contains(&path(SESSION_IMPORTER)),
@@ -246,7 +446,8 @@ mod tests {
             .expect("the module can be deleted");
         repository.commit();
 
-        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()]);
+        let impacted = impact_set(&index, repository.root(), "HEAD", &[session_path()])
+            .expect("the requested revision and its blobs are readable");
 
         assert!(
             impacted.contains(&session_path()),
