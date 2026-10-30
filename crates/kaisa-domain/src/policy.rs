@@ -107,16 +107,18 @@ impl Policy {
         )
     }
 
-    /// Copies this policy and its canonical text for a run, without validating it.
+    /// Validates this policy, then copies it and its canonical text for a run. Later edits to
+    /// this policy cannot change the snapshot or the text that identifies it.
     ///
-    /// Call [`Self::validate`] before admitting a run. Later edits to this policy cannot
-    /// change the snapshot or the text that identifies it.
-    #[must_use]
-    pub fn snapshot(&self) -> PolicySnapshot {
-        PolicySnapshot {
+    /// # Errors
+    ///
+    /// Returns the [`PolicyError`] of [`Self::validate`]: an invalid policy never governs a run.
+    pub fn snapshot(&self) -> Result<PolicySnapshot, PolicyError> {
+        self.validate()?;
+        Ok(PolicySnapshot {
             policy: self.clone(),
             canonical: self.canonical_text(),
-        }
+        })
     }
 }
 
@@ -167,14 +169,15 @@ mod tests {
     #[test]
     fn a_policy_change_mid_run_does_not_affect_the_running_attempt() {
         let mut personal_policy: Policy = Policy::personal_default();
-        let running_attempt = personal_policy.snapshot();
+        let running_attempt = personal_policy
+            .snapshot()
+            .expect("the personal default is valid");
         let original_policy: Policy = personal_policy.clone();
         let original_canonical: String = personal_policy.canonical_text();
 
         personal_policy.revision_limit = UPDATED_REVISION_LIMIT;
         personal_policy.allowed_egress_hosts.clear();
         personal_policy.confine_agents = false;
-        personal_policy.min_grade_for_security_review = Grade::T2;
         personal_policy.require_person_when_check_definitions_change = false;
 
         assert_eq!(
@@ -188,7 +191,9 @@ mod tests {
             "the running attempt keeps the bytes identifying its policy"
         );
         assert_ne!(
-            personal_policy.snapshot(),
+            personal_policy
+                .snapshot()
+                .expect("the edited policy is still valid"),
             running_attempt,
             "a future run captures the changed policy"
         );
@@ -304,6 +309,20 @@ mod tests {
         assert!(
             personal_policy.require_person_when_check_definitions_change,
             "a person approves changes to the checks used as evidence"
+        );
+    }
+
+    #[test]
+    fn an_invalid_policy_cannot_govern_a_run() {
+        let mut lowered: Policy = Policy::personal_default();
+        lowered.min_grade_for_security_review = Grade::T2;
+
+        let snapshot = lowered.snapshot();
+
+        assert_eq!(
+            snapshot,
+            Err(PolicyError::SecurityReviewFloorBelowT3),
+            "a run cannot start under a policy that weakens security review"
         );
     }
 }
