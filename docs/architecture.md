@@ -512,7 +512,53 @@ because the OS layers alone cannot filter by domain. All direct network access i
 agent's project configs. It **refuses** auto-approval keys such as `enableAllProjectMcpServers`,
 blanket allow-lists, and hooks that call outside the repo, unless a human approves them.
 
-### 5.8 Verify Gate: verification engine (review M6)
+### 5.8 Verification loop and delivery gate (review M6, v0.6)
+
+Kaisa, not the agent, decides when work is good enough. The human receives only results that passed
+this loop; nothing that was merely "exited 0" or "reported success" reaches them.
+
+**The loop, per writing Task**
+
+```
+Candidate ──► Checks ──► Review ──► Security review ──► Delivery gate ──► Delivered
+   ▲            │          │              │
+   │            ▼          ▼              ▼
+   └──── Revision (findings in its context pack; at most `revision_budget`, default 2)
+                          │ budget spent, or the same finding repeats
+                          ▼
+                     Human Gate (with the findings, the diffs and the evidence)
+```
+
+| Stage | Who | Output | Blocking when |
+|---|---|---|---|
+| Checks | Kaisa runs the trusted commands (step 3 below), including the impact set's tests (§5.2) | `CheckReport` per command: exit, duration, log digest | any command fails, or tampering is detected |
+| Review | a reviewer agent, a different model from the implementer, on a clean snapshot | `ReviewVerdict` (schema below) | any finding with `blocking = true` |
+| Security review | the `security` role, `never_downgrade`, only when the diff touches policy-listed paths or patterns (auth, crypto, deserialization, process execution, dependency changes, CI config) | `ReviewVerdict` with security categories | any blocking finding, or a new dependency without a licence and advisory check |
+| Revision | a new Attempt of the same Task, usually the same agent | a new candidate | — |
+| Delivery gate | Kaisa | a delivery receipt | see below |
+
+**`ReviewVerdict`** is the only output Kaisa accepts from a reviewer (a structured `kaisa_report`
+call, validated against a JSON schema; free text is attached but never parsed for the decision):
+`{ verdict: approve | request_changes | reject, findings: [{ id, severity: info | minor | major |
+critical, category, location: path:line, blocking, rationale, suggested_fix? }] }`. A finding is
+blocking when it says so or when its severity is `major` or `critical`. A reviewer that does not
+produce a valid verdict counts as "no review", never as approval.
+
+**Revision is automatic and bounded.** Blocking findings become the revision Task's acceptance
+criteria and enter its context pack (§5.9). The revision budget is per Task; a finding that repeats
+with the same id and location after a revision goes straight to a human, because the loop is not
+converging. Revisions are charged to the Mission budget like any attempt.
+
+**Delivery gate.** One check, at the single exit to the user (approve, merge, PR, `kaisa review`):
+- every required evidence item exists for the **exact source digest** being delivered: checks
+  passed, review approved, security review approved when required;
+- the evidence is fresh: the base has not moved since, or the loop re-ran;
+- the evidence was written by the daemon (§ verdict files below), not by any agent.
+If any item is missing the action is refused with the missing item named — there is no "approve
+anyway" for an agent; a human can override only through a presence-checked Decision (§5.12), which
+is recorded as an override.
+
+**One verification pass** (used by the Checks and Review stages):
 
 1. **Freeze.** Commit the candidate as an immutable snapshot, identified by its commit digest.
 2. **Isolated checkout.** Check the snapshot out into a clean, read-only verification workspace. It is not the attempt's worktree.
