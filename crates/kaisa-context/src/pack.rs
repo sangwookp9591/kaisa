@@ -10,6 +10,45 @@ use crate::profile::{Confirmation, Language, ProjectProfile, Purpose};
 /// Header of the canonical encoding; changes only with an incompatible format.
 const FORMAT_HEADER: &[u8] = b"kaisa-context-pack v1\n";
 
+/// Bytes counted as one token when estimating. Deliberately low (real tokenizers average more
+/// bytes per token for English and code), so estimates err towards "too big".
+pub const BYTES_PER_TOKEN_ESTIMATE: usize = 3;
+
+/// A conservative token estimate for `text`.
+#[must_use]
+pub fn estimated_tokens(text: &str) -> usize {
+    text.len().div_ceil(BYTES_PER_TOKEN_ESTIMATE)
+}
+
+/// The sections that are never cut: without them an agent does not know what to do or where.
+const REQUIRED: [SectionKind; 3] = [
+    SectionKind::Spec,
+    SectionKind::Acceptance,
+    SectionKind::WriteSet,
+];
+
+/// The Task's own spec, acceptance and write set do not fit the role's budget. The fix is to
+/// split the Task, never to cut what it is about (architecture §5.9, review M6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackTooLarge {
+    /// Estimated tokens of the required sections.
+    pub required_tokens: usize,
+    /// The role's budget.
+    pub budget_tokens: usize,
+}
+
+impl std::fmt::Display for PackTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this task's spec needs about {} tokens but the role allows {}; split this task",
+            self.required_tokens, self.budget_tokens
+        )
+    }
+}
+
+impl std::error::Error for PackTooLarge {}
+
 /// A part of a context pack, in priority order: earlier kinds are never cut before later ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
@@ -66,6 +105,8 @@ pub struct PackInputs<'inputs> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextPack {
     sections: Vec<Section>,
+    /// Sections left out to fit the budget, so the agent and an auditor can see what is missing.
+    cut: Vec<SectionKind>,
 }
 
 impl ContextPack {
@@ -103,7 +144,55 @@ impl ContextPack {
             kind: SectionKind::Instructions,
             text: format!("{}\n{}", excerpt.path, excerpt.text),
         }));
-        Self { sections }
+        Self {
+            sections,
+            cut: Vec::new(),
+        }
+    }
+
+    /// Fits the pack into `budget_tokens`, cutting the lowest-priority sections first and
+    /// recording each cut.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackTooLarge`] if the required sections alone exceed the budget.
+    pub fn fit(mut self, budget_tokens: usize) -> Result<Self, PackTooLarge> {
+        let required_tokens: usize = self
+            .sections
+            .iter()
+            .filter(|section| REQUIRED.contains(&section.kind))
+            .map(|section| estimated_tokens(&section.text))
+            .sum();
+        if required_tokens > budget_tokens {
+            return Err(PackTooLarge {
+                required_tokens,
+                budget_tokens,
+            });
+        }
+        while self.estimated_tokens() > budget_tokens {
+            let Some(last) = self.sections.pop() else {
+                break;
+            };
+            if !self.cut.contains(&last.kind) {
+                self.cut.push(last.kind);
+            }
+        }
+        Ok(self)
+    }
+
+    /// The sections that were cut to fit the budget.
+    #[must_use]
+    pub fn cut(&self) -> &[SectionKind] {
+        &self.cut
+    }
+
+    /// The pack's estimated size in tokens.
+    #[must_use]
+    pub fn estimated_tokens(&self) -> usize {
+        self.sections
+            .iter()
+            .map(|section| estimated_tokens(&section.text))
+            .sum()
     }
 
     /// The sections, in priority order.
@@ -121,6 +210,10 @@ impl ContextPack {
         for section in &self.sections {
             push_field(&mut bytes, section.kind.code().as_bytes());
             push_field(&mut bytes, section.text.as_bytes());
+        }
+        for kind in &self.cut {
+            push_field(&mut bytes, b"cut");
+            push_field(&mut bytes, kind.code().as_bytes());
         }
         bytes
     }
@@ -190,9 +283,13 @@ fn purpose_name(purpose: Purpose) -> &'static str {
 mod tests {
     use kaisa_domain::{RepoPath, WriteSet};
 
-    use super::{ContextPack, PackInputs};
-    use crate::profile::{Confirmation, DetectedCommand, Language, ProjectProfile, Purpose};
+    use super::{ContextPack, PackInputs, PackTooLarge, SectionKind, estimated_tokens};
+    use crate::profile::{
+        Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
+    };
 
+    /// A budget this much below the required size must already be refused.
+    const ONE_TOKEN_SHORT: usize = 1;
     const LOGIN_FIX_SPEC: &str = "Make the login test wait for the token refresh.";
     const RATE_LIMIT_SPEC: &str = "Add rate limiting to the login endpoint.";
 
@@ -229,6 +326,103 @@ mod tests {
             write_set: &the_auth_directory(),
             profile: &a_rust_profile_with_confirmed_tests(),
         })
+    }
+
+    /// A long README excerpt, so the pack has something worth cutting.
+    fn a_profile_with_a_long_readme() -> ProjectProfile {
+        ProjectProfile {
+            instructions: vec![InstructionExcerpt {
+                path: RepoPath::try_new("README.md").expect("a valid path"),
+                text: "Setup notes. ".repeat(200),
+                truncated: false,
+            }],
+            ..a_rust_profile_with_confirmed_tests()
+        }
+    }
+
+    fn a_pack_with_a_long_readme(spec: &str) -> ContextPack {
+        ContextPack::assemble(PackInputs {
+            spec,
+            acceptance: &the_login_tests_pass(),
+            write_set: &the_auth_directory(),
+            profile: &a_profile_with_a_long_readme(),
+        })
+    }
+
+    /// Estimated tokens of the sections that are never cut.
+    fn required_tokens(pack: &ContextPack) -> usize {
+        pack.sections()
+            .iter()
+            .filter(|section| super::REQUIRED.contains(&section.kind))
+            .map(|section| estimated_tokens(&section.text))
+            .sum()
+    }
+
+    fn kinds(pack: &ContextPack) -> Vec<SectionKind> {
+        pack.sections().iter().map(|section| section.kind).collect()
+    }
+
+    #[test]
+    fn a_pack_within_budget_keeps_every_section() {
+        let pack: ContextPack = a_pack_with_a_long_readme(LOGIN_FIX_SPEC);
+        let everything: usize = pack.estimated_tokens();
+        let sections_before: Vec<SectionKind> = kinds(&pack);
+
+        let fitted: ContextPack = pack.fit(everything).expect("the whole pack fits");
+
+        assert_eq!(
+            (kinds(&fitted), fitted.cut().is_empty()),
+            (sections_before, true),
+            "nothing is cut when there is room"
+        );
+    }
+
+    #[test]
+    fn an_oversized_pack_drops_the_profile_before_the_spec() {
+        let pack: ContextPack = a_pack_with_a_long_readme(LOGIN_FIX_SPEC);
+        let only_the_required: usize = required_tokens(&pack);
+
+        let fitted: ContextPack = pack.fit(only_the_required).expect("the required part fits");
+
+        assert_eq!(
+            kinds(&fitted),
+            vec![
+                SectionKind::Spec,
+                SectionKind::Acceptance,
+                SectionKind::WriteSet
+            ],
+            "background goes first; what the task is about stays"
+        );
+    }
+
+    #[test]
+    fn a_cut_section_is_listed_in_the_pack() {
+        let pack: ContextPack = a_pack_with_a_long_readme(LOGIN_FIX_SPEC);
+        let only_the_required: usize = required_tokens(&pack);
+
+        let fitted: ContextPack = pack.fit(only_the_required).expect("the required part fits");
+
+        assert_eq!(
+            fitted.cut(),
+            &[SectionKind::Instructions, SectionKind::Profile],
+            "the agent and an auditor can see what context was left out"
+        );
+    }
+
+    #[test]
+    fn a_spec_larger_than_the_budget_is_refused_with_a_split_suggestion() {
+        let pack: ContextPack = a_pack_with_a_long_readme(LOGIN_FIX_SPEC);
+        let required: usize = required_tokens(&pack);
+        let too_small: usize = required - ONE_TOKEN_SHORT;
+
+        assert_eq!(
+            pack.fit(too_small),
+            Err(PackTooLarge {
+                required_tokens: required,
+                budget_tokens: too_small
+            }),
+            "a task's own spec is never cut; the task is split instead"
+        );
     }
 
     #[test]
