@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| Status | v1.0 draft |
+| Status | v1.1 draft (team-intelligence requirements added) |
 | Date | 2026-10-30 |
-| Sources | [`user-flows.md`](user-flows.md) v0.2 (what users do) · [`architecture.md`](architecture.md) v0.5 (how it works) |
+| Sources | [`user-flows.md`](user-flows.md) v0.2 (what users do) · [`architecture.md`](architecture.md) v0.6 (how it works) · [`research/ruflo-control.md`](research/ruflo-control.md) |
 | Task breakdown | [`tasks/M0.md`](tasks/M0.md) (current milestone) |
 
 ## 1. Problem
@@ -19,6 +19,16 @@ working at once**, three things go wrong:
    are reported by the agent itself, so a weakened test still shows "passed".
 3. **Fragility.** When one provider's quota runs out, the run stops, because the coordinator was an
    LLM session that held all the state.
+4. **Context collapse.** One long agent session forgets earlier code, so fixing A breaks B, and big
+   work does not fit one session at all.
+5. **Amnesia.** Every new session starts from zero: the user re-explains the project, its commands
+   and the fixes that worked last time.
+6. **Cost.** The same top model is used for a typo and for an architecture change, so spending
+   grows with usage instead of with difficulty.
+
+Tools such as ruflo promise answers to 4–6, but mostly as recommendations, records or opt-in
+features the model may ignore ([`research/ruflo-control.md`](research/ruflo-control.md)). Kaisa has to
+enforce them where it runs the agents.
 
 ## 2. Product
 
@@ -29,7 +39,10 @@ Kaisa is a single cross-platform binary that:
 - **contains** them with an OS sandbox and a broker;
 - **verifies** results on immutable snapshots;
 - asks a human only for real **decisions**;
-- **keeps work moving** across providers.
+- **keeps work moving** across providers;
+- splits big goals across a **team** of role agents, each starting from a context Kaisa assembles;
+- **remembers** each project and learns which agent and model handle which kind of work best;
+- shows the whole team live in a **TUI and a local web console**.
 
 ## 3. Users
 
@@ -53,17 +66,28 @@ Kaisa is a single cross-platform binary that:
 | G4 Resilient | Plan or work lost on a provider handoff | 0 |
 | G5 Lightweight | Daemon idle RSS | < 30 MB (measured) |
 | G6 Honest | Published numbers not backed by a CI measurement | 0 |
+| G7 Verified team | Results delivered without fresh evidence on their exact source digest | 0 |
+| G7 | Blocking review findings fixed by automatic revision, without a human | measured from M1; target set after the first benchmark |
+| G8 Remembers | Setup or re-explanation needed before a second session on the same repository | none |
+| G8 | Knowledge items injected without an `injections` record | 0 |
+| G9 Cost-aware | Cost per verified task on the recorded benchmark set, M2 vs M1 | lower (measured) |
+| G10 Scales | Concurrent agents meeting the §15 budgets on the reference host | ≥ 100 (benchmarked) |
 
 ## 5. Scope
 
 ### In scope (v1, M0–M2)
 
 - CLI and TUI on macOS, Linux and Windows.
-- Claude Code and Codex adapters.
+- Claude Code, Codex and Hermes adapters; local OpenAI-compatible model servers (for example Ollama) for light work.
 - Brokered and observed trust modes.
 - Worktrees with preservation.
 - Sandbox and egress broker.
-- Verify Gate.
+- Verification loop with automatic revision and a delivery gate.
+- Knowledge (project profile, lessons, decisions, trajectories) and context packs, on by default.
+- Router with a deterministic grader and learned priors.
+- Missions with sub-runs for large teams.
+- Local web console.
+- Brokered access to user MCP servers.
 - Coordinator and worker failover.
 - Budgets.
 - GitHub connector.
@@ -71,7 +95,7 @@ Kaisa is a single cross-platform binary that:
 
 ### Out of scope (v1)
 
-- Hosting models.
+- Hosting large models (Kaisa runs only a small local embedding model).
 - An IDE.
 - Multi-tenant SaaS.
 - Distributed consensus.
@@ -103,6 +127,18 @@ Each requirement links to the flow that motivates it and to the milestone where 
 | FR-18 | Coordinator epochs, handoff packet, worker failover | F19c/d | M2 |
 | FR-19 | Admission control, budgets, quota classification | F19j, F23 | M2 |
 | FR-20 | CI contract (exit codes 0/3/4/5/6), `run --resume` | F26 | M2 |
+| FR-21 | Domain v0.6 types: mission, run hierarchy, write set, grade, knowledge item, context pack, route decision; their events in the ledger | — | M0 |
+| FR-22 | Project profile derived with no setup (languages, build/test/lint commands confirmed by a run, layout) | F03 | M0 |
+| FR-23 | Context pack v1 (spec + profile) assembled by Kaisa, content-addressed, digest recorded on the attempt | F04 | M0 |
+| FR-24 | Write-set ownership: overlapping write sets never run together; out-of-set writes become questions; impact sets join checks | F07 | M1 |
+| FR-25 | Verification loop: schema-validated review verdicts, security review on listed paths, bounded automatic revision, delivery gate on fresh evidence | F06, F16, F19g | M1 |
+| FR-26 | Repository index and full context packs (write set, impact set, related code, profile, lessons, decisions) within role token budgets | F04, F07 | M1 |
+| FR-27 | Knowledge: lessons, decisions, trajectories, ingested notes; promotion from delivered work; secret redaction; hybrid retrieval with a labelled BM25-only mode | F21 | M1 |
+| FR-28 | Router: deterministic grader, catalog grades, `never_downgrade`, local `openai-compatible` models, tier 0 | F04 | M1 |
+| FR-29 | Learned route priors and injection usefulness scoring from verified outcomes, bounded and reversible | F21 | M2 |
+| FR-30 | Missions split into sub-runs with roll-ups; measured slots; owned conflict resolution; 100-agent benchmark | F07 | M2 |
+| FR-31 | Local web console (`kaisa console`): loopback, per-launch token, read-only by default, team grid, cost per request, evidence per Task | F10 | M2 |
+| FR-32 | Hermes adapter; user MCP servers only through the broker, with credentials injected by Kaisa | F29 | M2 |
 
 ## 7. Non-functional requirements
 
@@ -121,9 +157,9 @@ Each requirement links to the flow that motivates it and to the milestone where 
 
 | Milestone | Theme | Exit (summary) |
 |---|---|---|
-| M0 | Safe single attempt | Issue → attempt → exit → preserve → reclaim on 3 OSes; negative tests and chaos suite green |
-| M1 | Supervised runs | Verified candidates only reach review; pipelines advance without an LLM |
-| M2 | Resilient runs | Claude → GPT handoff mid-run without loss; budgets enforced |
+| M0 | Safe single attempt | Issue → attempt → exit → preserve → reclaim on 3 OSes, the attempt starting from a recorded context pack and an auto-derived project profile; negative tests and chaos suite green |
+| M1 | Verified team | Nothing reaches the user without fresh evidence; blocking findings fixed by revision; a second session needs no re-explanation |
+| M2 | Resilient, learning, at scale | Claude → GPT handoff mid-run without loss; budgets enforced; cost per verified task falls; 100-agent benchmark within budget |
 | M3 | Extended | Pilot team in production |
 
 ## 9. Risks
