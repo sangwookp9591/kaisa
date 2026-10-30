@@ -12,7 +12,7 @@ pub use confirm::confirm;
 pub use detect::{INSTRUCTION_EXCERPT_LIMIT, derive_profile};
 pub use pack::{
     BYTES_PER_TOKEN_ESTIMATE, ContextPack, PackInputs, PackTooLarge, Section, SectionKind,
-    estimated_tokens,
+    UNTRUSTED_NOTICE, estimated_tokens,
 };
 pub use profile::{
     Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
