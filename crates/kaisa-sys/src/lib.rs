@@ -5,6 +5,12 @@
 
 #[cfg(windows)]
 mod job;
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once agents start in a terminal (T12.3)")
+)]
+mod openpty;
 #[cfg(target_os = "linux")]
 mod pidfd;
 mod process;
