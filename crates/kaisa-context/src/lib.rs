@@ -7,6 +7,7 @@ mod impact;
 mod index;
 mod pack;
 mod profile;
+mod retrieve;
 #[cfg(test)]
 mod test_support;
 
@@ -22,3 +23,4 @@ pub use pack::{
 pub use profile::{
     Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
 };
+pub use retrieve::{B, Hit, K1, LessonIndex, MIN_TOKEN_CHARS, SCOPE_MATCH_BOOST};
