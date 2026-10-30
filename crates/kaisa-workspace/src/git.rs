@@ -63,12 +63,11 @@ pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitErr
     }
 }
 
-/// Runs git and returns its stdout as trimmed text. Only tests need this today.
+/// Runs git and returns its stdout as trimmed text.
 ///
 /// # Errors
 ///
 /// As [`run_git`].
-#[cfg(test)]
 pub(crate) fn git_text(directory: &Path, args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&run_git(directory, args)?)
         .trim()
