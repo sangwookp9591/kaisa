@@ -9,6 +9,7 @@ mod containment;
 mod effect;
 mod event;
 mod grade;
+mod grader;
 mod id;
 mod knowledge;
 mod plan;
@@ -26,6 +27,10 @@ pub use containment::{Admission, ContainmentCapability, ReducedModeDecision, adm
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
 pub use grade::{BelowFloor, Grade, GradeFloor};
+pub use grader::{
+    GradeDecision, GradeReason, IMPACTED_FILES_THRESHOLD, REVISION_FAILURES_THRESHOLD, TaskSignals,
+    WRITE_SET_PATHS_THRESHOLD, grade_task,
+};
 pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
 pub use knowledge::{ContentDigest, DIGEST_HEX_LEN, DigestError, KnowledgeKind};
 pub use plan::{Plan, PlanError, PlannedTask};
