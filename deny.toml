@@ -4,7 +4,7 @@
 # graph. Add a licence when a reviewed dependency needs it, not in advance.
 
 [licenses]
-allow = ["MIT", "Apache-2.0"]
+allow = ["MIT", "Apache-2.0", "Zlib", "Unicode-3.0"]
 confidence-threshold = 0.9
 
 [bans]
