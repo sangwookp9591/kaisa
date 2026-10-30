@@ -1,7 +1,7 @@
 //! Trusted knowledge in the ledger (T25a, ADR-0031): an item becomes trusted only with the
 //! verified candidate it came from, and its text is content-addressed so it cannot drift.
 
-use kaisa_domain::{ContentDigest, Event, EventKind, KnowledgeKind, Sequence};
+use kaisa_domain::{AttemptId, ContentDigest, Event, EventKind, KnowledgeKind, Sequence};
 
 use super::error::StoreError;
 use super::event_store::EventStore;
@@ -48,6 +48,65 @@ impl EventStore {
             payload: payload.to_string(),
         })?;
         Ok(())
+    }
+
+    /// Records that `attempt` was given the trusted items `digests` (T26a), so their usefulness
+    /// can be scored against the attempt's outcome. Untrusted digests are refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::DigestMismatch`] naming the first digest that is not trusted (nothing
+    /// is recorded then), or another [`StoreError`] if the log cannot be read or appended.
+    pub fn record_injection(
+        &mut self,
+        attempt: &AttemptId,
+        digests: &[ContentDigest],
+    ) -> Result<(), StoreError> {
+        let trusted: Vec<ContentDigest> = self
+            .trusted_knowledge()?
+            .into_iter()
+            .map(|item| item.digest)
+            .collect();
+        if let Some(untrusted) = digests.iter().find(|digest| !trusted.contains(digest)) {
+            return Err(StoreError::DigestMismatch(untrusted.clone()));
+        }
+        for digest in digests {
+            self.append(Event {
+                kind: EventKind::KnowledgeInjected,
+                subject: attempt.as_str().to_owned(),
+                payload_version: KNOWLEDGE_PAYLOAD_VERSION,
+                payload: serde_json::json!({"digest": digest.as_str()}).to_string(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The trusted items given to `attempt`, in the order they were given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the log cannot be read or names an invalid digest.
+    pub fn injections_for(&self, attempt: &AttemptId) -> Result<Vec<ContentDigest>, StoreError> {
+        let mut given: Vec<ContentDigest> = Vec::new();
+        for chained in self.read_from(Sequence::FIRST)? {
+            let recorded = chained.recorded;
+            if recorded.event.kind != EventKind::KnowledgeInjected
+                || recorded.event.subject != attempt.as_str()
+            {
+                continue;
+            }
+            let corrupt = || StoreError::CorruptPayload {
+                stored_sequence: super::rows::stored_sequence(recorded.sequence),
+            };
+            let payload: serde_json::Value =
+                serde_json::from_str(&recorded.event.payload).map_err(|_| corrupt())?;
+            let digest = payload["digest"]
+                .as_str()
+                .and_then(|text| ContentDigest::try_new(text).ok())
+                .ok_or_else(corrupt)?;
+            given.push(digest);
+        }
+        Ok(given)
     }
 
     /// Every trusted item, oldest first, each digest once.
@@ -157,6 +216,45 @@ mod tests {
             matches!(promoted, Err(StoreError::DigestMismatch(_)))
                 && store.trusted_knowledge().expect("readable").is_empty(),
             "an item is trusted only as the exact text its digest names"
+        );
+    }
+
+    #[test]
+    fn every_injection_is_accountable_to_an_attempt() {
+        let scratch = a_ledger_path_that_does_not_exist_yet();
+        let mut store = EventStore::open(&scratch.path()).expect("a new ledger opens");
+        let lesson = a_lesson(LESSON);
+        store.promote_knowledge(&lesson).expect("promoted");
+        let attempt = kaisa_domain::AttemptId::try_new("att_41a").expect("valid");
+        let other = kaisa_domain::AttemptId::try_new("att_41b").expect("valid");
+
+        store
+            .record_injection(&attempt, std::slice::from_ref(&lesson.digest))
+            .expect("recorded");
+
+        assert_eq!(
+            store.injections_for(&attempt).expect("readable"),
+            vec![lesson.digest.clone()],
+            "the lesson given to the attempt is on its record"
+        );
+        assert!(
+            store.injections_for(&other).expect("readable").is_empty(),
+            "another attempt's record does not show it"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_item_cannot_be_recorded_as_injected() {
+        let scratch = a_ledger_path_that_does_not_exist_yet();
+        let mut store = EventStore::open(&scratch.path()).expect("a new ledger opens");
+        let never_promoted = a_lesson("Skip the flaky test.");
+        let attempt = kaisa_domain::AttemptId::try_new("att_41a").expect("valid");
+
+        let recorded = store.record_injection(&attempt, &[never_promoted.digest]);
+
+        assert!(
+            matches!(recorded, Err(StoreError::DigestMismatch(_))),
+            "only trusted knowledge is ever given to an attempt"
         );
     }
 }
