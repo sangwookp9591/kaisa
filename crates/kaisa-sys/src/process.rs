@@ -142,9 +142,27 @@ impl OwnedProcess {
             .map_or(ProcessExit::Terminated, ProcessExit::Code))
     }
 
+    /// Waits at most `limit` for the process to exit. Returns `None` if it is still running;
+    /// the caller decides whether to keep waiting or end it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if the process state cannot be read.
+    pub fn wait_timeout(&mut self, limit: std::time::Duration) -> io::Result<Option<ProcessExit>> {
+        let deadline: std::time::Instant = std::time::Instant::now() + limit;
+        loop {
+            if self.has_exited()? {
+                return self.wait().map(Some);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(EXIT_POLL_INTERVAL);
+        }
+    }
+
     /// True once the process has exited, without waiting. The exit status stays available
     /// to [`wait`](Self::wait).
-    #[cfg(unix)]
     pub(crate) fn has_exited(&mut self) -> io::Result<bool> {
         Ok(self.child.try_wait()?.is_some())
     }
@@ -186,6 +204,9 @@ impl OwnedProcess {
         self.job.terminate()
     }
 }
+
+/// How often [`OwnedProcess::wait_timeout`] looks at the process.
+const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// A command that runs `spec` without a shell.
 pub(crate) fn command_for(spec: &ProcessSpec) -> Command {
@@ -374,6 +395,8 @@ mod tests {
 
     /// The exit code a typical CLI agent uses for "I failed".
     const AGENT_FAILURE_CODE: i32 = 1;
+    /// Far shorter than a long-running test process lives.
+    const A_MOMENT: std::time::Duration = std::time::Duration::from_millis(100);
 
     fn started(spec: &super::ProcessSpec) -> OwnedProcess {
         OwnedProcess::spawn(spec).expect("the shell is available on every CI runner")
@@ -414,6 +437,32 @@ mod tests {
             process.wait().expect("waiting again succeeds"),
             first,
             "recovery code may ask twice and must get the same answer"
+        );
+    }
+
+    #[test]
+    fn a_process_that_exits_within_the_time_limit_reports_its_exit() {
+        let mut process: OwnedProcess = started(&a_process_that_exits_with(AGENT_FAILURE_CODE));
+
+        assert_eq!(
+            process
+                .wait_timeout(super::test_support::PATIENCE)
+                .expect("waiting succeeds"),
+            Some(ProcessExit::Code(AGENT_FAILURE_CODE)),
+            "a command that finishes in time is judged by its own exit code"
+        );
+    }
+
+    #[test]
+    fn a_process_that_outlives_the_time_limit_is_reported_as_still_running() {
+        let mut process: OwnedProcess = started(&a_long_running_process());
+
+        let waited: Option<ProcessExit> = process.wait_timeout(A_MOMENT).expect("waiting succeeds");
+        process.kill_tree().expect("the test cleans up");
+
+        assert_eq!(
+            waited, None,
+            "a hanging command must not hang whoever is waiting for it"
         );
     }
 
