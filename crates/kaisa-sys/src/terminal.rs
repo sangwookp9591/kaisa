@@ -467,16 +467,21 @@ mod tests {
             .expect("the terminal can be written")
             .write_all(ENTER.as_bytes())
             .expect("typing succeeds");
-        let output: String = output_until(&terminal, &size_as_the_agent_reports_it);
-        agent
-            .wait()
-            .expect("the agent exits after reporting its size");
+        let remembered: TerminalSize = terminal.size();
+        // Drained until the agent exits rather than read against a deadline: a cold
+        // PowerShell start on a busy CI runner can take longer than any fixed patience.
+        let output: String = String::from_utf8_lossy(
+            &terminal
+                .drain(&mut agent)
+                .expect("the agent exits after reporting its size"),
+        )
+        .into_owned();
 
         assert!(
             output.contains(&size_as_the_agent_reports_it),
             "a TUI agent must redraw for the window the user actually has, got {output:?}"
         );
-        assert_eq!(terminal.size(), enlarged, "Kaisa remembers the size it set");
+        assert_eq!(remembered, enlarged, "Kaisa remembers the size it set");
     }
 
     #[test]
