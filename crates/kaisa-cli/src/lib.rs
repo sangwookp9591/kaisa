@@ -6,6 +6,7 @@
 use std::io;
 use std::io::Write;
 
+mod agent;
 mod delivery;
 mod goal;
 mod watch;
@@ -29,9 +30,9 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 
 /// Command names reserved for later milestones; they answer "not implemented" instead of being
 /// mistaken for a goal.
-const PLANNED_COMMANDS: [&str; 17] = [
+const PLANNED_COMMANDS: [&str; 16] = [
     "review", "ask", "attach", "steer", "pause", "resume", "cancel", "undo", "restore", "init",
-    "doctor", "status", "console", "memory", "agent", "team", "admin",
+    "doctor", "status", "console", "memory", "team", "admin",
 ];
 
 /// The version of this build, taken from the workspace manifest (single source of truth).
@@ -68,6 +69,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             Ok(EXIT_SUCCESS)
         }
         Some("watch") => watch::run(out, err),
+        Some("agent") => agent::run(&args[1..], out, err),
         Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
             (Some("--attempt"), Some(directory)) => {
                 match kaisa_mcp::bridge(std::path::Path::new(directory), out) {

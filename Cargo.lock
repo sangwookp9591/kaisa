@@ -175,6 +175,7 @@ dependencies = [
  "kaisa-ledger",
  "kaisa-mcp",
  "kaisa-sys",
+ "serde_json",
 ]
 
 [[package]]

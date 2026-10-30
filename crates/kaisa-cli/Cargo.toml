@@ -16,5 +16,7 @@ kaisa-ledger.workspace = true
 kaisa-sys.workspace = true
 kaisa-mcp.workspace = true
 
+serde_json.workspace = true
+
 [lints]
 workspace = true

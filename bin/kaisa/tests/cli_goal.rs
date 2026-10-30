@@ -304,3 +304,58 @@ fn watch_shows_each_attempts_state_from_the_ledger() {
         "the finished attempt is listed as exited and reclaimed: {view:?}"
     );
 }
+
+/// Runs `kaisa agent <args>` against `state`.
+fn kaisa_agent(state: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("agent")
+        .args(args)
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa runs")
+}
+
+#[test]
+fn a_personal_agent_is_added_from_the_cli_without_an_admin() {
+    let bench = Workbench::new("agent-add");
+    let state: PathBuf = bench.base.join("state");
+
+    let added = kaisa_agent(
+        &state,
+        &[
+            "add",
+            "ollama",
+            "--endpoint",
+            "http://localhost:11434/v1",
+            "--model",
+            "llama3=T1",
+        ],
+    );
+    let leaky = kaisa_agent(
+        &state,
+        &[
+            "add",
+            "remote",
+            "--endpoint",
+            "http://models.example/v1",
+            "--model",
+            "big=T2",
+        ],
+    );
+    let listed = kaisa_agent(&state, &["list"]);
+
+    assert!(
+        added.status.success(),
+        "a local model server is registered by its user: {:?}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(
+        !leaky.status.success(),
+        "an unencrypted remote endpoint would leak prompts and is refused"
+    );
+    let listing: String = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(
+        listing.contains("ollama llama3=T1") && !listing.contains("remote"),
+        "the list shows what was accepted and nothing else: {listing:?}"
+    );
+}
