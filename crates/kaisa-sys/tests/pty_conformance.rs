@@ -25,6 +25,8 @@ const GREETING: &str = "hello-from-the-agent";
 const TYPED_LINE: &str = "typed-by-the-user";
 /// Put in front of the line the agent read, so its reply differs from the terminal's echo.
 const REPLY_PREFIX: &str = "agent-read:";
+/// Korean text and an emoji: multi-byte UTF-8, including a character outside the BMP.
+const UNICODE_LINE: &str = "안녕 카이사 🚀";
 /// The last thing the agent prints before it exits.
 const FAREWELL: &str = "goodbye-from-the-agent";
 /// Lines printed before the farewell: far more than a terminal buffers (about 4 KiB on macOS),
@@ -126,7 +128,10 @@ fn an_agent_that_greets() -> ProcessSpec {
 
 fn an_agent_that_answers_one_typed_line() -> ProcessSpec {
     if cfg!(windows) {
-        shell(&format!("set /p line=&& echo {REPLY_PREFIX}!line!"))
+        // `chcp 65001` switches the console to UTF-8, so non-ASCII input is not mangled.
+        shell(&format!(
+            "chcp 65001 >nul && set /p line=&& echo {REPLY_PREFIX}!line!"
+        ))
     } else {
         shell(&format!("read line; echo \"{REPLY_PREFIX}$line\""))
     }
@@ -189,6 +194,22 @@ fn scenario_typed_input<B: Backend>() {
     );
 }
 
+fn scenario_unicode<B: Backend>() {
+    let reply: String = format!("{REPLY_PREFIX}{UNICODE_LINE}");
+    let mut session = B::start(
+        &an_agent_that_answers_one_typed_line(),
+        size(CLASSIC_ROWS, CLASSIC_COLUMNS),
+    );
+
+    session.type_text(&format!("{UNICODE_LINE}{ENTER}"));
+    let output: String = session.finish();
+
+    assert!(
+        output.contains(&reply),
+        "users steer agents in Korean too; text must survive the terminal intact, got {output:?}"
+    );
+}
+
 fn scenario_resize<B: Backend>() {
     let size_as_the_agent_reports_it: String = format!("{ENLARGED_ROWS} {ENLARGED_COLUMNS}");
     let mut session = B::start(
@@ -225,7 +246,8 @@ macro_rules! conformance_suite {
     ($module:ident, $backend:ty) => {
         mod $module {
             use super::{
-                scenario_output_before_exit, scenario_prints, scenario_resize, scenario_typed_input,
+                scenario_output_before_exit, scenario_prints, scenario_resize,
+                scenario_typed_input, scenario_unicode,
             };
 
             #[test]
@@ -236,6 +258,11 @@ macro_rules! conformance_suite {
             #[test]
             fn a_backend_delivers_typed_input() {
                 scenario_typed_input::<$backend>();
+            }
+
+            #[test]
+            fn unicode_text_survives_the_round_trip_through_the_terminal() {
+                scenario_unicode::<$backend>();
             }
 
             #[test]
