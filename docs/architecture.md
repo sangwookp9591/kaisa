@@ -942,10 +942,14 @@ mode; the hierarchy and the admission rules do not change.
 ## 7. Data model (projection tables, v1)
 
 ```
-runs(id, goal, state, budget_id, coordinator_attempt_id, coordinator_epoch, policy_version)
-tasks(id, run_id, role, title, spec, status, deps_json, grade, base_revision)
+missions(id, goal, state, budget_id, policy_version, root_run_id, delivered_receipt)
+runs(id, mission_id, parent_run_id, area, state, budget_id, coordinator_attempt_id,
+     coordinator_epoch, policy_version, integration_branch)
+tasks(id, run_id, role, kind, title, spec, status, deps_json, grade, grade_reasons_json,
+      write_set_json, impact_set_digest, revision_of, revisions_used, base_revision)
 attempts(id, task_id, role, generation, agent, model, effort, trust_mode,
-         exec_state, outcome, verify_state, cleanup_state, supersedes, started_at, settled_at)
+         exec_state, outcome, verify_state, cleanup_state, supersedes, weight, context_pack_digest,
+         route_decision_id, started_at, settled_at)
 keepers(attempt_id, endpoint, incarnation, os_handle_kind, last_seen)
 leases(id, attempt_id, resource_kind, resource_ref, expires_at, max_until, retained, state)
 outbox(id, run_id, epoch_or_generation, effect_kind, intent_json, state, receipt_json)
@@ -957,7 +961,21 @@ steers(id, attempt_id, state, injected_at, acked_at)
 receipts(caller, request_id, payload_hash, result_json)
 preservations(id, attempt_id, inventory_digest, kind, location, verified_at)
 verifications(id, attempt_id, snapshot_digest, env_digest, step, verdict, log_digest)
-usage(id, attempt_id, role, tool, provider, model, input_tokens, output_tokens, cached_tokens)
+review_findings(id, verification_id, finding_key, severity, category, location, blocking, resolved_by)
+deliveries(id, mission_id, task_id, source_digest, evidence_json, override_decision_id, at)
+knowledge(id, kind, scope, body_json, provenance_json, state, usefulness_alpha, usefulness_beta,
+          created_seq, last_used_seq)
+knowledge_fts(knowledge_id, text)                                   -- FTS5
+knowledge_vectors(knowledge_id, model_id, dims, vector_ref)         -- local vector index
+injections(attempt_id, knowledge_id, rank, score, outcome)
+context_packs(digest, attempt_id, role, token_count, items_json)
+repo_index(revision, path, language, symbols_digest, imports_json, tests_json)
+project_profiles(repo, revision, profile_json, confirmed_commands_json)
+route_decisions(id, task_id, grade, options_json, chosen, reason, explore)
+route_priors(role, task_kind, grade, option, alpha, beta, cost_per_success, updated_seq)
+slots(host, kind, capacity, measured_at)
+usage(id, attempt_id, request_id, role, tool, provider, model, input_tokens, output_tokens,
+      cached_tokens, cost_usd, estimated)
 reservations(id, attempt_id, budget_id, estimated_usd, reconciled_usd)
 quota_state(provider, observed_at, usage_ratio, mode, cooldown_until)
 events(seq, at, version, kind, subject, payload_json, prev_hash, hash)
@@ -1132,8 +1150,11 @@ crates/
   kaisa-egress       per-attempt proxy with allow-list
   kaisa-hook         advisory hook entry, authenticated spool
   kaisa-verify       freeze, clean checkout, trusted checks, tamper detection, receipts
-  kaisa-knowledge    evidence ledger, BM25 (vector features optional)
-  kaisa-router       tier 0, routing policy, chains, admission, budgets, gateway config
+  kaisa-knowledge    knowledge kinds, promotion, decay, hybrid retrieval (FTS5 + vectors), usefulness
+  kaisa-context      repository index, project profile, impact sets, context-pack assembly
+  kaisa-embed        local embedding model + vector index behind one trait (Rust default; Mojo optional)
+  kaisa-router       tier 0, grader, learned priors, escalation, admission, slots, budgets, gateway
+  kaisa-console      local web console: loopback server, session token, SSE projection, static page
   kaisa-notify       OS notifications, presence checks, status-line files
   kaisa-integrations GitHub App (M1), Linear (M2), untrusted-input screening
   kaisa-packs        policy pack fetch/verify, templates, approval delegation
@@ -1179,9 +1200,12 @@ Versions were checked on crates.io, npm and ziglang.org on 2026-10-30.
 | ed25519-dalek | 3.0.0 | signatures | on |
 | schemars | 1.2.3 | JSON schema | on |
 | jiff | 0.2.38 | time | on |
-| usearch | 2.26.6 | vector index (native C++) | **off** |
-| fastembed | 7.5.0 | local embeddings (ONNX + model assets) | **off** |
+| usearch | 2.26.6 | vector index (native C++); candidate, beside pure-Rust `hnsw_rs` 0.3.5 | **on** after the evidence gate |
+| fastembed | 7.5.0 | local embeddings; depends on `ort`, which has no stable release yet | **on** after the evidence gate; BM25-only and labelled until then |
+| tree-sitter | 0.27.1 | repository index grammars | on |
+| axum | 0.8.9 | web console server (loopback only) | on with `kaisa console` |
 | wasmtime | 50.0.1 | policy extensions | **off** |
+| Mojo | (toolchain) | optional embedding / vector accelerator, macOS and Linux only | **off**, ADR-0033 |
 | gpui-component | 0.8.1 | desktop (M3) | — |
 | Zig | 0.17.0 | `cargo-zigbuild` cross-linking only | — |
 | TypeScript | 7.0.2 | not on the core path | — |
