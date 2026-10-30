@@ -1,13 +1,14 @@
 //! Running an agent process to completion and recording how it ended.
 //!
-//! This is the portable core of the keeper (std processes on every OS). OS process handles,
-//! job objects and PTYs arrive in T11 and T12.
+//! The agent runs as a [`kaisa_sys::OwnedProcess`]: a process group on Unix (held by a pidfd on
+//! Linux) and a Job Object on Windows, so the keeper owns everything the agent starts. PTYs
+//! arrive in T12.
 
 use std::fmt;
 use std::path::PathBuf;
-use std::process::Command;
 
 use kaisa_domain::{AttemptId, ExitStatus};
+use kaisa_sys::{OwnedProcess, ProcessExit, ProcessSpec};
 
 use crate::durable::{DurableError, write_exit_record};
 use crate::exit_record::ExitRecord;
@@ -77,18 +78,20 @@ pub fn run_to_exit(
     assignment: &Assignment,
     now_ms: impl Fn() -> u64,
 ) -> Result<ExitRecord, KeeperError> {
-    let mut child = Command::new(&command.program)
-        .args(&command.args)
-        .current_dir(&command.working_directory)
-        .spawn()
-        .map_err(KeeperError::Spawn)?;
-    let status: std::process::ExitStatus = child.wait().map_err(KeeperError::Wait)?;
+    let mut agent: OwnedProcess = OwnedProcess::spawn(&ProcessSpec {
+        program: command.program.clone(),
+        args: command.args.clone(),
+        working_directory: command.working_directory.clone(),
+    })
+    .map_err(KeeperError::Spawn)?;
+    let exit: ProcessExit = agent.wait().map_err(KeeperError::Wait)?;
     let record = ExitRecord {
         attempt: assignment.attempt.clone(),
         incarnation: assignment.incarnation,
-        status: status
-            .code()
-            .map_or(ExitStatus::Terminated, ExitStatus::Code),
+        status: match exit {
+            ProcessExit::Code(code) => ExitStatus::Code(code),
+            ProcessExit::Terminated => ExitStatus::Terminated,
+        },
         finished_at_ms: now_ms(),
     };
     write_exit_record(&assignment.attempt_directory, &record).map_err(KeeperError::Record)?;

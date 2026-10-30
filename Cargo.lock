@@ -130,6 +130,7 @@ name = "kaisa-keeper"
 version = "0.0.0"
 dependencies = [
  "kaisa-domain",
+ "kaisa-sys",
 ]
 
 [[package]]
