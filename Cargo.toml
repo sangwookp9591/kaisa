@@ -6,6 +6,7 @@ members = [
     "crates/kaisa-context",
     "crates/kaisa-daemon",
     "crates/kaisa-domain",
+    "crates/kaisa-egress",
     "crates/kaisa-keeper",
     "crates/kaisa-ledger",
     "crates/kaisa-protocol",
@@ -27,6 +28,7 @@ kaisa-cli = { path = "crates/kaisa-cli" }
 kaisa-daemon = { path = "crates/kaisa-daemon" }
 kaisa-context = { path = "crates/kaisa-context" }
 kaisa-domain = { path = "crates/kaisa-domain" }
+kaisa-egress = { path = "crates/kaisa-egress" }
 kaisa-keeper = { path = "crates/kaisa-keeper" }
 kaisa-ledger = { path = "crates/kaisa-ledger" }
 kaisa-protocol = { path = "crates/kaisa-protocol" }

@@ -171,6 +171,10 @@ name = "kaisa-domain"
 version = "0.0.0"
 
 [[package]]
+name = "kaisa-egress"
+version = "0.0.0"
+
+[[package]]
 name = "kaisa-keeper"
 version = "0.0.0"
 dependencies = [
