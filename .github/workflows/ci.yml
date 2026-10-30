@@ -45,7 +45,7 @@ jobs:
         run: |
           cargo run --locked -q -p kaisa -- --version
           set +e
-          cargo run --locked -q -p kaisa -- watch
+          cargo run --locked -q -p kaisa -- review
           status=$?
           set -e
           test "$status" -eq 2 || { echo "expected exit 2 for an unimplemented command, got $status"; exit 1; }
