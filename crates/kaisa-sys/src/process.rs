@@ -37,6 +37,9 @@ pub struct OwnedProcess {
     /// The Job Object that contains the process and everything it starts.
     #[cfg(windows)]
     job: crate::job::Job,
+    /// A descriptor for exactly this process; `None` on kernels without `pidfd_open`.
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
 }
 
 impl OwnedProcess {
@@ -71,6 +74,8 @@ impl OwnedProcess {
     #[cfg(not(windows))]
     fn adopt(child: Child) -> io::Result<Self> {
         Ok(Self {
+            #[cfg(target_os = "linux")]
+            pidfd: crate::pidfd::open(child.id())?,
             child,
             ended_by_us: false,
         })
@@ -140,6 +145,11 @@ impl OwnedProcess {
     #[cfg(unix)]
     fn end_tree(&mut self) -> io::Result<()> {
         unix::kill_process_group(self.child.id())?;
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            // Addresses exactly our child, even if its PID was reused.
+            return crate::pidfd::kill(pidfd);
+        }
         match self.child.kill() {
             // Already exited (and possibly already reaped).
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
@@ -151,6 +161,14 @@ impl OwnedProcess {
     #[cfg(windows)]
     fn end_tree(&mut self) -> io::Result<()> {
         self.job.terminate()
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+impl OwnedProcess {
+    /// True when the process is held through a pidfd.
+    pub(crate) fn is_held_by_pidfd(&self) -> bool {
+        self.pidfd.is_some()
     }
 }
 
@@ -446,6 +464,26 @@ mod tests {
             assert!(
                 job_reaches(&agent, |alive| alive == NO_PROCESSES),
                 "a background process left by the agent must not survive cleanup"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_pidfd {
+        use super::super::OwnedProcess;
+        use super::super::test_support::a_long_running_process;
+
+        #[test]
+        fn the_owned_process_is_identified_by_a_pidfd_on_linux() {
+            let mut agent =
+                OwnedProcess::spawn(&a_long_running_process()).expect("sh is available");
+
+            let held: bool = agent.is_held_by_pidfd();
+            agent.kill_tree().expect("ending the process succeeds");
+
+            assert!(
+                held,
+                "on Linux 5.3+ (every supported CI runner) a reused PID can never be signalled"
             );
         }
     }

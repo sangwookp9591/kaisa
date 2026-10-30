@@ -5,6 +5,8 @@
 
 #[cfg(windows)]
 mod job;
+#[cfg(target_os = "linux")]
+mod pidfd;
 mod process;
 
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
