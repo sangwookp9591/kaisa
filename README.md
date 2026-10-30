@@ -100,4 +100,4 @@ The name was simply chosen as a name. Kaisa is an independent project with no co
 
 ## License
 
-To be decided. Kaisa is currently intended for internal company use.
+Kaisa is released under the [MIT License](LICENSE).

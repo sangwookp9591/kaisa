@@ -1,7 +1,7 @@
 # ruflo@3.65.0 / @claude-flow/cli@3.65.0 - static shipped-artifact report
 
 Tags: [REA] = in REA evidence; [READ] = direct file reading/grep of the installed tree; [UNK] = not determined.
-Root: `/private/tmp/claude-501/-Users-psw-Projects-ruflo/096e5429-5666-41e0-9d50-63650dc75cba/scratchpad/target-ruflo/node_modules` (CLI = `@claude-flow/cli`, abbreviated `cli/`).
+Root: `<analysis-dir>/target-ruflo/node_modules` (a throwaway `npm install --ignore-scripts ruflo@3.65.0`) (CLI = `@claude-flow/cli`, abbreviated `cli/`).
 REA evidence: `evidence/ruflo-cli.json` (parent `ev_06a31f380ab0c5242a5f0f382bf31603697c2b9c7db45a4b8a05f3cbd14ec7a4`; summary `ev_9ede94c7...5985b`; extract `evidence/ruflo-extract.txt`).
 
 **REA caveat.** The run covered the whole `cli/` dir including its nested 67 MB `node_modules`: 10,127 files, 6,890 JS, 25,177 findings, 0 parse failures, 0 Electron surface [REA]. The semantic graph hit its 100,000-node cap, so it kept only 4 child-process nodes and 12 request nodes. REA's child-process/request lists are therefore partial and mostly argv-less ("dynamic"). The tallies below come from grep [READ].
