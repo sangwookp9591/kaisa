@@ -3,5 +3,9 @@
 //! Design: `docs/architecture.md` §6. Kaisa has exactly one protocol version; new
 //! operations are negotiated through capability lists, not new versions.
 
+mod frame;
+
+pub use frame::{FRAME_TERMINATOR, FrameError, write_frame};
+
 /// The KRPC protocol version spoken by this build.
 pub const PROTOCOL_VERSION: u32 = 1;
