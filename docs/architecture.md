@@ -611,6 +611,21 @@ If any item is missing the action is refused with the missing item named — the
 anyway" for an agent; a human can override only through a presence-checked Decision (§5.12), which
 is recorded as an override.
 
+**Running verification safely (v0.6.1, review M8).**
+- The source checkout is immutable; builds and tests write only to an ephemeral build area beside it,
+  discarded after the pass.
+- A candidate that changes tests on purpose (a real behaviour change) is not `Tampered` by default:
+  test changes are shown side by side with the base, checked by a dedicated test-change review, and
+  can pass only through that review or a recorded override.
+- Failures are classified before anything is retried: `infra` (disk, network, toolchain), `flaky`
+  (passes on rerun of the same digest), `timeout`, `malformed verdict`, `reviewer unavailable`.
+  Each class has a retry cap; a flaky check is reported as flaky, never as a pass.
+- If a reviewer cannot produce a valid verdict twice, the next eligible reviewer is used; if none
+  is left, the Task waits for a human with the reason shown.
+- A tool-less reviewer (an `openai-compatible` model, §5.10) answers with JSON in its reply; the
+  daemon validates it against the `ReviewVerdict` schema and records it as the verdict. The model
+  never writes the verdict itself.
+
 **One verification pass** (used by the Checks and Review stages):
 
 1. **Freeze.** Commit the candidate as an immutable snapshot, identified by its commit digest.
@@ -688,6 +703,20 @@ budget, in this order:
 4. the project profile summary;
 5. the top relevant lessons and decisions, each with its provenance;
 6. for a failover or handoff: the compaction snapshot and the handoff packet (§5.3).
+
+**Overflow and freshness (v0.6.1, review M6).**
+- Sections 1 and 2 are never cut. If they alone exceed the role's budget, the Task is too big: the
+  pack is refused with the fix option "split this Task", and the coordinator is asked to split it.
+  Lower sections are cut from the bottom up, and the cut is recorded in the pack.
+- The context budget does not end at the first message. Per role, the broker enforces a read budget
+  (bytes per read, total bytes per attempt) and caps tool output; an attempt that reaches its
+  cumulative budget is compacted with a snapshot or ended with a handoff, not left to drift.
+- When the repository index cannot tell what a change affects (dynamic imports, code generation,
+  an unsupported language), the impact set is "unknown" and verification widens to the full check
+  suite instead of guessing small.
+- The profile, the index and every knowledge item carry the base revision, toolchain version and,
+  for vectors, the embedding model version they were built from. A change to any of them invalidates
+  what depended on it.
 
 The pack is content-addressed and its digest is recorded on the attempt, so any run can be replayed
 and audited. Agents receive it as their first message and as the MCP resource
