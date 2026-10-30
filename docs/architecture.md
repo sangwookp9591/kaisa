@@ -2,17 +2,38 @@
 
 | | |
 |---|---|
-| Status | Draft v0.5 — design only, nothing implemented |
+| Status | Draft v0.6 — M0 substrate in progress (ledger, keeper, workspace, PTY); everything else is design |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
 | Date | 2026-10-30 |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
 | Core language | Rust (stable 1.99.1, edition 2024) |
-| Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) |
+| Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) · [`research/ruflo-control.md`](research/ruflo-control.md) (how ruflo enforces, or only records, its capabilities) |
 | Reviews | [`reviews/2026-10-30-architecture-v0.2-codex.md`](reviews/2026-10-30-architecture-v0.2-codex.md) |
 
 > Every performance or memory number here is a **budget to be measured**, not a claim.
 > Every security property is a **requirement to be proven by a negative test on each OS**
 > before it is advertised.
+
+**Changes in v0.6 — redesign of the team-intelligence layer.** An audit against eight required
+capabilities found four of them only bolted on (project memory, self-learning retrieval, context
+scoping, routing judgement) and two missing (web console, large-scale teams). They are now part of
+the core model instead of optional extras. The M0 substrate (ledger, keeper, PTY, workspace,
+preservation) is unchanged: it is the execution path every new capability depends on.
+- **Principle P17**: a capability exists only where Kaisa is on the execution path. P15 is restated:
+  learning adapts inside bounds and never widens authority (§2).
+- **Missions and hierarchical runs** with sub-coordinators; a `documentation` role; lightweight
+  read-only attempts; write-set ownership as a scheduler invariant (§5.2, §5.13).
+- **The verification loop** is a state machine with structured review verdicts, automatic bounded
+  revision and one delivery gate on fresh evidence (§5.8).
+- **Knowledge and the context engine** are first-class and event-sourced: an auto-derived project
+  profile, lessons, decisions and trajectories; hybrid BM25 + vector retrieval on by default; context
+  packs assembled by Kaisa, with every injection logged and scored against outcomes (§5.9).
+- **The router sits on the spawn path**: a deterministic grader, per-(role, grade) learned priors
+  from verified outcomes, local OpenAI-compatible models for the light tier, per-request usage (§5.10).
+- **A local web console** beside the TUI, on loopback with a per-launch token (§5.11, §12).
+- **Agent catalog** adds Hermes and generic OpenAI-compatible endpoints; user MCP servers are relayed
+  through the broker (§5.6).
+- ADR-0028 to ADR-0035 were added.
 
 **Changes in v0.5.** These come from [`user-flows.md`](user-flows.md) v0.2 §8.
 - **Answers and Decisions** are now typed differently. Decisions carry a scope and an expiry, and questions have an owner, a timeout and a fallback (§5.12).
@@ -52,8 +73,8 @@
 
 ## 1. Purpose
 
-Kaisa is a company-internal control plane for coding agents such as Claude Code, Codex and other
-CLI agents. It does six things:
+Kaisa is a company-internal control plane for coding agents such as Claude Code, Codex, Hermes and
+other CLI agents. It turns one goal into the work of a verified team. It does eight things:
 
 1. **Runs** agents, each in an isolated git worktree and terminal.
 2. **Supervises** them with a lifecycle the system enforces. The agents do not have to remember it.
@@ -61,7 +82,12 @@ CLI agents. It does six things:
 4. **Verifies** results against an immutable snapshot before a human sees them.
 5. **Keeps work moving** when a provider's quota runs out, by handing the coordinator role or a
    task to another provider.
-6. **Learns** only from verified outcomes, and **accounts** for cost per run, team and model.
+6. **Remembers** the project: its profile, decisions and lessons survive every session, and the right
+   part of them reaches each agent without anyone re-explaining the project.
+7. **Learns** only from verified outcomes, and routes each task to the cheapest agent and model that
+   has proven it can do that kind of task.
+8. **Shows** the whole team live — progress, cost and what needs a human — in the terminal and in a
+   local web console, and **accounts** for cost per run, team and model.
 
 ### Goals
 
@@ -79,7 +105,8 @@ CLI agents. It does six things:
 
 ### Non-goals (v1)
 
-- Hosting models or running inference.
+- Hosting large language models. Kaisa calls them; it runs only small local models for embeddings,
+  and it can call a local model server (for example Ollama) that the user runs.
 - A general-purpose IDE.
 - Multi-tenant SaaS. v1 runs locally for one user. Team server mode comes later.
 - Distributed consensus. One daemon is the authority for its runs.
@@ -104,8 +131,11 @@ CLI agents. It does six things:
 | P12 | **One writer per store.** | LearnHarness; Orca. |
 | P13 | **No silent degradation.** If a guarantee is reduced, the reduction is labelled. | ruflo's hash-embedding fallback. |
 | P14 | **Read-only commands have no side effects.** `status`, `--help`, `--version` and MCP `tools/list` do not start the daemon, write files or refresh anything. | ruflo's helper refresh and daemon autostart. |
-| P15 | **The learning system proposes. It never promotes itself.** | ruflo's MetaHarness / Darwin rule. |
+| P15 | **Learning adapts inside bounds and never widens authority.** Knowledge and routing priors update automatically from verified outcomes, and can be rolled back. Anything that changes policy, prompts, tools, egress, secrets, spend or concurrency stays a proposal behind a human Gate. | ruflo's MetaHarness / Darwin rule; the v0.6 audit found that "proposals only" made Kaisa unable to get better by itself. |
 | P16 | **Measured claims only.** | ruflo retracted its benchmark multipliers. |
+| P17 | **A capability exists only where Kaisa is on the execution path.** If Kaisa cannot enforce it — because it only prints a recommendation or writes a record — it is not claimed. Model choice, context, ownership and delivery are all decided where Kaisa starts or finishes an attempt. | ruflo: recommendations the model may ignore, `maxAgents` never checked, exit 0 treated as success ([`research/ruflo-control.md`](research/ruflo-control.md)). |
+| P18 | **Context is assembled, not remembered.** Every attempt starts from a context pack Kaisa builds: spec, owned files, related code, relevant knowledge. No agent is expected to search for what it needs or to recall earlier sessions. | Context collapse in long single-agent sessions; ruflo's keyword-matched 80-character injections. |
+| P19 | **Every injection is accountable.** Each knowledge item given to an agent is logged with the attempt, and its usefulness is scored against verified outcomes. Items that do not help decay. | ruflo scores recall by "matched again", which is not an outcome. |
 
 ---
 
@@ -116,7 +146,8 @@ CLI agents. It does six things:
                                               │
 ┌─────────────────────────────────────────────▼──────────────────────────────────────────────┐
 │ kaisad                                                                                     │
-│  Scheduler · Coordinator epochs · Router/Budget/Quota · Verify Gate · Knowledge (opt-in)   │
+│  Scheduler (missions, runs, write sets) · Coordinator epochs · Router/Budget/Quota          │
+│  Verify loop + delivery gate · Knowledge + context engine · Event stream (TUI / web)       │
 │  Outbox + Ledger (single writer, SQLite WAL, hash-chained events)                          │
 │  Policy compiler ─► signed, immutable policy snapshots                                     │
 │  AGENT endpoint (per-attempt stdio MCP bridge; scoped capability token; no human ops)      │
