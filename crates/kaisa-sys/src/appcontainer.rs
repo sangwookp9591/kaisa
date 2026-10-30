@@ -660,4 +660,49 @@ mod tests {
              exit {exit:?}, received {received:?}"
         );
     }
+
+    /// What the contained Node.js exits with, so the test knows it really ran.
+    const NODE_EXIT: u32 = 5;
+
+    /// Where `node.exe` is installed on this machine, if anywhere.
+    fn installed_node() -> Option<String> {
+        let found = std::process::Command::new("where")
+            .arg("node")
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&found.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|line| line.to_ascii_lowercase().ends_with("node.exe"))
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn nodejs_starts_inside_a_container_with_only_its_install_granted() {
+        let Some(node) = installed_node() else {
+            eprintln!("spike check 5 skipped: node.exe is not installed on this runner");
+            return;
+        };
+        let profile = a_profile("node");
+        let install: PathBuf = PathBuf::from(&node)
+            .parent()
+            .expect("node.exe lives in a directory")
+            .to_owned();
+        let granted = profile.grant(&install, ContainerAccess::ReadExecute);
+
+        let exit = profile.run(
+            &node,
+            &["-e".to_owned(), format!("process.exit({NODE_EXIT})")],
+            &system_directory(),
+        );
+        let _ = profile.revoke(&install);
+        let _ = profile.delete();
+
+        eprintln!("spike check 5: node at {node}, grant {granted:?}, exit {exit:?}");
+        assert_eq!(
+            exit.ok(),
+            Some(NODE_EXIT),
+            "spike check 5: the agent runtime can run contained; if not, Windows runs are reduced"
+        );
+    }
 }
