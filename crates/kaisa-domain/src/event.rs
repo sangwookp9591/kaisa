@@ -86,11 +86,13 @@ pub enum EventKind {
     TaskFinished,
     /// The tokens (and cost, when the agent reports one) an attempt used (T30b).
     UsageRecorded,
+    /// A run adopted a policy snapshot; the subject is the digest of its canonical text (T32b).
+    PolicyAdopted,
 }
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -106,6 +108,7 @@ impl EventKind {
         Self::TaskStarted,
         Self::TaskFinished,
         Self::UsageRecorded,
+        Self::PolicyAdopted,
     ];
 
     /// Stable textual code used in storage and in the canonical encoding.
@@ -127,6 +130,7 @@ impl EventKind {
             Self::TaskStarted => "task.started",
             Self::TaskFinished => "task.finished",
             Self::UsageRecorded => "attempt.usage_recorded",
+            Self::PolicyAdopted => "run.policy_adopted",
         }
     }
 

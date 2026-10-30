@@ -34,12 +34,12 @@ pub struct VerifiedRequest<'request> {
     pub reviewer: AgentLauncher<'request>,
     /// The `kaisa` executable agents' bridges run.
     pub kaisa_executable: &'request Path,
-    /// Whether agents run confined.
+    /// Whether these agents can run confined; they do only when the policy also asks it.
     pub confine_agent: bool,
     /// The project's trusted test commands, taken from the base revision's profile.
     pub checks: &'request [DetectedCommand],
-    /// Revisions allowed before a person decides.
-    pub revision_limit: u32,
+    /// The policy this run adopts: its revision limit and confinement govern the run.
+    pub policy: &'request kaisa_domain::PolicySnapshot,
 }
 
 /// How a verified goal ended.
@@ -106,9 +106,14 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             revisions: 0,
         });
     }
+    std::fs::create_dir_all(request.state_directory)
+        .map_err(at("preparing the state directory"))?;
+    kaisa_ledger::EventStore::open(&request.state_directory.join("kaisa.db"))
+        .and_then(|mut ledger| ledger.record_policy(request.policy))
+        .map_err(at("recording the run's policy"))?;
     let original_base: Candidate =
         freeze_candidate(request.repository, "HEAD").map_err(at("resolving the base"))?;
-    let mut budget = RevisionBudget::new(request.revision_limit);
+    let mut budget = RevisionBudget::new(request.policy.policy().revision_limit);
     let mut base: String = original_base.commit.clone();
     let mut instruction: String = request.goal.to_owned();
     let mut attempts: Vec<GoalOutcome> = Vec::new();
@@ -123,7 +128,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             role: Role::Developer,
             launch: request.developer,
             kaisa_executable: request.kaisa_executable,
-            confine_agent: request.confine_agent,
+            confine_agent: request.confine_agent && request.policy.policy().confine_agents,
             egress_hosts: &[],
             agent_writable: &[],
             local_model_port: None,
@@ -163,7 +168,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             role: Role::Reviewer,
             launch: request.reviewer,
             kaisa_executable: request.kaisa_executable,
-            confine_agent: request.confine_agent,
+            confine_agent: request.confine_agent && request.policy.policy().confine_agents,
             egress_hosts: &[],
             agent_writable: &[],
             local_model_port: None,

@@ -10,6 +10,7 @@ mod knowledge;
 mod outbox;
 #[cfg(test)]
 mod outbox_tests;
+mod policy;
 mod rows;
 mod tasks;
 #[cfg(test)]
@@ -23,5 +24,6 @@ pub use error::{CorruptReason, StoreError};
 pub use event_store::EventStore;
 pub use knowledge::TrustedKnowledge;
 pub use outbox::{Completion, Intent, PendingIntent};
+pub use policy::AdoptedPolicy;
 pub use tasks::TaskProgress;
 pub use usage::AttemptUsage;

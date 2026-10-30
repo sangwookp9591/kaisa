@@ -140,6 +140,13 @@ impl GoalCommand {
     ) -> io::Result<u8> {
         let kaisa: PathBuf = std::env::current_exe()?;
         let checks = crate::verified::trusted_checks(repository, self.check.as_deref());
+        let policy = match crate::verified::default_policy().snapshot() {
+            Ok(policy) => policy,
+            Err(error) => {
+                writeln!(err, "kaisa: the policy cannot govern a run: {error}")?;
+                return Ok(crate::EXIT_FAILURE);
+            }
+        };
         let developer = |mcp_config: &Path| self.role_spec(Role::Developer, write_set, mcp_config);
         let reviewer = |mcp_config: &Path| self.role_spec(Role::Reviewer, write_set, mcp_config);
         match run_verified_goal(&VerifiedRequest {
@@ -153,7 +160,7 @@ impl GoalCommand {
             // Claude Code runs reduced until a confined run is verified per OS (T16.0).
             confine_agent: self.agent.program.is_some(),
             checks: &checks,
-            revision_limit: crate::verified::REVISION_LIMIT,
+            policy: &policy,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {

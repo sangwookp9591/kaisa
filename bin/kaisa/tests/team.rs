@@ -115,6 +115,19 @@ fn the_projects_test_command() -> DetectedCommand {
     }
 }
 
+/// The policy a test run adopts.
+fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
+    kaisa_domain::Policy {
+        revision_limit: DEFAULT_REVISION_LIMIT,
+        allowed_egress_hosts: Vec::new(),
+        confine_agents,
+        min_grade_for_security_review: kaisa_domain::Grade::T3,
+        require_person_when_check_definitions_change: true,
+    }
+    .snapshot()
+    .expect("a valid policy")
+}
+
 fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
     let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
     let developer = |mcp_config: &Path| scripted(mcp_config, &["--fake-write-next", STEP_PREFIX]);
@@ -130,7 +143,7 @@ fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
         kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
         confine_agent: true,
         checks: &[the_projects_test_command()],
-        revision_limit: DEFAULT_REVISION_LIMIT,
+        policy: &a_policy(true),
     })
     .expect("the team run completes")
 }
@@ -206,5 +219,25 @@ fn a_repository_that_widens_agent_authority_needs_a_person() {
     assert!(
         outcome.attempts.is_empty(),
         "no agent starts in a repository whose settings would widen its authority"
+    );
+}
+
+#[test]
+fn a_run_records_the_policy_it_ran_under() {
+    let bench = Workbench::new("policy");
+    let policy = a_policy(true);
+
+    a_team_run(&bench, FIRST_STEP);
+
+    let adopted = kaisa_ledger::EventStore::open(&bench.base.join("state").join("kaisa.db"))
+        .and_then(|ledger| ledger.adopted_policies())
+        .expect("the ledger reads");
+    assert_eq!(
+        adopted
+            .iter()
+            .map(|recorded| recorded.canonical.as_str())
+            .collect::<Vec<_>>(),
+        vec![policy.canonical()],
+        "the run's ledger names exactly the policy it ran under"
     );
 }
