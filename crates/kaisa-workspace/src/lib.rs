@@ -16,4 +16,4 @@ pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
-pub use worktree::{Worktree, WorktreeError, create_worktree, inventory};
+pub use worktree::{Worktree, WorktreeError, create_worktree, inventory, remove_worktree};

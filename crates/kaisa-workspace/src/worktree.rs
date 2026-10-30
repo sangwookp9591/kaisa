@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::git::{GitError, run_git};
 use crate::inventory::{IgnoredPolicy, Inventory, plan_inventory};
+use crate::receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 use crate::status::{StatusParseError, parse_status};
 
 /// A git worktree owned by one attempt.
@@ -40,6 +41,8 @@ pub enum WorktreeError {
     Git(GitError),
     /// Git's status output could not be understood.
     Status(StatusParseError),
+    /// Removal was refused because the receipt does not cover every change.
+    Uncovered(UncoveredDeletion),
 }
 
 impl fmt::Display for WorktreeError {
@@ -49,6 +52,7 @@ impl fmt::Display for WorktreeError {
             Self::PathExists(path) => write!(f, "`{}` already exists", path.display()),
             Self::Git(error) => write!(f, "{error}"),
             Self::Status(error) => write!(f, "{error}"),
+            Self::Uncovered(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -58,6 +62,7 @@ impl std::error::Error for WorktreeError {
         match self {
             Self::Git(error) => Some(error),
             Self::Status(error) => Some(error),
+            Self::Uncovered(refusal) => Some(refusal),
             Self::BranchExists(_) | Self::PathExists(_) => None,
         }
     }
@@ -122,6 +127,28 @@ pub fn inventory(worktree: &Worktree, policy: &IgnoredPolicy) -> Result<Inventor
     Ok(plan_inventory(&entries, policy))
 }
 
+/// Removes `worktree` from `repository`, but only after checking that `receipt` covers every
+/// change git reports in it. The worktree's branch is kept, because preserved work may live
+/// on it as a WIP commit.
+///
+/// # Errors
+///
+/// Returns [`WorktreeError::Uncovered`] (and removes nothing) if the receipt misses any change,
+/// or another [`WorktreeError`] if git fails.
+pub fn remove_worktree(
+    repository: &Path,
+    worktree: &Worktree,
+    receipt: &PreservationReceipt,
+    policy: &IgnoredPolicy,
+) -> Result<(), WorktreeError> {
+    check_deletion(&inventory(worktree, policy)?, receipt).map_err(WorktreeError::Uncovered)?;
+    let path_text: String = worktree.path().to_string_lossy().into_owned();
+    // `--force` is required because untracked and ignored files are still present; the
+    // coverage check above is what makes discarding them safe.
+    run_git(repository, &["worktree", "remove", "--force", &path_text])?;
+    Ok(())
+}
+
 /// True when `refs/heads/<branch>` exists in `repository`.
 fn branch_exists(repository: &Path, branch: &str) -> bool {
     let reference: String = format!("refs/heads/{branch}");
@@ -136,9 +163,10 @@ fn branch_exists(repository: &Path, branch: &str) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Worktree, WorktreeError, create_worktree, inventory};
+    use super::{Worktree, WorktreeError, create_worktree, inventory, remove_worktree};
     use crate::git::git_text;
     use crate::inventory::{IgnoredPolicy, Inventory};
+    use crate::receipt::{PreservationReceipt, UncoveredDeletion};
     use crate::status::{EntryKind, StatusEntry};
     use crate::test_support::{TemporaryRepository, a_repository_with_one_commit_on_main};
 
@@ -304,6 +332,104 @@ mod tests {
             planned.disposable,
             [entry("target/", EntryKind::Ignored)],
             "git reports the ignored directory, and the policy marks it disposable"
+        );
+    }
+
+    /// The new test file an attempt typically leaves behind.
+    const NEW_TEST_FILE: &str = "tests/login_test.rs";
+
+    fn an_attempt_that_added_a_test(repository: &TemporaryRepository) -> Worktree {
+        let worktree: Worktree = a_worktree_for_attempt_41a(repository);
+        the_agent_writes(&worktree, NEW_TEST_FILE, "#[test] fn logs_in() {}");
+        worktree
+    }
+
+    fn a_receipt_that_forgot_everything() -> PreservationReceipt {
+        PreservationReceipt::default()
+    }
+
+    fn a_receipt_covering_the_new_test() -> PreservationReceipt {
+        PreservationReceipt::covering(&[NEW_TEST_FILE])
+    }
+
+    #[test]
+    fn removing_a_worktree_with_uncovered_changes_is_refused() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let worktree: Worktree = an_attempt_that_added_a_test(&repository);
+
+        let removal = remove_worktree(
+            repository.path(),
+            &worktree,
+            &a_receipt_that_forgot_everything(),
+            &demo_build_policy(),
+        );
+
+        assert!(
+            matches!(
+                &removal,
+                Err(WorktreeError::Uncovered(UncoveredDeletion { uncovered }))
+                    if uncovered.iter().any(|path| path == NEW_TEST_FILE)
+            ),
+            "unpreserved work must block removal and be named, got {removal:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_removal_leaves_the_worktree_and_its_files_in_place() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let worktree: Worktree = an_attempt_that_added_a_test(&repository);
+
+        let _refused = remove_worktree(
+            repository.path(),
+            &worktree,
+            &a_receipt_that_forgot_everything(),
+            &demo_build_policy(),
+        );
+
+        assert!(
+            worktree.path().join(NEW_TEST_FILE).exists(),
+            "a refusal must not delete anything, not even partially"
+        );
+    }
+
+    #[test]
+    fn removing_a_worktree_after_preservation_deletes_its_directory() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let worktree: Worktree = an_attempt_that_added_a_test(&repository);
+
+        remove_worktree(
+            repository.path(),
+            &worktree,
+            &a_receipt_covering_the_new_test(),
+            &demo_build_policy(),
+        )
+        .expect("covered work may be removed");
+
+        assert!(
+            !worktree.path().exists(),
+            "the worktree directory is gone after cleanup"
+        );
+    }
+
+    #[test]
+    fn removing_a_worktree_keeps_its_branch_for_the_preserved_work() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let worktree: Worktree = an_attempt_that_added_a_test(&repository);
+
+        remove_worktree(
+            repository.path(),
+            &worktree,
+            &a_receipt_covering_the_new_test(),
+            &demo_build_policy(),
+        )
+        .expect("covered work may be removed");
+
+        assert_eq!(
+            git_text(repository.path(), &["branch", "--list", worktree.branch()])
+                .expect("git runs")
+                .trim_start_matches(['*', '+', ' ']),
+            worktree.branch(),
+            "the branch may hold the WIP commit, so cleanup must not delete it"
         );
     }
 }
