@@ -581,20 +581,59 @@ is recorded as an override.
 The verdict files and the receipts are written only by the daemon. The agent cannot write them, unlike ruflo's
 project-local `verified-trajectories.jsonl`.
 
-### 5.9 Knowledge: learning engine (opt-in in v1)
+### 5.9 Knowledge and the context engine (v0.6: first-class, on by default)
 
-- **Promotion.** Promotion happens only from a verification receipt plus a merge (ruflo ADR-502).
-  - An extractor proposes, an auditor checks, and the single writer merges.
-  - Facts carry their provenance: receipt, attempt and commit.
-- **No self-promotion (P15).** Learned changes to routing tables, prompts or policies stay **proposals**.
-  - Each one is evaluated against a recorded baseline set, which the ruflo-style evaluation runs.
-  - It is applied only after a human Gate.
-  - The learning system cannot widen tools, egress, secrets, spend or concurrency.
-- **Agent-native memory ingestion.** Ingestion is read-only and the provenance is recorded, for example from the Claude auto-memory directory. This idea comes from ruflo's memory bridge. Ingested facts are untrusted until they are verified.
-- **Retrieval.**
-  - v1 uses SQLite FTS5 (BM25) only.
-  - Vector search (`usearch`) and local embeddings (`fastembed`) are optional features. They stay off by default until their footprint and the offline distribution of model assets have been measured (review M8).
-  - When vector search is off, every result says so.
+Knowledge is how Kaisa keeps a project's memory across sessions; the context engine is how the right
+part of that memory, and of the code, reaches each agent (P18). Both are event-sourced in the
+ledger like every other state, so they survive restarts, can be audited and can be rolled back.
+
+**Knowledge kinds**
+
+| Kind | What it holds | Where it comes from | Becomes trusted when |
+|---|---|---|---|
+| Project profile | languages, build / test / lint commands, layout, entry points, conventions | derived automatically on the first run and whenever the base revision changes; repository instruction files are read as quoted data | derived by Kaisa (commands are confirmed by a successful check run) |
+| Repository index | symbols, imports and tests per file, at a base revision | built by Kaisa (tree-sitter grammars where available; an import-line scanner otherwise, labelled) | always (it is computed, not claimed) |
+| Lesson | "this failure signature was fixed by this kind of change", "reviewers reject X here" | extracted from attempts whose result passed the delivery gate, and from review findings a revision resolved | its source attempt passed the delivery gate |
+| Decision | a scoped, project-level choice and its rationale | coordinator `kaisa_decide` entries and human Decisions with project scope (§5.12) | recorded by the daemon |
+| Trajectory | task kind, role, grade, agent, model, effort, context items, revisions, cost, outcome | every settled attempt | always (it is a record of what happened) |
+| Ingested note | agent-native memory, for example Claude auto-memory files | read-only ingestion with provenance (ruflo's memory-bridge idea) | it is confirmed by a verified use or by a human |
+
+**Lifecycle (events).** `knowledge_proposed → promoted → injected → scored → decayed | retired`.
+- Promotion of lessons and trajectories is **automatic** once the delivery gate passes (P15: it adapts
+  inside bounds). Nothing in knowledge can change policy, tools, egress, secrets, spend or
+  concurrency; at most it changes what an agent reads.
+- Before storing, a secret scanner redacts credentials; an item that still matches is dropped.
+- Knowledge is always given to agents as quoted data, never as instructions.
+
+**Retrieval.** Hybrid by default: SQLite FTS5 (BM25) plus a local vector index, merged with maximal
+marginal relevance, then weighted by recency and by measured usefulness (below).
+- Embeddings come from a small local model fetched once at `kaisa init` (checksum-verified, from a
+  company mirror when the policy pack names one). Inference runs in-process in Rust.
+- If the model is not available, retrieval runs BM25-only and every result and the status line say
+  "vector search off" (P13). It never silently degrades.
+- A Mojo backend for embeddings and vector search may be added later as an accelerator on macOS and
+  Linux; the Rust path stays the default and the only one on Windows (ADR-0033).
+
+**Context packs.** At the start of every attempt Kaisa assembles a pack, within the role's token
+budget, in this order:
+1. the Task spec and acceptance criteria (for a revision: the blocking findings);
+2. the write set and the impact set (§5.2);
+3. related code from the repository index — definitions and call sites of what the write set touches;
+4. the project profile summary;
+5. the top relevant lessons and decisions, each with its provenance;
+6. for a failover or handoff: the compaction snapshot and the handoff packet (§5.3).
+
+The pack is content-addressed and its digest is recorded on the attempt, so any run can be replayed
+and audited. Agents receive it as their first message and as the MCP resource
+`kaisa://context/<attempt>`; `kaisa_knowledge` is there for anything else they want to look up.
+
+**Accountability (P19).** Every injected item is recorded with the attempt. When the attempt's result
+is decided (delivered, revised, rejected), each injected item's usefulness estimate is updated.
+Items that keep failing to help decay; items unused for a policy-set period retire. Retrieval is
+therefore tuned by outcomes, not by whether a keyword matched again.
+
+**Scope.** Per repository by default. Sharing knowledge across a team is a policy-pack setting
+(M3), because shared knowledge is shared influence over agents.
 
 ### 5.10 Router, budget, quota and admission (review M7)
 
