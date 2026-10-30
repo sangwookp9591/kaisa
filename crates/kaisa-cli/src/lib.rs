@@ -10,6 +10,7 @@ mod agent;
 mod delivery;
 mod goal;
 mod local_agent;
+mod policy;
 mod verified;
 mod watch;
 
@@ -73,6 +74,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("watch") => watch::run(out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
+        Some("policy") => policy::run(&args[1..], out, err),
         Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
             (Some("--attempt"), Some(directory)) => {
                 match kaisa_mcp::bridge(std::path::Path::new(directory), out) {
