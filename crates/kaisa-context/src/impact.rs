@@ -94,14 +94,13 @@ impl BatchBlobReader {
             .spawn()?;
         #[cfg(test)]
         BATCH_PROCESS_SPAWNS.with(|count| count.set(count.get() + 1));
-        let input = child
-            .stdin
-            .take()
-            .expect("the batch input pipe was requested");
-        let output = child
-            .stdout
-            .take()
-            .expect("the batch output pipe was requested");
+        let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(
+                "git cat-file --batch started without its pipes",
+            ));
+        };
         Ok(Self {
             child,
             input: Some(input),
@@ -110,7 +109,10 @@ impl BatchBlobReader {
     }
 
     fn read_blob(&mut self, digest: &str) -> io::Result<Option<Vec<u8>>> {
-        let input = self.input.as_mut().expect("the batch reader is still open");
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| io::Error::other("the batch reader is closed"))?;
         writeln!(input, "{digest}")?;
         input.flush()?;
         let mut header = String::new();
