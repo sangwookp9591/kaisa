@@ -107,6 +107,39 @@ impl Plan {
         Ok(Self { tasks })
     }
 
+    /// Tasks that may start now, in plan order: not finished or running, every dependency
+    /// finished, and no write-set overlap with a running task or with one picked before it.
+    /// The last rule holds even for a plan's ordered tasks, because a dependency is only
+    /// "done" once finished, and the scheduler must never run two writers of the same files.
+    #[must_use]
+    pub fn next_runnable(
+        &self,
+        finished: &BTreeSet<TaskId>,
+        running: &BTreeSet<TaskId>,
+    ) -> Vec<&PlannedTask> {
+        let mut busy: Vec<&WriteSet> = self
+            .tasks
+            .iter()
+            .filter(|task| running.contains(&task.id))
+            .map(|task| &task.write_set)
+            .collect();
+        let mut ready: Vec<&PlannedTask> = Vec::new();
+        for task in &self.tasks {
+            let waiting: bool = finished.contains(&task.id)
+                || running.contains(&task.id)
+                || !task
+                    .depends_on
+                    .iter()
+                    .all(|dependency| finished.contains(dependency))
+                || busy.iter().any(|owned| owned.overlaps(&task.write_set));
+            if !waiting {
+                busy.push(&task.write_set);
+                ready.push(task);
+            }
+        }
+        ready
+    }
+
     /// The tasks, in the order they were planned.
     #[must_use]
     pub fn tasks(&self) -> &[PlannedTask] {
@@ -139,6 +172,8 @@ fn ancestors(tasks: &[PlannedTask]) -> Result<BTreeMap<&TaskId, BTreeSet<&TaskId
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{Plan, PlanError, PlannedTask};
     use crate::id::TaskId;
     use crate::repo_path::RepoPath;
@@ -255,5 +290,82 @@ mod tests {
             Err(PlanError::DuplicateTask(task("task_login"))),
             "every task has one identity"
         );
+    }
+
+    fn ids(tasks: &[&PlannedTask]) -> Vec<TaskId> {
+        tasks.iter().map(|task| task.id.clone()).collect()
+    }
+
+    fn done(names: &[&str]) -> BTreeSet<TaskId> {
+        names.iter().map(|name| task(name)).collect()
+    }
+
+    #[test]
+    fn a_task_waits_until_its_dependencies_are_done() {
+        let plan = Plan::new(vec![
+            a_developer("task_schema", &["src/db"], &[]),
+            a_developer("task_api", &["src/api"], &["task_schema"]),
+        ])
+        .expect("a valid plan");
+
+        let at_start = ids(&plan.next_runnable(&done(&[]), &done(&[])));
+        let after_schema = ids(&plan.next_runnable(&done(&["task_schema"]), &done(&[])));
+
+        assert_eq!(
+            at_start,
+            vec![task("task_schema")],
+            "the API waits for the schema"
+        );
+        assert_eq!(
+            after_schema,
+            vec![task("task_api")],
+            "once the schema is finished the API may start"
+        );
+    }
+
+    #[test]
+    fn independent_tasks_start_together() {
+        let plan = Plan::new(vec![
+            a_developer("task_login", &["src/auth"], &[]),
+            a_developer("task_billing", &["src/billing"], &[]),
+        ])
+        .expect("a valid plan");
+
+        let ready = ids(&plan.next_runnable(&done(&[]), &done(&[])));
+
+        assert_eq!(
+            ready,
+            vec![task("task_login"), task("task_billing")],
+            "tasks owning different files run in parallel, in plan order"
+        );
+    }
+
+    #[test]
+    fn two_tasks_touching_the_same_files_never_run_at_once() {
+        let plan = Plan::new(vec![
+            a_developer("task_login", &["src/auth"], &[]),
+            a_developer("task_review", &["src/auth"], &["task_login"]),
+        ])
+        .expect("a valid plan");
+
+        let while_login_runs = ids(&plan.next_runnable(&done(&[]), &done(&["task_login"])));
+
+        assert!(
+            while_login_runs.is_empty(),
+            "nothing else that owns src/auth starts while the login fix runs"
+        );
+    }
+
+    #[test]
+    fn a_finished_or_running_task_is_never_offered_again() {
+        let plan = Plan::new(vec![
+            a_developer("task_login", &["src/auth"], &[]),
+            a_developer("task_billing", &["src/billing"], &[]),
+        ])
+        .expect("a valid plan");
+
+        let ready = ids(&plan.next_runnable(&done(&["task_login"]), &done(&["task_billing"])));
+
+        assert!(ready.is_empty(), "each task runs once");
     }
 }
