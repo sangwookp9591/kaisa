@@ -161,6 +161,7 @@ impl GoalCommand {
             confine_agent: self.agent.program.is_some(),
             checks: &checks,
             policy: &policy,
+            observed: false,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {

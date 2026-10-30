@@ -144,6 +144,7 @@ fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
         confine_agent: true,
         checks: &[the_projects_test_command()],
         policy: &a_policy(true),
+        observed: false,
     })
     .expect("the team run completes")
 }
@@ -239,5 +240,50 @@ fn a_run_records_the_policy_it_ran_under() {
             .collect::<Vec<_>>(),
         vec![policy.canonical()],
         "the run's ledger names exactly the policy it ran under"
+    );
+}
+
+/// A path the write set does not cover, which an observed developer writes anyway.
+const OUTSIDE_THE_WRITE_SET: &str = "docs/outside.md";
+
+#[test]
+fn an_observed_change_outside_the_write_set_needs_a_person() {
+    let bench = Workbench::new("outside");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let developer = |_mcp_config: &Path| ProcessSpec {
+        program: the_fake_agent(),
+        args: vec![
+            "--fake-observed-write".to_owned(),
+            OUTSIDE_THE_WRITE_SET.to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+    let reviewer = |mcp_config: &Path| {
+        scripted(
+            mcp_config,
+            &["--fake-review-require", OUTSIDE_THE_WRITE_SET],
+        )
+    };
+
+    let outcome: VerifiedOutcome = run_verified_goal(&VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &bench.base.join("state"),
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[the_projects_test_command()],
+        policy: &a_policy(true),
+        observed: true,
+    })
+    .expect("the team run completes");
+
+    assert!(
+        matches!(&outcome.delivery, Delivery::NeedsPerson(reason) if reason.contains(OUTSIDE_THE_WRITE_SET)),
+        "a write the broker never saw is caught before delivery and named: {:?}",
+        outcome.delivery
     );
 }

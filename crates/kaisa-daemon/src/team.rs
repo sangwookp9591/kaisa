@@ -40,6 +40,9 @@ pub struct VerifiedRequest<'request> {
     pub checks: &'request [DetectedCommand],
     /// The policy this run adopts: its revision limit and confinement govern the run.
     pub policy: &'request kaisa_domain::PolicySnapshot,
+    /// Whether the developer is an observed agent (Codex), whose writes are checked against
+    /// the write set only after it finishes.
+    pub observed: bool,
 }
 
 /// How a verified goal ended.
@@ -132,7 +135,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             egress_hosts: &[],
             agent_writable: &[],
             local_model_port: None,
-            observed: false,
+            observed: request.observed,
         })?;
         let commit: Option<String> = developed.commit.clone();
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
@@ -153,6 +156,27 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
         };
         let candidate: Candidate =
             freeze_candidate(request.repository, &commit).map_err(at("freezing the candidate"))?;
+        // Brokered writes were checked one by one; this also catches an observed agent's, and
+        // covers every revision since the original base.
+        let outside: Vec<String> =
+            kaisa_workspace::changed_paths(request.repository, &original_base.commit, &candidate)
+                .map_err(at("listing the candidate's changes"))?
+                .into_iter()
+                .filter(|path| {
+                    !kaisa_domain::RepoPath::try_new(path)
+                        .is_ok_and(|path| request.write_set.permits(&path))
+                })
+                .collect();
+        if !outside.is_empty() {
+            return Ok(finish(
+                Delivery::NeedsPerson(format!(
+                    "the candidate changed paths outside its write set: {}",
+                    outside.join(", ")
+                )),
+                Some(candidate),
+                attempts,
+            ));
+        }
         let evidence: Vec<Evidence> = run_trusted_checks(
             request.repository,
             request.state_directory,
