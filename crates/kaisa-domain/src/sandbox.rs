@@ -28,6 +28,41 @@ pub enum Role {
     Coordinator,
 }
 
+impl Role {
+    /// Every role, for exhaustive lookups.
+    pub const ALL: [Self; 8] = [
+        Self::Researcher,
+        Self::Architect,
+        Self::Developer,
+        Self::Tester,
+        Self::Reviewer,
+        Self::Security,
+        Self::Documentation,
+        Self::Coordinator,
+    ];
+
+    /// Stable code used in configuration and storage.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Researcher => "researcher",
+            Self::Architect => "architect",
+            Self::Developer => "developer",
+            Self::Tester => "tester",
+            Self::Reviewer => "reviewer",
+            Self::Security => "security",
+            Self::Documentation => "documentation",
+            Self::Coordinator => "coordinator",
+        }
+    }
+
+    /// The role a stored code names.
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|role| role.code() == code)
+    }
+}
+
 /// Where an attempt's processes may connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
@@ -107,5 +142,16 @@ mod tests {
             (true, false, Network::None),
             "a reviewer cannot change what it judges, nor send it anywhere"
         );
+    }
+
+    #[test]
+    fn every_role_round_trips_through_its_code() {
+        for role in Role::ALL {
+            assert_eq!(
+                Role::from_code(role.code()),
+                Some(role),
+                "a stored role must come back as the same role, or its sandbox would change"
+            );
+        }
     }
 }
