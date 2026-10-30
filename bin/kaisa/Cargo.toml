@@ -1,0 +1,19 @@
+[package]
+name = "kaisa"
+description = "Run coding agents safely in parallel; review only what already passed verification."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kaisa"
+path = "src/main.rs"
+
+[dependencies]
+kaisa-cli.workspace = true
+
+[lints]
+workspace = true

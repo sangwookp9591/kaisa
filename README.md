@@ -84,9 +84,19 @@ Kaisa runs in a clearly labelled partial-protection mode, and only after you app
 
 ## Building
 
-Kaisa is written in Rust (stable, edition 2024) and follows the
-[Google Rust style guide](https://google.github.io/styleguide/rustguide.html). The source code does not
-exist yet. Build instructions will be added with milestone M0.
+Kaisa is written in Rust (edition 2024; the toolchain is pinned in `rust-toolchain.toml`) and follows the
+[Google Rust style guide](https://google.github.io/styleguide/rustguide.html). Milestone M0 has just
+started. The workspace builds, but only `kaisa --version` and `kaisa --help` work so far.
+
+```bash
+cargo build                         # build everything
+cargo test --workspace              # run the tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo +nightly fmt --all -- --check --config imports_granularity=Module,group_imports=StdExternalCrate
+```
+
+CI runs the same checks on macOS, Linux and Windows, plus `cargo-deny` for licences and advisories.
 
 ## Principles
 

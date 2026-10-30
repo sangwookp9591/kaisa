@@ -1,0 +1,12 @@
+[package]
+name = "kaisa-workspace"
+description = "Git worktrees, copy-on-write warm-up and the preservation protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

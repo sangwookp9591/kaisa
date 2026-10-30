@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "bin/kaisa",
+    "crates/kaisa-cli",
+    "crates/kaisa-daemon",
+    "crates/kaisa-domain",
+    "crates/kaisa-keeper",
+    "crates/kaisa-ledger",
+    "crates/kaisa-protocol",
+    "crates/kaisa-supervisor",
+    "crates/kaisa-sys",
+    "crates/kaisa-workspace",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/sangwookp9591/kaisa"
+publish = false
+
+[workspace.dependencies]
+kaisa-cli = { path = "crates/kaisa-cli" }
+kaisa-daemon = { path = "crates/kaisa-daemon" }
+kaisa-domain = { path = "crates/kaisa-domain" }
+kaisa-keeper = { path = "crates/kaisa-keeper" }
+kaisa-ledger = { path = "crates/kaisa-ledger" }
+kaisa-protocol = { path = "crates/kaisa-protocol" }
+kaisa-supervisor = { path = "crates/kaisa-supervisor" }
+kaisa-sys = { path = "crates/kaisa-sys" }
+kaisa-workspace = { path = "crates/kaisa-workspace" }
+
+# Lints shared by every crate except `kaisa-sys`, which declares its own copy with
+# `unsafe_code = "deny"` (the only crate allowed to opt into `unsafe`, architecture §13).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Google Rust style guide: no glob imports; prefer `expect` over `unwrap`.
+wildcard_imports = "deny"
+enum_glob_use = "deny"
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

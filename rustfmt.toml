@@ -1,0 +1,7 @@
+# Stable rustfmt options only. The Google Rust style guide also asks for
+# `imports_granularity = "Module"`, which is nightly-only; CI enforces it in a
+# separate job with `cargo +nightly fmt -- --config imports_granularity=Module`.
+edition = "2024"
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true
