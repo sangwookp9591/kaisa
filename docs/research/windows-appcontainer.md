@@ -28,14 +28,26 @@ spike (T15.5s), not a design fact.
   local IPC endpoint (named pipe) with an ACE for the container SID is the candidate, to be
   confirmed by the spike.
 
-## Verified on a non-admin Windows CI runner (T15.5s)
+## Verified on a non-admin Windows CI runner (T15.5s, `windows-latest`, commit 0b1fc44)
+
+All six checks pass; tests in `crates/kaisa-sys/src/appcontainer.rs`.
 
 - Check 1 ✓: a profile is created and a process runs inside it without administrator rights.
-- Check 2 ✓: without a grant, a contained process cannot read a file in the user's temp dir.
-- Check 4a ✓: a contained process cannot reach a loopback TCP listener.
-- Check 3a ✗ at first: a DACL grant alone did not make a directory writable. The container
-  runs at low integrity and the directory's default medium label forbids writing up, so a
-  write grant must also set a low mandatory label (`S:(ML;OICI;NW;;;LW)`); revoking restores it.
+- Check 2 ✓: without a grant a contained process cannot read a file in the user's temp dir;
+  with a read grant the same command reads it (the control proves the refusal was the
+  container's).
+- Check 3 ✓: a directory granted Modify is writable from inside; its ungranted sibling is not.
+- Check 4a ✓: a contained process cannot reach a loopback TCP listener — so the Windows broker
+  must not be a TCP port (FR-01: the loopback exemption needs an administrator).
+- Check 4b ✓: a named pipe whose DACL admits the container SID (with a low mandatory label)
+  is reachable from inside — the Windows broker endpoint.
+- Check 5 ✓: Node.js (the Claude Code and Codex runtime) starts inside a container with only
+  its install directory granted read/execute.
+- Check 6 ✓: grants are revoked again (ACE removed, label reset).
+
+Note on check 3: it first failed because of the test, not the container — `cmd /c` does not
+parse CreateProcess-style `\"` escaping. Write grants also lower the path's integrity label;
+whether that is required was not isolated (both changes landed before the passing run).
 
 ## Spike checklist (T15.5s, Windows CI runner, non-admin)
 
