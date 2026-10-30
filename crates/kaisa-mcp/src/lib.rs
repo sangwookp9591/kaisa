@@ -5,8 +5,10 @@
 //! reuses `kaisa-protocol`'s bounded frame reader. M0 implements the three methods an agent
 //! needs (`initialize`, `tools/list`, `tools/call`); anything else gets a JSON-RPC error.
 
+mod broker;
 mod server;
 mod tools;
 
+pub use broker::FileBroker;
 pub use server::{McpServer, ToolHandler, ToolOutcome};
 pub use tools::{ToolDescription, tools_for};

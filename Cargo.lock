@@ -196,6 +196,7 @@ dependencies = [
 name = "kaisa-mcp"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "kaisa-domain",
  "kaisa-protocol",
  "serde_json",
