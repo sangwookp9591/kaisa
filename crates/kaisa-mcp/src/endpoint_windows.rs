@@ -86,15 +86,29 @@ impl BrokerEndpoint {
     ///
     /// Returns the I/O error if accepting or serving fails. A refused caller is not an error.
     pub fn serve_one(self) -> io::Result<()> {
-        self.up.accept()?;
-        self.down.accept()?;
-        if !self.up.client_is_same_user()? {
-            return Ok(());
+        // A caller that connects and leaves at once (an agent that never used its tools, or
+        // Kaisa releasing an idle broker) is not an error: there was nothing to serve.
+        for pipe in [&self.up, &self.down] {
+            match pipe.accept() {
+                Ok(()) => {}
+                Err(error) if caller_left(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        match self.up.client_is_same_user() {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) if caller_left(&error) => return Ok(()),
+            Err(error) => return Err(error),
         }
         let mut reader = BufReader::new(self.up.into_stream());
         let mut writer = self.down.into_stream();
         let mut hello = String::new();
-        io::Read::take(&mut reader, HELLO_LIMIT).read_line(&mut hello)?;
+        match io::Read::take(&mut reader, HELLO_LIMIT).read_line(&mut hello) {
+            Ok(_) => {}
+            Err(error) if caller_left(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         let presented: String = serde_json::from_str::<Value>(&hello)
             .ok()
             .and_then(|value| value["token"].as_str().map(str::to_owned))
@@ -112,6 +126,16 @@ impl BrokerEndpoint {
             .serve(reader, &mut writer)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
     }
+}
+
+/// `ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`, `ERROR_PIPE_NOT_CONNECTED`: the client end is gone.
+const CALLER_LEFT_CODES: [i32; 3] = [109, 232, 233];
+
+/// True if `error` means the caller closed its end before or while being served.
+fn caller_left(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| CALLER_LEFT_CODES.contains(&code))
 }
 
 /// Relays an agent's MCP stream to its attempt's broker and back, performing no effects itself.
@@ -217,6 +241,31 @@ mod tests {
                 && attempt.base.join("w/src/auth/notes.md").exists(),
             "the agent's write travelled up one pipe and the answer came down the other: {}",
             String::from_utf8_lossy(&agent_sees)
+        );
+    }
+
+    #[test]
+    fn a_caller_that_connects_and_leaves_at_once_is_not_an_error() {
+        let attempt = Attempt::new("leaves");
+        let endpoint = BrokerEndpoint::bind(&attempt.base.join("a")).expect("bound");
+        let base: String = endpoint.socket().to_string_lossy().into_owned();
+        // Connect both pipes and close them before the broker accepts, as an idle release does.
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("{base}-up")),
+        );
+        drop(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(format!("{base}-down")),
+        );
+
+        let served = endpoint.serve_one();
+
+        assert!(
+            served.is_ok(),
+            "a caller gone before it was served leaves nothing to serve: {served:?}"
         );
     }
 }
