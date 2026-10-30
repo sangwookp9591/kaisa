@@ -3,6 +3,8 @@
 //!
 //! Design: `docs/architecture.md` §5.1, §8 and §13.
 
+#[cfg(windows)]
+mod appcontainer;
 mod capture;
 #[cfg(windows)]
 mod conpty;
@@ -32,6 +34,8 @@ mod windows_child;
 #[cfg(any(windows, test))]
 mod windows_command_line;
 
+#[cfg(windows)]
+pub use appcontainer::AppContainerProfile;
 pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
