@@ -409,3 +409,45 @@ fn a_second_session_needs_no_re_explanation() {
         "the lesson given to the attempt is on its record, to be scored against its outcome"
     );
 }
+
+#[test]
+fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
+    let bench = Workbench::new("never-started");
+    let state: PathBuf = bench.state();
+    std::fs::create_dir_all(state.join("worktrees")).expect("writable");
+    let attempt = "att_interrupted";
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
+    ledger
+        .append(kaisa_domain::Event {
+            kind: kaisa_domain::EventKind::AttemptAdmitted,
+            subject: attempt.to_owned(),
+            payload_version: 1,
+            payload: r#"{"task":"task_login"}"#.to_owned(),
+        })
+        .expect("recorded");
+    drop(ledger);
+    // Killed right after the worktree was made, before `starting` was recorded.
+    kaisa_workspace::create_worktree(
+        &bench.repository(),
+        "HEAD",
+        &format!("kaisa/{attempt}"),
+        &state.join("worktrees").join(attempt),
+    )
+    .expect("the worktree is created");
+
+    let recovered =
+        kaisa_daemon::recover_abandoned(&bench.repository(), &state).expect("recovery runs");
+
+    assert!(
+        matches!(
+            recovered.as_slice(),
+            [kaisa_daemon::Recovered::Preserved { started: false, .. }]
+        ),
+        "an attempt whose agent never started is tidied and reported as such: {recovered:?}"
+    );
+    assert!(
+        !state.join("worktrees").join(attempt).exists(),
+        "its worktree does not outlive the interrupted run"
+    );
+}

@@ -36,6 +36,8 @@ pub enum Recovered {
         commit: Option<String>,
         /// Whether the agent was still running and Kaisa ended it.
         ended: bool,
+        /// Whether the agent had started at all before the interruption.
+        started: bool,
     },
     /// Left untouched for a person to decide, with the reason.
     Kept {
@@ -56,8 +58,11 @@ impl Recovered {
                 branch,
                 commit,
                 ended,
+                started,
             } => {
-                let how: &str = if *ended {
+                let how: &str = if !*started {
+                    "its agent had not started yet"
+                } else if *ended {
                     "its agent was still running and was ended"
                 } else {
                     "its agent had already stopped"
@@ -131,7 +136,7 @@ pub fn recover_abandoned(
     for row in rows {
         if !matches!(
             row.execution,
-            Execution::Starting | Execution::Running | Execution::Exited(_)
+            Execution::Admitted | Execution::Starting | Execution::Running | Execution::Exited(_)
         ) {
             continue;
         }
@@ -140,6 +145,7 @@ pub fn recover_abandoned(
             repository,
             state_directory,
             &row.attempt,
+            row.execution,
         )?);
     }
     Ok(recovered)
@@ -150,15 +156,23 @@ fn recover_one(
     repository: &Path,
     state_directory: &Path,
     attempt: &AttemptId,
+    execution: Execution,
 ) -> Result<Recovered, GoalError> {
     let attempt_directory: PathBuf = state_directory.join("attempts").join(attempt.as_str());
     let kept = |reason: &str| Recovered::Kept {
         attempt: attempt.clone(),
         reason: reason.to_owned(),
     };
-    let (status, ended) = match proven_exit(&attempt_directory)? {
-        Ok(proof) => proof,
-        Err(reason) => return Ok(kept(&reason)),
+    // `run_goal` records `running` before it starts the agent, so an attempt still admitted or
+    // starting never had an agent: there is nothing to end, only a worktree to tidy (T16.6).
+    let never_started: bool = matches!(execution, Execution::Admitted | Execution::Starting);
+    let (status, ended) = if never_started {
+        (ExitStatus::Terminated, false)
+    } else {
+        match proven_exit(&attempt_directory)? {
+            Ok(proof) => proof,
+            Err(reason) => return Ok(kept(&reason)),
+        }
     };
     let worktree_path: PathBuf = state_directory.join("worktrees").join(attempt.as_str());
     let Some(worktree): Option<Worktree> =
@@ -200,6 +214,7 @@ fn recover_one(
             branch: worktree.branch().to_owned(),
             commit: receipt.commit().map(str::to_owned),
             ended,
+            started: !never_started,
         },
         Reclamation::Blocked { uncovered } => kept(&format!(
             "{} could not be preserved automatically",
