@@ -645,3 +645,129 @@ fn an_unknown_agent_is_a_usage_error() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// The line of a review pack naming the candidate's tree.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
+
+/// A loopback OpenAI-compatible server standing in for a registered local model. It answers
+/// the registration probe with a greeting and every review pack with an approving verdict for
+/// the tree the pack names, counting the reviews it was asked for.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_local_reviewer_model(reviews: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+    let port: u16 = listener.local_addr().expect("bound").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut request: Vec<u8> = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let mut body_start: Option<(usize, usize)> = None;
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if body_start.is_none()
+                    && let Some(end) = text.find("\r\n\r\n")
+                {
+                    let length: usize = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    body_start = Some((end + "\r\n\r\n".len(), length));
+                }
+                if let Some((start, length)) = body_start
+                    && request.len() >= start + length
+                {
+                    break;
+                }
+            }
+            let body: serde_json::Value = body_start
+                .and_then(|(start, _)| serde_json::from_slice(&request[start..]).ok())
+                .unwrap_or_default();
+            let tree: Option<String> = body["messages"].as_array().and_then(|messages| {
+                messages.iter().find_map(|message| {
+                    message["content"].as_str()?.lines().find_map(|line| {
+                        line.trim_start_matches("> ")
+                            .strip_prefix(CANDIDATE_TREE_LABEL)
+                            .map(|tree| tree.trim().to_owned())
+                    })
+                })
+            });
+            let content: String = match tree {
+                Some(tree) => {
+                    reviews.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let verdict = serde_json::json!({"candidate_tree": tree, "approve": true, "findings": []});
+                    serde_json::json!({"done": verdict.to_string()}).to_string()
+                }
+                None => "ready".to_owned(),
+            };
+            let reply = serde_json::json!({"choices": [{"message": {"role": "assistant", "content": content}}]})
+                .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    port
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_light_task_runs_on_the_registered_local_model() {
+    let bench = Workbench::new("light-work");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let reviews = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let port: u16 = a_local_reviewer_model(std::sync::Arc::clone(&reviews));
+    let state: PathBuf = bench.base.join("state");
+    let registered: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "agent",
+            "add",
+            "local",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}/v1"),
+            "--model",
+            "tiny=T0",
+        ])
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa agent add runs");
+    assert!(
+        registered.status.success(),
+        "the local model passes its registration check: {:?}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(a_verified_run(&fake_agent, true))
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert!(
+        stdout.contains("model: local (light work)"),
+        "the person is told the first pass runs on the local model: {stdout:?}"
+    );
+    assert!(
+        reviews.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the local model was actually asked for the first-pass review"
+    );
+    assert!(
+        run.status.success(),
+        "the full review still decided and the candidate was delivered: {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

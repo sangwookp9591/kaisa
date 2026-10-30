@@ -45,7 +45,16 @@ pub struct VerifiedRequest<'request> {
     pub observed: bool,
     /// A light first-pass reviewer on a local model (F37, T33): its blocking findings send the
     /// candidate back without spending the full review; its approval is only advisory.
-    pub first_pass: Option<AgentLauncher<'request>>,
+    pub first_pass: Option<FirstPass<'request>>,
+}
+
+/// A first-pass reviewer and the loopback port of the local model it talks to.
+#[derive(Clone, Copy)]
+pub struct FirstPass<'request> {
+    /// How to start it.
+    pub launch: AgentLauncher<'request>,
+    /// The model server's loopback port, which its sandbox must allow.
+    pub model_port: Option<u16>,
 }
 
 /// How a verified goal ended.
@@ -195,12 +204,12 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 state_directory: request.state_directory,
                 write_set: &no_paths,
                 role: Role::Reviewer,
-                launch: first_pass,
+                launch: first_pass.launch,
                 kaisa_executable: request.kaisa_executable,
                 confine_agent: request.confine_agent && request.policy.policy().confine_agents,
                 egress_hosts: &[],
                 agent_writable: &[],
-                local_model_port: None,
+                local_model_port: first_pass.model_port,
                 observed: false,
             })?;
             let glance: Option<ReviewVerdict> =

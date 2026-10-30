@@ -20,6 +20,12 @@ pub struct LocalEndpoint {
 }
 
 impl LocalEndpoint {
+    /// The loopback port the server listens on, which a confined client must be allowed.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Accepts only `http://127.0.0.1[:port][/path]` or `http://localhost[:port][/path]`.
     ///
     /// An omitted port means 80. Trailing path slashes are removed before appending

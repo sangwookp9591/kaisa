@@ -16,10 +16,6 @@ use kaisa_sys::ProcessSpec;
 const FALLBACK_CLAUDE_MODEL: &str = "sonnet";
 
 /// A tool-less local model used only for advisory first-pass review.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T33c connects first-pass review")
-)]
 pub(crate) struct LocalRoute {
     /// The registered OpenAI-compatible endpoint.
     pub(crate) endpoint: String,
@@ -30,10 +26,6 @@ pub(crate) struct LocalRoute {
 /// The cheapest registered local model for first-pass review, or no first pass.
 ///
 /// Only T0 models qualify; equal grades retain registration order within and across agents.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T33c connects first-pass review")
-)]
 pub(crate) fn first_pass_route(personal: &Catalog) -> Option<LocalRoute> {
     for entry in personal.entries() {
         let AgentKind::OpenAiCompatible { endpoint } = &entry.kind else {

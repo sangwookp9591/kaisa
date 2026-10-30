@@ -315,7 +315,10 @@ fn a_team_run_with_a_first_pass(
         checks: &[the_projects_test_command()],
         policy: &a_policy(true),
         observed: false,
-        first_pass: Some(&first_pass),
+        first_pass: Some(kaisa_daemon::FirstPass {
+            launch: &first_pass,
+            model_port: None,
+        }),
     })
     .expect("the team run completes")
 }

@@ -188,8 +188,16 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
         },
         outcome.turns,
         outcome.tool_calls,
-        outcome.summary.as_deref().unwrap_or("no summary")
+        if outcome.summary.is_some() {
+            "its final answer follows"
+        } else {
+            "no final answer"
+        }
     )?;
+    // The model's final answer is the last line, where a reviewer's verdict is read from.
+    if let Some(summary) = &outcome.summary {
+        writeln!(out, "{summary}")?;
+    }
     Ok(if outcome.finished {
         crate::EXIT_SUCCESS
     } else {

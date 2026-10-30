@@ -29,5 +29,7 @@ pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict};
 pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};
 pub use route::{ROUTE_EFFORT, RouteDecision, decide_route, record_route};
-pub use team::{CANDIDATE_TREE_LABEL, VerifiedOutcome, VerifiedRequest, run_verified_goal};
+pub use team::{
+    CANDIDATE_TREE_LABEL, FirstPass, VerifiedOutcome, VerifiedRequest, run_verified_goal,
+};
 pub use verify::{Evidence, run_trusted_checks};

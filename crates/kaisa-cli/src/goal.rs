@@ -191,6 +191,38 @@ impl GoalCommand {
         };
         let developer = |mcp_config: &Path| self.role_spec(Role::Developer, write_set, mcp_config);
         let reviewer = |mcp_config: &Path| self.role_spec(Role::Reviewer, write_set, mcp_config);
+        // F37: light work (a first-pass review) goes to a registered T0 local model, if any.
+        let local = crate::agent::load(state)
+            .ok()
+            .and_then(|personal| crate::verified::first_pass_route(&personal))
+            .and_then(|route| {
+                kaisa_agents::LocalEndpoint::parse(&route.endpoint)
+                    .ok()
+                    .map(|endpoint| (route, endpoint.port()))
+            });
+        let first_pass_spec = |mcp_config: &Path| ProcessSpec {
+            program: kaisa.clone(),
+            args: local.as_ref().map_or_else(Vec::new, |(route, _)| {
+                vec![
+                    "local-agent".to_owned(),
+                    "--mcp-config".to_owned(),
+                    mcp_config.to_string_lossy().into_owned(),
+                    "--endpoint".to_owned(),
+                    route.endpoint.clone(),
+                    "--model".to_owned(),
+                    route.model.clone(),
+                ]
+            }),
+            working_directory: std::env::temp_dir(),
+            env: Vec::new(),
+        };
+        if let Some((route, _)) = &local {
+            writeln!(out, "first pass: model: local (light work) {}", route.model)?;
+        }
+        let first_pass = local.as_ref().map(|(_, port)| kaisa_daemon::FirstPass {
+            launch: &first_pass_spec,
+            model_port: Some(*port),
+        });
         match run_verified_goal(&VerifiedRequest {
             repository,
             state_directory: state,
@@ -204,7 +236,7 @@ impl GoalCommand {
             checks: &checks,
             policy: &policy,
             observed: self.agent.codex,
-            first_pass: None,
+            first_pass,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
