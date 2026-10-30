@@ -103,6 +103,96 @@ impl Session for KaisaSession {
     }
 }
 
+/// `portable-pty` (wezterm), the mature wrapper ADR 0005 compares against. It has no drain of
+/// its own, so this adapter reads on a thread from the start of `finish`, waits for the child,
+/// and stops once no output arrived for a quiet period — the work a Kaisa caller gets from
+/// `PseudoTerminal::drain`.
+struct PortablePtyBackend;
+
+struct PortablePtySession {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+/// How long the portable-pty adapter waits for more output after the child exited.
+const PORTABLE_QUIET_PERIOD: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn portable_size(size: TerminalSize) -> portable_pty::PtySize {
+    portable_pty::PtySize {
+        rows: size.rows(),
+        cols: size.columns(),
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+impl Backend for PortablePtyBackend {
+    type Session = PortablePtySession;
+
+    fn start(spec: &ProcessSpec, size: TerminalSize) -> PortablePtySession {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_size(size))
+            .expect("portable-pty opens a terminal");
+        let mut command = portable_pty::CommandBuilder::new(&spec.program);
+        command.args(&spec.args);
+        command.cwd(&spec.working_directory);
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .expect("portable-pty starts the shell");
+        drop(pair.slave);
+        PortablePtySession {
+            child,
+            master: pair.master,
+        }
+    }
+}
+
+impl Session for PortablePtySession {
+    fn type_text(&mut self, text: &str) {
+        self.master
+            .take_writer()
+            .expect("the terminal can be written")
+            .write_all(text.as_bytes())
+            .expect("typing succeeds");
+    }
+
+    fn resize(&mut self, size: TerminalSize) {
+        self.master
+            .resize(portable_size(size))
+            .expect("resizing succeeds");
+    }
+
+    fn finish(mut self) -> String {
+        let mut reader = self
+            .master
+            .try_clone_reader()
+            .expect("the terminal can be read");
+        let (chunks, received) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = std::io::Read::read(&mut reader, &mut buffer) {
+                if read == 0 || chunks.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut output: Vec<u8> = Vec::new();
+        let mut child = self.child;
+        let waiter = std::thread::spawn(move || child.wait());
+        while !waiter.is_finished() {
+            if let Ok(chunk) = received.recv_timeout(PORTABLE_QUIET_PERIOD) {
+                output.extend(chunk);
+            }
+        }
+        while let Ok(chunk) = received.recv_timeout(PORTABLE_QUIET_PERIOD) {
+            output.extend(chunk);
+        }
+        drop(self.master);
+        String::from_utf8_lossy(&output).into_owned()
+    }
+}
+
 fn size(rows: u16, columns: u16) -> TerminalSize {
     TerminalSize::new(rows, columns).expect("test sizes are valid")
 }
@@ -291,3 +381,4 @@ macro_rules! conformance_suite {
 }
 
 conformance_suite!(kaisa, super::KaisaBackend);
+conformance_suite!(portable_pty_wezterm, super::PortablePtyBackend);

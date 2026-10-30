@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dev-dependencies]
+# Only for the PTY conformance comparison (ADR 0005); never linked into Kaisa itself.
+portable-pty = "0.9.0"
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
