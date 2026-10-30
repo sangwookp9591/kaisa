@@ -5,9 +5,34 @@
 
 use std::fmt;
 
+use kaisa_domain::Authority;
 use serde::{Deserialize, Serialize};
 
 use crate::PROTOCOL_VERSION;
+
+/// Which endpoint a connection arrived on. This, and nothing the client sends, decides the
+/// authority of everything on the connection (architecture §5.7, P10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listener {
+    /// The control endpoint: reachable only by the daemon's own user (T14.3, T14.4).
+    Control,
+    /// A requester bridge: an agent session the user works in, such as `/kaisa`.
+    Requester,
+    /// A per-attempt bridge an agent was started with.
+    AgentBridge,
+}
+
+impl Listener {
+    /// The authority every request on this endpoint carries.
+    #[must_use]
+    pub fn authority(self) -> Authority {
+        match self {
+            Self::Control => Authority::Human,
+            Self::Requester => Authority::Requester,
+            Self::AgentBridge => Authority::Agent,
+        }
+    }
+}
 
 /// A named feature of the protocol, such as `events.stream`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,9 +80,16 @@ impl Hello {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     capabilities: Vec<Capability>,
+    authority: Authority,
 }
 
 impl Session {
+    /// The authority of this connection, fixed by the endpoint it arrived on.
+    #[must_use]
+    pub fn authority(&self) -> Authority {
+        self.authority
+    }
+
     /// True when both sides advertised `capability`.
     #[must_use]
     pub fn supports(&self, capability: &Capability) -> bool {
@@ -102,7 +134,11 @@ impl std::error::Error for HandshakeError {}
 /// # Errors
 ///
 /// Returns [`HandshakeError::VersionMismatch`] if the protocol versions differ.
-pub fn negotiate(ours: &Hello, theirs: &Hello) -> Result<Session, HandshakeError> {
+pub fn negotiate(
+    ours: &Hello,
+    theirs: &Hello,
+    listener: Listener,
+) -> Result<Session, HandshakeError> {
     if ours.protocol_version != theirs.protocol_version {
         return Err(HandshakeError::VersionMismatch {
             ours: ours.protocol_version,
@@ -115,12 +151,17 @@ pub fn negotiate(ours: &Hello, theirs: &Hello) -> Result<Session, HandshakeError
         .filter(|capability| theirs.capabilities.contains(capability))
         .cloned()
         .collect();
-    Ok(Session { capabilities })
+    Ok(Session {
+        capabilities,
+        authority: listener.authority(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, HandshakeError, Hello, Session, negotiate};
+    use kaisa_domain::Authority;
+
+    use super::{Capability, HandshakeError, Hello, Listener, Session, negotiate};
     use crate::frame::test_support::TrickleStream;
     use crate::{DEFAULT_FRAME_LIMIT, FrameReader, PROTOCOL_VERSION, write_frame};
 
@@ -187,8 +228,8 @@ mod tests {
 
     #[test]
     fn negotiation_keeps_only_capabilities_both_sides_advertise() {
-        let session: Session =
-            negotiate(&daemon_hello(), &older_cli_hello()).expect("the versions match");
+        let session: Session = negotiate(&daemon_hello(), &older_cli_hello(), Listener::Control)
+            .expect("the versions match");
 
         assert_eq!(
             session.capabilities(),
@@ -199,8 +240,8 @@ mod tests {
 
     #[test]
     fn a_capability_only_one_side_offered_is_not_supported() {
-        let session: Session =
-            negotiate(&daemon_hello(), &older_cli_hello()).expect("the versions match");
+        let session: Session = negotiate(&daemon_hello(), &older_cli_hello(), Listener::Control)
+            .expect("the versions match");
 
         assert!(
             !session.supports(&effect_previews()),
@@ -212,8 +253,8 @@ mod tests {
     fn peers_with_no_shared_capabilities_still_agree_on_an_empty_session() {
         let bare_client: Hello = Hello::current("bare-client", Vec::new());
 
-        let session: Session =
-            negotiate(&daemon_hello(), &bare_client).expect("the versions match");
+        let session: Session = negotiate(&daemon_hello(), &bare_client, Listener::Control)
+            .expect("the versions match");
 
         assert!(
             session.capabilities().is_empty(),
@@ -227,12 +268,48 @@ mod tests {
         let theirs: Hello = client_from_another_protocol_version();
 
         assert_eq!(
-            negotiate(&ours, &theirs),
+            negotiate(&ours, &theirs, Listener::Control),
             Err(HandshakeError::VersionMismatch {
                 ours: ours.protocol_version,
                 theirs: theirs.protocol_version
             }),
             "there is one protocol version; mismatches are refused, never guessed"
+        );
+    }
+
+    /// A client that claims more than its endpoint gives, as a compromised agent might.
+    fn an_agent_claiming_human_authority() -> Hello {
+        Hello::current(
+            "claude-code (attempt att_41a)",
+            vec![Capability::new("authority.human")],
+        )
+    }
+
+    #[test]
+    fn a_hello_on_the_control_endpoint_gets_human_authority() {
+        let session: Session = negotiate(&daemon_hello(), &older_cli_hello(), Listener::Control)
+            .expect("the versions match");
+
+        assert_eq!(
+            session.authority(),
+            Authority::Human,
+            "the user's own CLI on the control endpoint speaks for the user"
+        );
+    }
+
+    #[test]
+    fn an_agent_bridge_cannot_claim_human_authority() {
+        let session: Session = negotiate(
+            &daemon_hello(),
+            &an_agent_claiming_human_authority(),
+            Listener::AgentBridge,
+        )
+        .expect("the versions match");
+
+        assert_eq!(
+            session.authority(),
+            Authority::Agent,
+            "authority comes from where a connection arrived, never from what it claims"
         );
     }
 }

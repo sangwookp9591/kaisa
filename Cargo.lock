@@ -192,6 +192,7 @@ dependencies = [
 name = "kaisa-protocol"
 version = "0.0.0"
 dependencies = [
+ "kaisa-domain",
  "serde",
  "serde_json",
 ]
