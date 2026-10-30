@@ -101,6 +101,7 @@ fn trusted_checks_run_on_a_clean_checkout_not_the_agents_worktree() {
     let evidence: Vec<Evidence> = run_trusted_checks(
         &bench.repository(),
         &bench.base.join("state"),
+        "main",
         &candidate,
         &[the_projects_test_command()],
     )
@@ -123,6 +124,7 @@ fn a_passing_check_is_recorded_against_the_candidate_tree() {
     let evidence: Vec<Evidence> = run_trusted_checks(
         &bench.repository(),
         &bench.base.join("state"),
+        "main",
         &candidate,
         &[the_projects_test_command()],
     )

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kaisa_context::{DetectedCommand, Purpose};
 use kaisa_sys::{CapturedRun, Confinement, ProcessExit, ProcessSpec, run_captured};
-use kaisa_workspace::{Candidate, CandidateCheckout};
+use kaisa_workspace::{Candidate, CandidateCheckout, changed_check_definitions};
 
 use crate::goal::{GoalError, at};
 use crate::ids::fresh_suffix;
@@ -30,6 +30,9 @@ pub struct Evidence {
     pub output_digest: String,
     /// False if the check ran without OS confinement (Windows until checks get a container).
     pub confined: bool,
+    /// Check-definition files the candidate changed since its base; when any are named, the
+    /// check may be testing rules the agent wrote, so a person must accept the result.
+    pub definitions_changed: Vec<String>,
 }
 
 impl Evidence {
@@ -40,7 +43,8 @@ impl Evidence {
     }
 }
 
-/// Runs every test command in `checks` on a clean checkout of `candidate`.
+/// Runs every test command in `checks` on a clean checkout of `candidate`, noting which check
+/// definitions it changed since `base`.
 ///
 /// # Errors
 ///
@@ -49,9 +53,12 @@ impl Evidence {
 pub fn run_trusted_checks(
     repository: &Path,
     state_directory: &Path,
+    base: &str,
     candidate: &Candidate,
     checks: &[DetectedCommand],
 ) -> Result<Vec<Evidence>, GoalError> {
+    let definitions_changed: Vec<String> = changed_check_definitions(repository, base, candidate)
+        .map_err(at("comparing check definitions"))?;
     let place: PathBuf = state_directory
         .join("checks")
         .join(format!("check_{}", fresh_suffix()));
@@ -88,6 +95,7 @@ pub fn run_trusted_checks(
             exit: run.exit,
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             confined: sandbox.is_confined(),
+            definitions_changed: definitions_changed.clone(),
         });
     }
     Ok(evidence)

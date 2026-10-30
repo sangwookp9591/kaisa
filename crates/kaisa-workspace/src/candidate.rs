@@ -34,6 +34,59 @@ pub fn freeze_candidate(repository: &Path, revision: &str) -> Result<Candidate, 
     Ok(Candidate { commit, tree })
 }
 
+/// File names that decide what a project's checks do. A candidate that changes one could make
+/// its own checks pass, so evidence names such changes and delivery needs a person for them.
+const CHECK_DEFINITION_FILES: [&str; 17] = [
+    "package.json",
+    "Cargo.toml",
+    "build.rs",
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "tox.ini",
+    "pytest.ini",
+    "conftest.py",
+    "noxfile.py",
+    "go.mod",
+    "Makefile",
+    "justfile",
+    "config.toml",
+    "jest.config.js",
+    "vitest.config.ts",
+    "tsconfig.json",
+];
+
+/// The check-definition files that differ between `base` and `candidate`, in git's order.
+///
+/// # Errors
+///
+/// Returns [`GitError`] if git cannot compare the two.
+pub fn changed_check_definitions(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<Vec<String>, GitError> {
+    let names: String = git_text(
+        repository,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            base,
+            &candidate.commit,
+            "--",
+        ],
+    )?;
+    Ok(names
+        .lines()
+        .filter(|path| {
+            let file: &str = path.rsplit('/').next().unwrap_or(path);
+            CHECK_DEFINITION_FILES.contains(&file)
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
 /// A clean, detached checkout of a candidate for trusted checks (T21b): nothing the agent left
 /// in its own worktree is here, only what the candidate commit holds.
 #[derive(Debug)]
@@ -89,7 +142,7 @@ impl Drop for CandidateCheckout {
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, CandidateCheckout, freeze_candidate};
+    use super::{Candidate, CandidateCheckout, changed_check_definitions, freeze_candidate};
     use crate::test_support::{TemporaryRepository, a_repository_with_one_commit_on_main};
 
     #[test]
@@ -167,6 +220,25 @@ mod tests {
         assert!(
             !place.exists(),
             "the checkout is discarded once the checks are done"
+        );
+    }
+
+    #[test]
+    fn a_candidate_that_rewrites_its_test_script_is_named_as_changing_check_definitions() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let base: String =
+            super::git_text(repository.path(), &["rev-parse", "HEAD"]).expect("the base exists");
+        repository.commit_file("package.json", r#"{"scripts":{"test":"exit 0"}}"#, "tamper");
+        repository.commit_file("src/auth/session.rs", "pub fn refresh() {}\n", "work");
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_check_definitions(repository.path(), &base, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec!["package.json".to_owned()],
+            "a changed test script is named; ordinary source changes are not"
         );
     }
 
