@@ -21,4 +21,8 @@ echo "== clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 echo "== tests"
 cargo test --workspace --locked
+if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc"; then
+  echo "== clippy (Windows cross-check, compile only)"
+  cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+fi
 echo "== all checks passed"
