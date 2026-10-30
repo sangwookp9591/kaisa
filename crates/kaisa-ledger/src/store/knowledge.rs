@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn an_untrusted_item_cannot_be_recorded_as_injected() {
+    fn quarantined_knowledge_is_never_injected() {
         let scratch = a_ledger_path_that_does_not_exist_yet();
         let mut store = EventStore::open(&scratch.path()).expect("a new ledger opens");
         let never_promoted = a_lesson("Skip the flaky test.");
