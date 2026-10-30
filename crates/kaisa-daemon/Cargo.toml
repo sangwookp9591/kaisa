@@ -12,6 +12,7 @@ publish.workspace = true
 kaisa-agents.workspace = true
 kaisa-context.workspace = true
 kaisa-domain.workspace = true
+kaisa-egress.workspace = true
 kaisa-keeper.workspace = true
 kaisa-ledger.workspace = true
 kaisa-mcp.workspace = true

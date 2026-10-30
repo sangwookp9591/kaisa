@@ -57,11 +57,19 @@ pub struct GoalRequest<'request> {
     pub launch: AgentLauncher<'request>,
     /// The `kaisa` executable the agent's MCP config runs as its bridge.
     pub kaisa_executable: &'request Path,
-    /// Whether the agent's own process runs under the OS sandbox. An agent that needs the
-    /// network runs unconfined until its egress goes through the broker (T16.5e3c); that run
-    /// is reported as reduced.
+    /// Whether the agent's own process runs under the OS sandbox; a run without it is reported
+    /// as reduced.
     pub confine_agent: bool,
+    /// Hosts the agent may reach, only through its egress broker (for example its model
+    /// provider). Empty means no network at all.
+    pub egress_hosts: &'request [&'request str],
+    /// Paths outside the worktree the agent must be able to change (for example its own
+    /// session files), besides its scratch directory.
+    pub agent_writable: &'request [PathBuf],
 }
+
+/// Variables that point an agent's HTTP clients at its egress broker.
+const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
 
 /// What came of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,10 +299,28 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
     agent.working_directory = worktree.path().to_owned();
+    let egress: Option<kaisa_egress::EgressBroker> = if request.egress_hosts.is_empty() {
+        None
+    } else {
+        let broker = kaisa_egress::EgressBroker::start(
+            kaisa_egress::AllowList::new(request.egress_hosts),
+            kaisa_egress::SystemNetwork,
+        )
+        .map_err(at("starting the egress broker"))?;
+        let proxy: String = format!("http://{}", broker.address());
+        agent.env.extend(
+            PROXY_VARIABLES
+                .iter()
+                .map(|name| ((*name).to_owned(), proxy.clone())),
+        );
+        Some(broker)
+    };
+    let egress_port: Option<u16> = egress.as_ref().map(|broker| broker.address().port());
     let input: String = format!("{}\n", first_message(&pack));
     #[cfg(unix)]
     let sandbox = if request.confine_agent {
-        agent_sandbox(&scratch, &broker.1).map_err(at("building the agent's sandbox"))?
+        agent_sandbox(&scratch, request.agent_writable, &broker.1, egress_port)
+            .map_err(at("building the agent's sandbox"))?
     } else {
         AgentSandbox::Unconfined
     };
@@ -380,8 +406,19 @@ impl AgentSandbox {
 /// The agent writes nothing but its scratch, reaches nothing but its tool broker's socket, and
 /// has no network: every change it makes goes through the broker.
 #[cfg(unix)]
-fn agent_sandbox(scratch: &Path, broker_socket: &Path) -> std::io::Result<AgentSandbox> {
-    let scratch: PathBuf = scratch.canonicalize()?;
+fn agent_sandbox(
+    scratch: &Path,
+    agent_writable: &[PathBuf],
+    broker_socket: &Path,
+    egress_port: Option<u16>,
+) -> std::io::Result<AgentSandbox> {
+    let mut writable: Vec<PathBuf> = vec![scratch.canonicalize()?];
+    // A path the agent may create (a session file) need not exist yet.
+    writable.extend(
+        agent_writable
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone())),
+    );
     #[cfg(target_os = "macos")]
     {
         // Seatbelt matches canonical paths; the socket itself may not resolve, its directory does.
@@ -390,22 +427,24 @@ fn agent_sandbox(scratch: &Path, broker_socket: &Path) -> std::io::Result<AgentS
             _ => broker_socket.to_owned(),
         };
         Ok(AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
-            writable: vec![scratch],
+            writable,
             broker_socket: Some(socket),
+            broker_port: egress_port,
             ..kaisa_sys::SeatbeltPolicy::default()
         }))
     }
     #[cfg(target_os = "linux")]
     {
         let _ = broker_socket;
-        Ok(match kaisa_sys::write_ruleset(&[scratch], None)? {
+        let existing: Vec<PathBuf> = writable.into_iter().filter(|path| path.exists()).collect();
+        Ok(match kaisa_sys::write_ruleset(&existing, egress_port)? {
             Some(ruleset) => AgentSandbox::Landlock(ruleset),
             None => AgentSandbox::Unconfined,
         })
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (scratch, broker_socket);
+        let _ = (writable, broker_socket, egress_port);
         Ok(AgentSandbox::Unconfined)
     }
 }

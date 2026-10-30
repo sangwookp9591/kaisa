@@ -99,9 +99,11 @@ impl GoalCommand {
             write_set: &write_set,
             launch: &launch,
             kaisa_executable: &kaisa,
-            // Claude Code needs the network; until its egress goes through the broker it runs
-            // reduced. A scripted agent needs none and is confined.
+            // Claude Code needs the network; until its confined run is verified on every OS
+            // (T16.0) it runs reduced. A scripted agent needs none and is confined.
             confine_agent: self.agent.program.is_some(),
+            egress_hosts: &[],
+            agent_writable: &[],
         }) {
             Ok(outcome) => {
                 writeln!(out, "{}", outcome.summary())?;

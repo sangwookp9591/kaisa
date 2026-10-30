@@ -97,6 +97,8 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         launch: &launch,
         kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
         confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
     })
     .expect("the goal runs");
     let preserved_notes: String = git(
@@ -158,6 +160,8 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
         launch: &launch,
         kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
         confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -172,5 +176,62 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
     assert!(
         preserved.contains(NOTES) && !preserved.contains(DIRECT_WRITE),
         "only the brokered change reached the preserved branch, got {preserved:?}"
+    );
+}
+
+/// The model provider an agent may reach; resolving it is never needed by the test.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const MODEL_PROVIDER: &str = "api.model-provider.example";
+/// A host the agent was not given.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const UNLISTED_HOST: &str = "exfiltration.example";
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
+    let bench = Workbench::new("egress");
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let elsewhere = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
+    elsewhere
+        .set_nonblocking(true)
+        .expect("the listener can be polled");
+    let elsewhere_address: String = elsewhere.local_addr().expect("bound").to_string();
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: the_fake_agent(),
+        args: vec![
+            "--mcp-config".to_owned(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".to_owned(),
+            NOTES.to_owned(),
+            "--try-direct-connect".to_owned(),
+            elsewhere_address.clone(),
+            "--expect-proxy-refuses".to_owned(),
+            UNLISTED_HOST.to_owned(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+
+    let outcome: GoalOutcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[MODEL_PROVIDER],
+        agent_writable: &[],
+    })
+    .expect("the goal runs");
+
+    assert!(
+        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        "the agent reached its egress broker, was refused an unlisted host, and could not \
+         connect around it: {outcome:?}"
+    );
+    assert!(
+        elsewhere.accept().is_err(),
+        "nothing outside the broker received a connection from the agent"
     );
 }

@@ -7,7 +7,12 @@
 //! tries to write a file itself, and the agent fails if that succeeds.
 //!
 //! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
-//! [--try-direct-write <path relative to its working directory>] [other flags]`
+//! [--try-direct-write <path relative to its working directory>]
+//! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [other flags]`
+//!
+//! The network probes work the same way: `--try-direct-connect` fails the agent if a direct
+//! connection succeeds, and `--expect-proxy-refuses` fails it unless the proxy in
+//! `HTTPS_PROXY` answers a `CONNECT` to that host with 403.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, ExitCode, Stdio};
@@ -24,6 +29,24 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+/// The status line the proxy in `HTTPS_PROXY` answers to `CONNECT host:443`.
+fn proxy_status_for(host: &str) -> Result<String, String> {
+    let proxy: String = std::env::var("HTTPS_PROXY").map_err(|_| "no HTTPS_PROXY".to_owned())?;
+    let address: &str = proxy.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(address)
+        .map_err(|error| format!("cannot reach the egress broker at {address}: {error}"))?;
+    write!(
+        stream,
+        "CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+    )
+    .map_err(|error| error.to_string())?;
+    let mut status = String::new();
+    BufReader::new(stream)
+        .read_line(&mut status)
+        .map_err(|error| error.to_string())?;
+    Ok(status)
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
@@ -34,6 +57,19 @@ fn run() -> Result<(), String> {
         return Err(format!(
             "wrote {probe} directly: the agent process is not confined"
         ));
+    }
+    if let Some(address) = flag(&args, "--try-direct-connect")
+        && std::net::TcpStream::connect(&address).is_ok()
+    {
+        return Err(format!(
+            "connected to {address} directly, around the egress broker"
+        ));
+    }
+    if let Some(host) = flag(&args, "--expect-proxy-refuses") {
+        let status: String = proxy_status_for(&host)?;
+        if !status.contains(" 403 ") {
+            return Err(format!("the egress broker did not refuse {host}: {status}"));
+        }
     }
     let config: Value = serde_json::from_str(
         &std::fs::read_to_string(&config_path).map_err(|error| error.to_string())?,

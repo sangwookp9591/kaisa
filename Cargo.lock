@@ -190,6 +190,7 @@ dependencies = [
  "kaisa-agents",
  "kaisa-context",
  "kaisa-domain",
+ "kaisa-egress",
  "kaisa-keeper",
  "kaisa-ledger",
  "kaisa-mcp",
