@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft v0.4 — design only, nothing implemented |
+| Status | Draft v0.5 — design only, nothing implemented |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
 | Date | 2026-10-30 |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
@@ -13,6 +13,15 @@
 > Every performance or memory number here is a **budget to be measured**, not a claim.
 > Every security property is a **requirement to be proven by a negative test on each OS**
 > before it is advertised.
+
+**Changes in v0.5.** These come from [`user-flows.md`](user-flows.md) v0.2 §8.
+- **Answers and Decisions** are now typed differently. Decisions carry a scope and an expiry, and questions have an owner, a timeout and a fallback (§5.12).
+- **An effect preview API** is used by approve, undo and multi-repo work (§5.12).
+- **Second-person approval rules** and reviewer reassignment were added (§5.12).
+- **A CI exit-code contract** and `run --resume` were added (§6).
+- **Workspace creation** now handles a dirty tree, LFS and submodules (§5.5).
+- **Admin lifecycle** was added: enrollment, staged policy-pack rollout and rollback, offboarding receipts, template tests and agent conformance (§5.11).
+- ADR-0023 to ADR-0027 were added.
 
 **Changes in v0.4.** These come from [`user-flows.md`](user-flows.md) §8.
 - A third authority level, **Requester**, for runs started from inside agent sessions (§5.7).
@@ -329,6 +338,17 @@ Workers keep running during a coordinator handoff, because the daemon and their 
 - On Windows, worktrees use `\\?\` paths and `core.longpaths=true`.
 - Shared `.git` metadata is mounted read-only into sandboxes, except for the attempt's own worktree refs.
 
+**Source state (user-flows F31).** Worktrees are created from **committed** state by default.
+- **Dirty tree.** If the user's tree is dirty, the run request records one of three choices:
+  - `committed-only` (the default);
+  - `include-uncommitted`: Kaisa snapshots the tracked and untracked changes into a temporary commit object, without touching the
+    user's branch. The digest of that snapshot becomes the attempt's base revision;
+  - `commit-first`.
+- **Submodules** are checked out at their recorded commits.
+- **Missing LFS objects** are reported. They are then fetched through the egress broker or skipped, according to policy, and the decision is recorded.
+- **Sparse cones** are preserved.
+- **Preview.** The user sees what the copy will contain before the attempt starts (preview API, §5.12).
+
 **Copy-on-write warm-up.**
 - Large directories are cloned with APFS `clonefile`, `FICLONE` or ReFS/Dev Drive block cloning. If none is available, Kaisa copies or installs the directory and records which method was used.
 - Cached directories are per attempt. They are never shared writable between attempts.
@@ -569,6 +589,19 @@ same ledger, outbox and authority rules as the engine cores.
   - A changed pack produces a "policy updated" notification.
   - If the pack is unreachable, clients use the cached pack and label it as cached. With no cache, they fall back to built-in strict defaults.
 
+**Admin lifecycle.** Used by user-flows F22–F25.
+
+| Operation | Mechanism |
+|---|---|
+| `admin enroll` | The first admin key is bound to company SSO. Kaisa prefers a hardware-backed key (Secure Enclave, TPM, FIDO2). Enrollment is recorded as a signed pack event. |
+| `admin pack validate` | Validates the schema, then **simulates** the candidate policy against the last N runs' decision log and reports which decisions would change. |
+| `admin pack publish --stage P%` | Staged rollout. Clients choose a cohort deterministically by hashing user and machine. Rollout widens only when an admin approves the next stage. |
+| `admin pack rollback` | Publishes the previous version with a higher sequence number. Clients never accept a pack with a lower sequence number, so a rollback is always a new publish (anti-replay). |
+| Bad signature on a pack | The client keeps the last good pack and raises an admin-visible alert event. |
+| `admin offboard` | Revokes requester tokens and virtual keys. Transfers runs and preserved work to the lead. Issues an **offboarding receipt** listing every resource moved and revoked. |
+| `admin template test` | Dry-runs a template on a fixture repository with scripted agents (the same harness as the engine tests). |
+| `admin agent add` | Runs the agent **conformance check**: detect, login probe, brokered-mode support, quota-signal parsing and hook installation. An agent row can be enabled only after it passes. |
+
 **Localization and the plain-language renderer.** Used by U5 and U11.
 - **Message catalog.** Every user-facing string comes from a catalog in Fluent format, with `ko` and `en` from M0.
 - **Rendering.** A renderer maps ledger events to plain sentences, for example `coordinator_handoff` becomes "Claude ran out of quota, so GPT took over planning; nothing was lost." Internal terms (epoch, generation, lease) appear only with `--verbose` or `--json`.
@@ -576,7 +609,57 @@ same ledger, outbox and authority rules as the engine cores.
 
 **Home TUI.** Used by U1, F02 and F10. This is the screen behind `kaisa` with no arguments.
 - On first run it shows onboarding.
-- Afterwards it shows run cards with the plan tree, live cost, the current action of each agent, the review queue and pending questions.
+- Afterwards it shows the **Needs you** lane, then run cards with the plan tree, live cost, the current action of each agent, the review queue and pending questions.
+
+### 5.12 Decisions, answers and effect previews
+
+**Two kinds of human input (user-flows U9).** v0.4 had a single Gate type. It is now split into two.
+
+| Kind | Meaning | Who may provide it | Can it time out into "yes"? |
+|---|---|---|---|
+| **Answer** | Information an agent asked for, e.g. "use Redis". | Human or Requester (the question's owner chain) | No. A timeout runs the question's declared fallback, e.g. "agent chooses and notes it" or "pause the step". |
+| **Decision** | Authorization: approve or publish, allow egress or files, budget increases, reduced protection, policy exceptions. | Human only, with a presence check when policy requires it. | **Never.** |
+
+**Questions.** Every question records:
+- an **owner chain**: the requester, then the run owner, then a delegate;
+- a `timeout` and a `fallback`;
+- whether the fallback is allowed at all. Some questions must pause.
+
+Unanswered questions go to the Needs-you lane (§5.11) and notifications. Other steps keep running.
+
+**Scoped, expiring decisions (F02, F14, F19n).** Every Decision is stored with:
+- `scope`: `once | run | project | machine`;
+- `expires_at`;
+- `granted_by`;
+- `presence_verified`;
+- `policy_allowed`, checked against the policy pack when the Decision is made.
+
+The policy compiler includes active Decisions in each snapshot, so an expired Decision drops out
+at the next snapshot. Reduced-protection approval is a `machine`-scoped Decision whose card lists:
+- the missing capabilities;
+- what the agents can still reach;
+- the expiry.
+
+The approval persists as a banner until it expires or the missing capability appears.
+
+**Effect preview API (F16, F17, F27).** Before approve, undo, publish, cancel or GC, the daemon computes a
+**preview**. It does this by dry-running the outbox effects the action would enqueue. A preview contains:
+- **For each effect:** its kind and target, for example "open PR from `kaisa/41-a` to `main`".
+- **Reversibility:** whether and how the effect can be undone, and for how long.
+- **Preconditions:** for example "base unchanged since verification".
+- **Authority and presence:** the authority required, and whether presence is required.
+
+When the user confirms, the client sends back the preview's digest. If the state changed in the meantime, the
+daemon rejects the action and re-previews. This rule is "you approve exactly what you saw".
+
+**Approval rules (F20, F33).** The policy maps paths and repositories to an approval rule:
+- `self`: the requester may approve;
+- `second-person`: someone other than the requester must approve;
+- `codeowners`: an approver from CODEOWNERS;
+- `n-of-m`: N approvals from a named group.
+
+When an eligible approver is revoked, offboarded or marked away, pending approvals are **reassigned** along the
+delegation chain. Every reassignment is recorded, and an approval never falls back to `self`.
 
 ---
 
@@ -594,6 +677,18 @@ same ledger, outbox and authority rules as the engine cores.
   - The role-specific tool catalogs are compact.
   - CI checks a recorded catalog digest.
   - CI also records interoperability tests against the Claude Code and Codex MCP clients (review M8).
+- **CI contract (user-flows F26).** `kaisa run --headless --json` reports its result with these exit codes:
+
+  | Code | Meaning |
+  |---|---|
+  | `0` | Completed. A result was produced, or no change was needed. |
+  | `3` | **Waiting for a human.** The JSON has the Decision link and the run id. |
+  | `4` | Failed. The JSON has the reason and the receipts. |
+  | `5` | Blocked by policy. |
+  | `6` | Infrastructure unavailable: provider, network or sandbox. |
+
+  The JSON output has a stable, versioned schema with a recorded digest. `kaisa run --resume <id>` continues a
+  run after its Decisions are resolved. CI never resolves a Decision.
 - **Remote access** is deferred until after v1. Its design, pinned-key pairing with an E2EE relay, is kept in §19.
 
 ---
@@ -629,6 +724,13 @@ takeovers(id, attempt_id, human, started_at, ended_at, diff_digest)
 effect_inverses(outbox_id, inverse_kind, inverse_intent_json, state)
 policy_packs(id, repo, version, signature, fetched_at, cached)
 templates(id, pack_id, name, dag_json, gates_json, defaults_json)
+questions(id, attempt_id, owner_chain_json, timeout_at, fallback, state, answered_by)
+decisions(id, run_id, kind, scope, expires_at, granted_by, presence_verified, policy_allowed, state)
+previews(id, action, effects_json, digest, state_digest, created_at, confirmed)
+approval_rules(id, pack_id, path_glob, rule, group_json)
+reassignments(id, approval_id, from_user, to_user, reason, at)
+admin_events(id, kind, actor, subject, receipt_json, signature, at)   -- enroll, publish, rollback, offboard
+pack_rollouts(pack_id, stage_percent, approved_by, at)
 ```
 
 ---
@@ -940,6 +1042,11 @@ usability targets (§10) are part of every milestone's exit criteria.
 | 0020 | Undo through declared effect inverses, and restore from preservation receipts | Proposed |
 | 0021 | Signed policy packs (templates, approvals, delegation) distributed as git repositories | Proposed |
 | 0022 | Fluent localization (ko, en) and a plain-language renderer; every blocking event declares a fix option | Proposed |
+| 0023 | Answers and Decisions as distinct types; Decisions never time out into "yes" and carry a scope and an expiry | Proposed |
+| 0024 | Effect previews with digest-confirmed actions ("you approve exactly what you saw") | Proposed |
+| 0025 | Path-based approval rules (self / second-person / codeowners / n-of-m) with recorded reassignment | Proposed |
+| 0026 | CI exit-code contract (0/3/4/5/6), a versioned JSON schema, and `run --resume` | Proposed |
+| 0027 | Admin lifecycle: hardware-backed enrollment, simulated validation, staged rollout, anti-replay rollback, offboarding receipts, agent conformance | Proposed |
 
 ---
 

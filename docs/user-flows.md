@@ -514,7 +514,7 @@ Every command supports `--json`, `--plain` and `--help`, in `ko` or `en`. Read-o
 The v0.1 deltas are included in `architecture.md` v0.4: §5.7 Requester authority, §5.11 experience services, and
 ADR-0017 to ADR-0022.
 
-The following v0.2 additions are still open for architecture v0.5:
+The v0.2 additions below are included in `architecture.md` v0.5: §5.5 (source state), §5.11 (admin lifecycle), §5.12 (decisions, answers, previews and approval rules), §6 (the CI contract), and ADR-0023 to ADR-0027.
 
 | Delta | Needed by |
 |---|---|
