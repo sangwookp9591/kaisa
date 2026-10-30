@@ -111,3 +111,47 @@ fn an_attempt_shows_the_digest_of_the_pack_it_started_from() {
         "anyone looking at an attempt can see exactly what context it started from"
     );
 }
+
+fn attempt_41a_cleanup_moves_to(store: &mut EventStore, cleanup: Cleanup) {
+    store
+        .append(attempt_event(
+            EventKind::AttemptStateChanged,
+            format!(r#"{{"cleanup":"{}"}}"#, cleanup.code()),
+        ))
+        .expect("the cleanup change is recorded");
+}
+
+#[test]
+fn an_attempt_left_running_by_a_crash_is_listed_as_unfinished() {
+    let scratch = a_ledger_path_that_does_not_exist_yet();
+    let mut store = an_open_ledger(&scratch);
+    the_scheduler_admits_attempt_41a(&mut store);
+    attempt_41a_moves_to(&mut store, Execution::Running);
+
+    let unfinished: Vec<AttemptRow> = store.unfinished_attempts().expect("readable");
+
+    assert_eq!(
+        unfinished
+            .iter()
+            .map(|row| row.attempt.clone())
+            .collect::<Vec<_>>(),
+        vec![attempt_41a()],
+        "an attempt that never reached reclamation is what recovery must look at"
+    );
+}
+
+#[test]
+fn a_reclaimed_attempt_is_not_unfinished() {
+    let scratch = a_ledger_path_that_does_not_exist_yet();
+    let mut store = an_open_ledger(&scratch);
+    the_scheduler_admits_attempt_41a(&mut store);
+    attempt_41a_moves_to(&mut store, Execution::Exited(ExitStatus::Code(0)));
+    attempt_41a_cleanup_moves_to(&mut store, Cleanup::Reclaimed);
+
+    let unfinished: Vec<AttemptRow> = store.unfinished_attempts().expect("readable");
+
+    assert!(
+        unfinished.is_empty(),
+        "a finished, reclaimed attempt needs no recovery, got {unfinished:?}"
+    );
+}

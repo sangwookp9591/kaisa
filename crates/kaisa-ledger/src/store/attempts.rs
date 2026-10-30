@@ -142,6 +142,37 @@ impl EventStore {
     }
 }
 
+impl EventStore {
+    /// Attempts whose resources are still held: neither reclaimed nor deliberately retained.
+    /// After a crash these are what recovery must look at, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::CorruptPayload`] if a stored value cannot be decoded, or
+    /// [`StoreError::Sqlite`] if the projection cannot be rebuilt or queried.
+    pub fn unfinished_attempts(&mut self) -> Result<Vec<AttemptRow>, StoreError> {
+        self.rebuild_attempts()?;
+        let ids: Vec<String> = {
+            let mut statement = self.connection.prepare(
+                "SELECT attempt_id FROM attempts WHERE cleanup NOT IN (?1, ?2)
+                 ORDER BY last_sequence",
+            )?;
+            let rows = statement.query_map(
+                params![Cleanup::Reclaimed.code(), Cleanup::Retained.code()],
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut unfinished: Vec<AttemptRow> = Vec::new();
+        for id in ids {
+            let attempt = AttemptId::try_new(&id)
+                .map_err(|_| StoreError::CorruptPayload { stored_sequence: 0 })?;
+            unfinished.extend(self.attempt(&attempt)?);
+        }
+        Ok(unfinished)
+    }
+}
+
 /// The string value of `key` in a JSON object payload.
 fn payload_field(payload: &str, key: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(payload)
