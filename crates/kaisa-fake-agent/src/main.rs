@@ -8,6 +8,7 @@
 //!
 //! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
 //! [--try-direct-write <path relative to its working directory>]
+//! (or `--fake-write-next <path prefix>`)
 //! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [--crash-after-write]
 //! [other flags]`
 //!
@@ -62,7 +63,16 @@ fn flag_present(args: &[String], name: &str) -> bool {
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
-    let target: String = flag(&args, "--fake-write").ok_or("missing --fake-write")?;
+    // `--fake-write-next src/step` writes the first of src/step-1.md, src/step-2.md, … that its
+    // worktree (its working directory) does not have yet, so a mission's later task shows it
+    // started from the earlier task's work.
+    let target: String = match flag(&args, "--fake-write-next") {
+        Some(prefix) => (1..)
+            .map(|step| format!("{prefix}-{step}.md"))
+            .find(|candidate| !std::path::Path::new(candidate).exists())
+            .ok_or("no free step file")?,
+        None => flag(&args, "--fake-write").ok_or("missing --fake-write")?,
+    };
     if let Some(probe) = flag(&args, "--try-direct-write")
         && std::fs::write(&probe, "written around the broker\n").is_ok()
     {
