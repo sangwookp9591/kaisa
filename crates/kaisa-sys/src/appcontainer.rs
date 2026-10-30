@@ -323,6 +323,148 @@ impl Drop for AppContainerProfile {
     }
 }
 
+/// Creates `spec` inside `profile`'s container, suspended, with `stdin`, `stdout` and `stderr`
+/// as its standard handles and no other handle inherited. The caller adopts the process
+/// (Job Object, resume) like every other agent.
+pub(crate) fn create_suspended_contained(
+    profile: &AppContainerProfile,
+    spec: &crate::process::ProcessSpec,
+    stdin: std::os::windows::io::RawHandle,
+    stdout: std::os::windows::io::RawHandle,
+    stderr: std::os::windows::io::RawHandle,
+) -> io::Result<crate::windows_child::CreatedProcess> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        STARTF_USESTDHANDLES,
+    };
+
+    let program: &str = spec.program.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "program path is not valid Unicode",
+        )
+    })?;
+    let line: String = command_line(program, &spec.args)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut wide_line: Vec<u16> = wide(OsStr::new(&line));
+    let directory: Vec<u16> = wide(spec.working_directory.as_os_str());
+    let environment: Option<Vec<u16>> = environment_block(&spec.env);
+    let mut handles: Vec<HANDLE> = vec![stdin, stdout, stderr];
+    handles.sort_unstable();
+    handles.dedup();
+    for handle in &handles {
+        #[allow(unsafe_code)]
+        // SAFETY: each handle is a live pipe end owned by the caller for this call.
+        let marked: i32 =
+            unsafe { SetHandleInformation(*handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        if marked == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let mut capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: profile.sid,
+        Capabilities: null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let mut list = AttributeList::new(TWO_ATTRIBUTES)?;
+    list.set(
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+        (&raw mut capabilities).cast::<c_void>(),
+        size_of::<SECURITY_CAPABILITIES>(),
+    )?;
+    list.set(
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        handles.as_mut_ptr().cast::<c_void>(),
+        size_of::<HANDLE>() * handles.len(),
+    )?;
+    #[allow(unsafe_code)]
+    // SAFETY: an all-zero STARTUPINFOEXW is a valid "no options" value.
+    let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+    startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
+        .map_err(|_| io::Error::other("STARTUPINFOEXW size out of range"))?;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin;
+    startup.StartupInfo.hStdOutput = stdout;
+    startup.StartupInfo.hStdError = stderr;
+    startup.lpAttributeList = list.as_mut_ptr();
+    #[allow(unsafe_code)]
+    // SAFETY: an all-zero PROCESS_INFORMATION is the documented out-parameter state.
+    let mut information: PROCESS_INFORMATION = unsafe { zeroed() };
+    let flags: u32 = EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_SUSPENDED
+        | if environment.is_some() {
+            CREATE_UNICODE_ENVIRONMENT
+        } else {
+            0
+        };
+    #[allow(unsafe_code)]
+    // SAFETY: all strings are NUL-terminated and outlive the call; the command line is mutable;
+    // the attribute list, the capabilities and the handle array it points at are live locals;
+    // inheritance is limited to the three standard handles by the handle list.
+    let created: i32 = unsafe {
+        CreateProcessW(
+            null(),
+            wide_line.as_mut_ptr(),
+            null(),
+            null(),
+            INHERIT_LISTED_HANDLES,
+            flags,
+            environment
+                .as_ref()
+                .map_or(null(), |block| block.as_ptr().cast::<c_void>()),
+            directory.as_ptr(),
+            (&raw const startup).cast::<STARTUPINFOW>(),
+            &raw mut information,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: CreateProcessW succeeded, so both handles are fresh and owned by nothing else.
+    let (process, main_thread): (OwnedHandle, OwnedHandle) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(information.hProcess),
+            OwnedHandle::from_raw_handle(information.hThread),
+        )
+    };
+    drop(main_thread);
+    Ok(crate::windows_child::CreatedProcess::new(
+        process,
+        information.dwProcessId,
+    ))
+}
+
+/// Kaisa's environment with `overrides` applied, as a UTF-16 environment block; `None` when
+/// there is nothing to override, so the child inherits the environment as is.
+fn environment_block(overrides: &[(String, String)]) -> Option<Vec<u16>> {
+    if overrides.is_empty() {
+        return None;
+    }
+    let mut variables: std::collections::BTreeMap<String, String> = std::env::vars()
+        .map(|(name, value)| (name.to_ascii_uppercase(), format!("{name}={value}")))
+        .collect();
+    for (name, value) in overrides {
+        variables.insert(name.to_ascii_uppercase(), format!("{name}={value}"));
+    }
+    let mut block: Vec<u16> = Vec::new();
+    for entry in variables.values() {
+        block.extend(OsStr::new(entry).encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    Some(block)
+}
+
+/// The contained process inherits only the handles named in its handle list.
+const INHERIT_LISTED_HANDLES: i32 = 1;
+/// Security capabilities and the inherited-handle list.
+const TWO_ATTRIBUTES: u32 = 2;
+
 /// A low mandatory label that does not forbid low writers, inherited by everything below.
 const LOW_LABEL_INHERITED: &str = "S:(ML;OICI;NW;;;LW)";
 /// No explicit label: the object falls back to the default (medium) label.
@@ -412,13 +554,13 @@ struct AttributeList {
 }
 
 impl AttributeList {
-    fn with_capabilities(capabilities: *mut SECURITY_CAPABILITIES) -> io::Result<Self> {
+    fn new(count: u32) -> io::Result<Self> {
         let mut size: usize = 0;
         #[allow(unsafe_code)]
         // SAFETY: with a null list the call only writes the required size to `size`; it
         // reports ERROR_INSUFFICIENT_BUFFER by design, so its result is ignored.
         unsafe {
-            InitializeProcThreadAttributeList(null_mut(), ONE_ATTRIBUTE, NO_FLAGS, &raw mut size);
+            InitializeProcThreadAttributeList(null_mut(), count, NO_FLAGS, &raw mut size);
         }
         let mut buffer: Vec<u64> = vec![0; size.div_ceil(size_of::<u64>())];
         #[allow(unsafe_code)]
@@ -426,7 +568,7 @@ impl AttributeList {
         let initialized: i32 = unsafe {
             InitializeProcThreadAttributeList(
                 buffer.as_mut_ptr().cast::<c_void>(),
-                ONE_ATTRIBUTE,
+                count,
                 NO_FLAGS,
                 &raw mut size,
             )
@@ -434,17 +576,21 @@ impl AttributeList {
         if initialized == 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut list = Self { buffer };
+        Ok(Self { buffer })
+    }
+
+    /// Adds `attribute` whose value is `size` bytes at `value`. The caller keeps the value
+    /// alive until the process is created.
+    fn set(&mut self, attribute: u32, value: *mut c_void, size: usize) -> io::Result<()> {
         #[allow(unsafe_code)]
-        // SAFETY: the list was initialized above; the value points at a SECURITY_CAPABILITIES
-        // that the caller keeps alive until the process is created.
+        // SAFETY: the list was initialized in `new`; `value` points at `size` live bytes.
         let updated: i32 = unsafe {
             UpdateProcThreadAttribute(
-                list.as_mut_ptr(),
+                self.as_mut_ptr(),
                 NO_FLAGS,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                capabilities.cast::<c_void>(),
-                size_of::<SECURITY_CAPABILITIES>(),
+                attribute as usize,
+                value,
+                size,
                 null_mut(),
                 null(),
             )
@@ -452,6 +598,16 @@ impl AttributeList {
         if updated == 0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(())
+    }
+
+    fn with_capabilities(capabilities: *mut SECURITY_CAPABILITIES) -> io::Result<Self> {
+        let mut list = Self::new(ONE_ATTRIBUTE)?;
+        list.set(
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+            capabilities.cast::<c_void>(),
+            size_of::<SECURITY_CAPABILITIES>(),
+        )?;
         Ok(list)
     }
 

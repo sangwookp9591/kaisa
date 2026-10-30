@@ -19,9 +19,12 @@ pub enum Confinement<'policy> {
     /// A Landlock ruleset with its UDP filter (Linux).
     #[cfg(target_os = "linux")]
     Landlock(&'policy crate::landlock::LandlockRuleset),
-    /// Keeps the lifetime on platforms whose confinement (Windows AppContainer, T15.5) is not
-    /// implemented yet; never constructed.
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// An AppContainer profile (Windows): the process runs inside the container with only its
+    /// standard handles inherited.
+    #[cfg(windows)]
+    AppContainer(&'policy crate::appcontainer::AppContainerProfile),
+    /// Keeps the lifetime on platforms with no confinement yet; never constructed.
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     #[doc(hidden)]
     Pending(std::marker::PhantomData<&'policy ()>),
 }
@@ -70,16 +73,8 @@ pub fn run_captured_reporting(
     started: &mut dyn FnMut(Option<crate::ProcessIdentity>) -> io::Result<()>,
 ) -> io::Result<CapturedRun> {
     let (reader, writer) = io::pipe()?;
-    let mut command: Command = confined_command(spec, confinement);
-    command
-        .stdin(if input.is_empty() {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
-        .stdout(Stdio::from(writer.try_clone()?))
-        .stderr(Stdio::from(writer));
-    let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
+    let (mut process, stdin): (OwnedProcess, Option<Box<dyn io::Write + Send>>) =
+        spawn_captured(spec, confinement, !input.is_empty(), writer)?;
     let collector = std::thread::spawn(move || collect(reader, cap));
     let identity: Option<crate::ProcessIdentity> =
         crate::ProcessIdentity::of(process.id()).unwrap_or(None);
@@ -88,7 +83,7 @@ pub fn run_captured_reporting(
         let _ = process.wait();
         return Err(error);
     }
-    if let Some(mut stdin) = process.take_stdin() {
+    if let Some(mut stdin) = stdin {
         let input: Vec<u8> = input.to_vec();
         // Written on a thread so a process that does not read cannot block the deadline.
         std::thread::spawn(move || {
@@ -109,6 +104,43 @@ pub fn run_captured_reporting(
         output,
         truncated,
     })
+}
+
+/// Starts `spec` with `output` as its stdout and stderr, and a stdin pipe if `piped`.
+fn spawn_captured(
+    spec: &ProcessSpec,
+    confinement: &Confinement<'_>,
+    piped: bool,
+    output: io::PipeWriter,
+) -> io::Result<(OwnedProcess, Option<Box<dyn io::Write + Send>>)> {
+    #[cfg(windows)]
+    if let Confinement::AppContainer(profile) = confinement {
+        use std::os::windows::io::AsRawHandle;
+        // A pipe even without input: dropping its writer gives the process an immediate EOF.
+        let (child_stdin, our_stdin) = io::pipe()?;
+        let created = crate::appcontainer::create_suspended_contained(
+            profile,
+            spec,
+            child_stdin.as_raw_handle(),
+            output.as_raw_handle(),
+            output.as_raw_handle(),
+        )?;
+        drop((child_stdin, output));
+        let process: OwnedProcess = OwnedProcess::adopt_created(created)?;
+        let stdin: Option<Box<dyn io::Write + Send>> =
+            piped.then(|| Box::new(our_stdin) as Box<dyn io::Write + Send>);
+        return Ok((process, stdin));
+    }
+    let mut command: Command = confined_command(spec, confinement);
+    command
+        .stdin(if piped { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::from(output.try_clone()?))
+        .stderr(Stdio::from(output));
+    let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
+    let stdin: Option<Box<dyn io::Write + Send>> = process
+        .take_stdin()
+        .map(|stdin| Box::new(stdin) as Box<dyn io::Write + Send>);
+    Ok((process, stdin))
 }
 
 fn collect(mut reader: io::PipeReader, cap: usize) -> io::Result<(Vec<u8>, bool)> {
@@ -149,7 +181,10 @@ fn confined_command(spec: &ProcessSpec, confinement: &Confinement<'_>) -> Comman
             }
             command
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        // Contained processes are created by `spawn_captured`, never through a `Command`.
+        #[cfg(windows)]
+        Confinement::AppContainer(_) => command_for(spec),
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Confinement::Pending(_) => command_for(spec),
     }
 }
@@ -276,6 +311,34 @@ mod tests {
             String::from_utf8_lossy(&run.output).trim(),
             EGRESS_PROXY,
             "an agent is pointed at its egress broker through its environment"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_exec_inside_an_appcontainer_is_captured_like_any_other() {
+        let profile = crate::AppContainerProfile::ensure(&format!(
+            "kaisa.test.capture.{}",
+            std::process::id()
+        ))
+        .expect("a non-admin user can create a profile");
+        let mut echo_stdin = shell("more");
+        echo_stdin.working_directory = std::path::PathBuf::from(r"C:\Windows");
+
+        let run = run_captured(
+            &echo_stdin,
+            &Confinement::AppContainer(&profile),
+            FIRST_MESSAGE.as_bytes(),
+            DEADLINE,
+            usize::MAX,
+        );
+        let _ = profile.delete();
+        let run: CapturedRun = run.expect("the contained shell runs");
+
+        assert_eq!(
+            (run.exit, String::from_utf8_lossy(&run.output).trim()),
+            (Some(ProcessExit::Code(0)), FIRST_MESSAGE),
+            "a contained agent gets its pack on stdin and its transcript is captured"
         );
     }
 }
