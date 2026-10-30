@@ -2,6 +2,9 @@
 
 mod error;
 mod event_store;
+mod outbox;
+#[cfg(test)]
+mod outbox_tests;
 mod rows;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -10,3 +13,4 @@ mod tests;
 
 pub use error::{CorruptReason, StoreError};
 pub use event_store::EventStore;
+pub use outbox::{Intent, PendingIntent};

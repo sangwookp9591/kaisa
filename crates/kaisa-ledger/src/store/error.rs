@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use kaisa_domain::IntentId;
+
 use crate::chain::ChainBreak;
 
 /// What is wrong with a stored row that cannot be decoded.
@@ -33,6 +35,10 @@ pub enum StoreError {
     },
     /// The stored events do not form an unbroken chain.
     ChainBroken(ChainBreak),
+    /// An intent with this id was already recorded.
+    DuplicateIntent(IntentId),
+    /// An outbox row cannot be decoded into an intent.
+    CorruptOutbox,
 }
 
 impl fmt::Display for StoreError {
@@ -46,6 +52,8 @@ impl fmt::Display for StoreError {
                 write!(f, "ledger row {stored_sequence} is corrupt: {reason:?}")
             }
             Self::ChainBroken(chain_break) => write!(f, "{chain_break}"),
+            Self::DuplicateIntent(id) => write!(f, "intent {id} was already recorded"),
+            Self::CorruptOutbox => write!(f, "an outbox row cannot be decoded"),
         }
     }
 }
@@ -56,6 +64,7 @@ impl std::error::Error for StoreError {
             Self::Sqlite(error) => Some(error),
             Self::Corrupt { .. } => None,
             Self::ChainBroken(chain_break) => Some(chain_break),
+            Self::DuplicateIntent(_) | Self::CorruptOutbox => None,
         }
     }
 }

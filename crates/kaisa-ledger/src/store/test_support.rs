@@ -25,7 +25,9 @@ impl Drop for ScratchLedger {
     }
 }
 
-use kaisa_domain::{Event, EventKind};
+use kaisa_domain::{EffectKind, Event, EventKind, IntentId};
+
+use super::outbox::Intent;
 
 const CURRENT_PAYLOAD_VERSION: u16 = 1;
 
@@ -127,4 +129,22 @@ pub(crate) fn a_ledger_path_that_does_not_exist_yet() -> ScratchLedger {
     ));
     std::fs::create_dir_all(&directory).expect("the temp directory is writable");
     ScratchLedger { directory }
+}
+
+/// Kaisa is about to create the worktree for run 41's first attempt.
+pub(crate) fn intent_to_create_the_worktree_of_attempt_41a() -> Intent {
+    Intent {
+        id: IntentId::try_new("intent_wt41a").expect("a valid intent id"),
+        effect: EffectKind::CreateWorktree,
+        detail: r#"{"attempt":"att_41a","branch":"kaisa/41-a"}"#.to_owned(),
+    }
+}
+
+/// Kaisa is about to start the agent of run 41's first attempt.
+pub(crate) fn intent_to_spawn_the_agent_of_attempt_41a() -> Intent {
+    Intent {
+        id: IntentId::try_new("intent_spawn41a").expect("a valid intent id"),
+        effect: EffectKind::SpawnAgent,
+        detail: r#"{"attempt":"att_41a","agent":"claude"}"#.to_owned(),
+    }
 }
