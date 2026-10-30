@@ -37,6 +37,13 @@ libc = "0.2.191"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 # Lints shared by every crate except `kaisa-sys`, which declares its own copy with
 # `unsafe_code = "deny"` (the only crate allowed to opt into `unsafe`, architecture §13).
