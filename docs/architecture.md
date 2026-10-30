@@ -868,6 +868,45 @@ daemon rejects the action and re-previews. This rule is "you approve exactly wha
 When an eligible approver is revoked, offboarded or marked away, pending approvals are **reassigned** along the
 delegation chain. Every reassignment is recorded, and an approval never falls back to `self`.
 
+### 5.13 Scale: large teams (v0.6)
+
+"Team size" means agent processes actually running at the same time — never a count of records
+(P17). The target is 100+ concurrent agents on one well-equipped host, proven by the load benchmark
+in §15 before it is advertised.
+
+**Hierarchy keeps every coordinator's context small.** One coordinator cannot follow a hundred
+agents any better than one developer can; that is context collapse moved up a level.
+- The root coordinator splits a large Mission into **sub-runs** along disjoint write-set areas (for
+  example `api/`, `web/`, `docs/`). Each sub-run has its own coordinator epoch, budget slice and
+  integration branch.
+- A coordinator manages at most `max_active_tasks` Tasks (policy, default 12) and the tree is at most
+  three levels deep. Beyond that the plan is refused with a fix option, not silently flattened.
+- A parent coordinator sees **roll-ups** of its sub-runs — status, evidence, blocking questions,
+  budget — not their raw event streams. The daemon builds the roll-ups; no coordinator summarises
+  another.
+- Sub-coordinators fail over independently (§5.3); a sub-run's failure is an event in its parent's
+  roll-up.
+
+**Admission is measured, not configured by hope.**
+- Each host has slots for heavy attempts (worktree, keeper, sandbox) and light attempts (shared
+  read-only snapshot, §5.2). Slot counts come from measured per-attempt costs (RSS, file descriptors,
+  worktree disk, CPU) against free capacity, and from each provider's rate limits.
+- Ready Tasks beyond the available slots wait in the queue with their position shown; the user is
+  told "37 running, 12 queued (rate limit: Claude)", not left guessing.
+- The ledger stays the single writer (P12); events from many keepers are batched per transaction,
+  and the append budget at 100+ agents is measured (§15).
+
+**Integration without dumping conflicts on people.**
+- Results merge into their sub-run's integration branch in DAG order, each merge behind the delivery
+  gate (§5.8).
+- A merge conflict becomes a revision Task for the role that owns the conflicting paths, with both
+  sides in its context pack. Only a conflict that the revision cannot resolve reaches a human.
+- The sub-run's integration branch is verified as a whole (Checks with the combined impact set)
+  before it merges into its parent.
+
+**Beyond one host (M3).** Remote workers add slots on other machines through the team-server
+mode; the hierarchy and the admission rules do not change.
+
 ---
 
 ## 6. Protocol (KRPC)
