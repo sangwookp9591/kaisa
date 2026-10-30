@@ -7,6 +7,11 @@ use super::test_support::{
 use super::{EventStore, Intent, PendingIntent, StoreError};
 use crate::chain::ChainedEvent;
 
+/// The receipt a worktree creation produces: where the worktree ended up.
+fn worktree_created_receipt() -> &'static str {
+    "worktree at ~/.kaisa/worktrees/att_41a on branch kaisa/41-a"
+}
+
 fn an_open_empty_ledger(scratch: &ScratchLedger) -> EventStore {
     EventStore::open(&scratch.path()).expect("a new ledger opens")
 }
@@ -118,5 +123,76 @@ fn a_rejected_duplicate_intent_leaves_no_extra_event_behind() {
         store.len().expect("the count is readable"),
         events_before,
         "the intent row and its event commit together or not at all"
+    );
+}
+
+#[test]
+fn a_completed_intent_is_no_longer_pending() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+
+    store
+        .complete(&create_worktree.id, worktree_created_receipt())
+        .expect("completion succeeds");
+
+    assert!(
+        store
+            .pending_intents()
+            .expect("the outbox is readable")
+            .is_empty(),
+        "a completed effect must not be replayed on recovery"
+    );
+}
+
+#[test]
+fn completing_an_intent_records_an_intent_completed_event() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+
+    let completed: ChainedEvent = store
+        .complete(&create_worktree.id, worktree_created_receipt())
+        .expect("completion succeeds");
+
+    assert_eq!(
+        completed.recorded.event.kind,
+        EventKind::IntentCompleted,
+        "it is a completion event"
+    );
+    assert_eq!(
+        completed.recorded.event.subject,
+        create_worktree.id.as_str(),
+        "the completion is about the intent it closes"
+    );
+}
+
+#[test]
+fn completing_one_intent_leaves_the_other_intents_pending() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    let spawn_agent: Intent = intent_to_spawn_the_agent_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+    store
+        .record_intent(&spawn_agent)
+        .expect("recording succeeds");
+
+    store
+        .complete(&create_worktree.id, worktree_created_receipt())
+        .expect("completion succeeds");
+
+    assert_eq!(
+        intents_of(&store.pending_intents().expect("the outbox is readable")),
+        vec![spawn_agent],
+        "completion closes exactly the intent it names"
     );
 }

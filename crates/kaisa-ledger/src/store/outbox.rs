@@ -4,14 +4,18 @@
 //! transaction, so after a crash the ledger always knows which effects may have started.
 
 use kaisa_domain::{EffectKind, Event, EventKind, IntentId};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::error::StoreError;
 use super::event_store::{EventStore, append_in};
 use crate::chain::ChainedEvent;
+use crate::json::json_string;
 
 /// Payload schema version of `IntentRecorded` events.
 const INTENT_PAYLOAD_VERSION: u16 = 1;
+
+/// Stored state of an intent that has not been completed.
+const PENDING: &str = "pending";
 
 /// SQLite's extended result code for a violated PRIMARY KEY constraint.
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
@@ -60,6 +64,34 @@ impl EventStore {
         Ok(chained)
     }
 
+    /// Marks a pending intent as completed with `receipt` and appends its `IntentCompleted`
+    /// event, atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::IntentNotPending`] if no pending intent has this id. Returns
+    /// another [`StoreError`] if the transaction fails.
+    pub fn complete(&mut self, id: &IntentId, receipt: &str) -> Result<ChainedEvent, StoreError> {
+        let transaction: Transaction<'_> = self.connection.transaction()?;
+        let state: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM outbox WHERE intent_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if state.as_deref() != Some(PENDING) {
+            return Err(StoreError::IntentNotPending(id.clone()));
+        }
+        transaction.execute(
+            "UPDATE outbox SET state = 'completed', receipt = ?2 WHERE intent_id = ?1",
+            params![id.as_str(), receipt],
+        )?;
+        let chained: ChainedEvent = append_in(&transaction, intent_completed_event(id, receipt))?;
+        transaction.commit()?;
+        Ok(chained)
+    }
+
     /// Every intent that has been recorded and not completed, oldest first.
     ///
     /// # Errors
@@ -98,6 +130,17 @@ fn intent_recorded_event(intent: &Intent) -> Event {
             intent.effect.code(),
             intent.detail
         ),
+    }
+}
+
+/// The ledger event that records the completion of intent `id`. The receipt is stored as a
+/// JSON string so arbitrary receipt text cannot break the payload.
+fn intent_completed_event(id: &IntentId, receipt: &str) -> Event {
+    Event {
+        kind: EventKind::IntentCompleted,
+        subject: id.as_str().to_owned(),
+        payload_version: INTENT_PAYLOAD_VERSION,
+        payload: format!(r#"{{"receipt":{}}}"#, json_string(receipt)),
     }
 }
 
