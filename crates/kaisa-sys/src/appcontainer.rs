@@ -130,10 +130,8 @@ impl AppContainerProfile {
     fn change_dacl(&self, path: &Path, rights: u32, mode: i32) -> io::Result<()> {
         // Read-modify-write of a DACL: two attempts granting the same directory (their shared
         // program directory) at once would otherwise lose one grant, and that agent could not
-        // start. Serialized within this process; across Kaisa processes see T15.5e.
-        let _serialized = DACL_CHANGES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // start. Serialized across every thread and Kaisa process of this user session.
+        let _serialized = DaclLock::acquire()?;
         let name: Vec<u16> = wide(path.as_os_str());
         let mut old_dacl: *mut ACL = null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
@@ -320,7 +318,8 @@ impl AppContainerProfile {
 // freed once, on drop, by whichever thread owns the profile then.
 #[allow(unsafe_code)]
 unsafe impl Send for AppContainerProfile {}
-// SAFETY: as above; every method only reads the SID, and DACL changes are serialized.
+// SAFETY: as above; every method only reads the SID, and DACL changes are serialized by
+// `DaclLock`.
 #[allow(unsafe_code)]
 unsafe impl Sync for AppContainerProfile {}
 
@@ -479,8 +478,60 @@ const INHERIT_LISTED_HANDLES: i32 = 1;
 /// Security capabilities and the inherited-handle list.
 const TWO_ATTRIBUTES: u32 = 2;
 
-/// Serializes DACL changes made by this process.
-static DACL_CHANGES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The session-wide mutex name serializing Kaisa's DACL changes.
+const DACL_LOCK_NAME: &str = r"Local\kaisa-dacl-changes";
+
+/// Holds the named mutex that serializes DACL changes across threads and Kaisa processes.
+/// A holder that died leaves the mutex abandoned; the next one simply takes it, since an
+/// interrupted change left the DACL whole (SetNamedSecurityInfoW writes it at once).
+struct DaclLock {
+    handle: std::os::windows::io::OwnedHandle,
+}
+
+impl DaclLock {
+    fn acquire() -> io::Result<Self> {
+        use std::os::windows::io::FromRawHandle;
+
+        use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+
+        let name: Vec<u16> = wide(OsStr::new(DACL_LOCK_NAME));
+        #[allow(unsafe_code)]
+        // SAFETY: default security, not initially owned, NUL-terminated name.
+        let handle: HANDLE = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        #[allow(unsafe_code)]
+        // SAFETY: a fresh handle owned by nothing else.
+        let handle = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) };
+        #[allow(unsafe_code)]
+        // SAFETY: the mutex handle is valid for the wait.
+        let waited: u32 = unsafe {
+            WaitForSingleObject(
+                std::os::windows::io::AsRawHandle::as_raw_handle(&handle),
+                INFINITE,
+            )
+        };
+        match waited {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self { handle }),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+impl Drop for DaclLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        #[allow(unsafe_code)]
+        // SAFETY: this thread owns the mutex since `acquire` returned; it is released once.
+        unsafe {
+            ReleaseMutex(std::os::windows::io::AsRawHandle::as_raw_handle(
+                &self.handle,
+            ));
+        }
+    }
+}
 
 /// A low mandatory label that does not forbid low writers, inherited by everything below.
 const LOW_LABEL_INHERITED: &str = "S:(ML;OICI;NW;;;LW)";
@@ -1009,4 +1060,54 @@ mod tests {
 
     /// Attempts granting the same directory at the same moment.
     const CONCURRENT_ATTEMPTS: usize = 4;
+
+    /// Set in the helper process: where it signals that it holds the DACL lock.
+    const HOLD_SIGNAL_VARIABLE: &str = "KAISA_TEST_DACL_HOLD";
+    /// How long the helper process holds the lock.
+    const HOLD: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+    /// Run as a separate process by the test below; does nothing in a normal test run.
+    #[test]
+    #[ignore = "helper process for two_kaisa_processes_serialize_their_dacl_changes"]
+    fn dacl_lock_holder_process() {
+        let Some(signal) = std::env::var_os(HOLD_SIGNAL_VARIABLE) else {
+            return;
+        };
+        let signal = PathBuf::from(signal);
+        let lock = super::DaclLock::acquire().expect("the lock is free");
+        std::fs::write(signal.join("held"), "").expect("writable");
+        std::thread::sleep(HOLD);
+        std::fs::write(signal.join("released"), "").expect("writable");
+        drop(lock);
+    }
+
+    #[test]
+    fn two_kaisa_processes_serialize_their_dacl_changes() {
+        let signal: PathBuf = a_user_directory("dacl-lock");
+        let mut holder = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "appcontainer::tests::dacl_lock_holder_process",
+            ])
+            .env(HOLD_SIGNAL_VARIABLE, &signal)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("the helper process starts");
+        let deadline = std::time::Instant::now() + HOLD * 10;
+        while !signal.join("held").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let lock = super::DaclLock::acquire().expect("acquired after the other process");
+        let other_had_released: bool = signal.join("released").exists();
+        drop(lock);
+        let _ = holder.wait();
+        let _ = std::fs::remove_dir_all(&signal);
+
+        assert!(
+            other_had_released,
+            "a second Kaisa process changes DACLs only after the first one has finished"
+        );
+    }
 }
