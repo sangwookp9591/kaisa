@@ -15,6 +15,7 @@ mod openpty;
 mod pidfd;
 mod process;
 mod pty;
+mod state_dir;
 mod terminal;
 #[cfg(windows)]
 mod windows_child;
@@ -23,4 +24,10 @@ mod windows_command_line;
 
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
+#[cfg(unix)]
+pub use state_dir::PRIVATE_MODE;
+pub use state_dir::{
+    CONTROL_SOCKET_NAME, ControlEndpoint, STATE_DIR_OVERRIDE, StateLocation,
+    ensure_private_directory, state_location,
+};
 pub use terminal::Terminal;
