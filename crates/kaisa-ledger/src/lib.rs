@@ -3,5 +3,7 @@
 //! Design: `docs/architecture.md` §5.4.
 
 mod chain;
+mod store;
 
 pub use chain::{BreakReason, ChainBreak, ChainHash, ChainedEvent, build_chain, verify_chain};
+pub use store::{EventStore, StoreError};
