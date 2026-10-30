@@ -317,6 +317,7 @@ mod tests {
     }
 
     /// An `exec` that tries to write into `src/billing`, which the attempt does not own.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn an_exec_writing_billing(worktree: &ScratchWorktree) -> serde_json::Value {
         json!({"argv": ["/bin/sh", "-c", format!("echo changed > '{}'", worktree.root.join("src/billing/invoice.rs").display())]})
     }
