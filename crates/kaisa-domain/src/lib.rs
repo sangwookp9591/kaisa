@@ -4,6 +4,7 @@
 
 mod attempt;
 mod attempt_codes;
+mod authority;
 mod effect;
 mod event;
 mod grade;
@@ -16,6 +17,7 @@ pub use attempt::{
     AttemptState, Axis, Cleanup, Execution, ExitStatus, FailureReason, IllegalTransition, Outcome,
     Verification,
 };
+pub use authority::{Authority, Operation};
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
 pub use grade::{BelowFloor, Grade, GradeFloor};
