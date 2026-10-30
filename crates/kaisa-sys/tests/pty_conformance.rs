@@ -32,6 +32,8 @@ const FAREWELL: &str = "goodbye-from-the-agent";
 /// Lines printed before the farewell: far more than a terminal buffers (about 4 KiB on macOS),
 /// so the agent can only finish if the backend reads while it waits.
 const LINES_BEFORE_FAREWELL: u32 = 2000;
+/// How much of a long output a failure message shows.
+const OUTPUT_TAIL_SHOWN: usize = 300;
 /// The key that ends a typed line: a newline for a Unix terminal, a carriage return for a
 /// Windows console.
 const ENTER: &str = if cfg!(windows) { "\r" } else { "\n" };
@@ -157,8 +159,10 @@ fn an_agent_that_reports_its_size_after_a_line() -> ProcessSpec {
 
 fn an_agent_that_prints_a_lot_and_exits_at_once() -> ProcessSpec {
     if cfg!(windows) {
+        // A newline would end `cmd /C`'s command, and `&` inside `do` would join the loop
+        // body, so the loop is parenthesised and chained with `&`.
         shell(&format!(
-            "for /L %i in (1,1,{LINES_BEFORE_FAREWELL}) do @echo line %i\r\necho {FAREWELL}"
+            "(for /L %i in (1,1,{LINES_BEFORE_FAREWELL}) do @echo line %i) & echo {FAREWELL}"
         ))
     } else {
         shell(&format!(
@@ -235,9 +239,17 @@ fn scenario_output_before_exit<B: Backend>() {
 
     let output: String = session.finish();
 
+    let ending: String = output
+        .chars()
+        .rev()
+        .take(OUTPUT_TAIL_SHOWN)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
     assert!(
         output.contains(FAREWELL),
-        "an agent's last words must survive however much it printed before them"
+        "an agent's last words must survive however much it printed before them; output ended with {ending:?}"
     );
 }
 
