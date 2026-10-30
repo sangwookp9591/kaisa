@@ -163,7 +163,7 @@ impl Session for PortablePtySession {
             .expect("resizing succeeds");
     }
 
-    fn finish(mut self) -> String {
+    fn finish(self) -> String {
         let mut reader = self
             .master
             .try_clone_reader()
