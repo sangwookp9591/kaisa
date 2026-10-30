@@ -458,6 +458,7 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
 }
 
 /// What the scripted local model writes, through the broker.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const LOCAL_MODEL_NOTES: &str = "written by a local model";
 
 /// A loopback OpenAI-compatible server that answers each request with the next scripted reply.
