@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "bin/kaisa",
+    "crates/kaisa-agents",
     "crates/kaisa-cli",
     "crates/kaisa-context",
     "crates/kaisa-daemon",
@@ -25,6 +26,7 @@ repository = "https://github.com/sangwookp9591/kaisa"
 publish = false
 
 [workspace.dependencies]
+kaisa-agents = { path = "crates/kaisa-agents" }
 kaisa-cli = { path = "crates/kaisa-cli" }
 kaisa-daemon = { path = "crates/kaisa-daemon" }
 kaisa-context = { path = "crates/kaisa-context" }

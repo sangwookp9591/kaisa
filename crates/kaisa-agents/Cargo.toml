@@ -1,0 +1,19 @@
+[package]
+name = "kaisa-agents"
+description = "Agent adapters: how each agent CLI is started in brokered or observed mode."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+kaisa-context.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+kaisa-domain.workspace = true
+
+[lints]
+workspace = true

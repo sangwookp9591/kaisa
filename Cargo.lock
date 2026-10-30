@@ -149,6 +149,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaisa-agents"
+version = "0.0.0"
+dependencies = [
+ "kaisa-context",
+ "kaisa-domain",
+ "serde_json",
+]
+
+[[package]]
 name = "kaisa-cli"
 version = "0.0.0"
 
