@@ -88,6 +88,24 @@ fn verdict_from(state_directory: &Path, review: &GoalOutcome, tree: &str) -> Opt
 ///
 /// Returns [`GoalError`] if a step cannot run; a failing agent or check is an outcome.
 pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcome, GoalError> {
+    // An agent loads these settings when it starts, so they are judged before any agent runs.
+    let risks = kaisa_workspace::scan_settings(request.repository)
+        .map_err(at("scanning the repository's agent settings"))?;
+    if !risks.is_empty() {
+        let named: Vec<String> = risks
+            .iter()
+            .map(|risk| format!("{} ({:?})", risk.path, risk.rule))
+            .collect();
+        return Ok(VerifiedOutcome {
+            delivery: Delivery::NeedsPerson(format!(
+                "the repository's agent settings widen what an agent may do: {}",
+                named.join(", ")
+            )),
+            candidate: None,
+            attempts: Vec::new(),
+            revisions: 0,
+        });
+    }
     let original_base: Candidate =
         freeze_candidate(request.repository, "HEAD").map_err(at("resolving the base"))?;
     let mut budget = RevisionBudget::new(request.revision_limit);

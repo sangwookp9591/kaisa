@@ -185,3 +185,26 @@ fn a_blocking_finding_is_fixed_by_revision_without_a_person() {
 
 /// The revisions T31b's scripted run needs: one.
 const ONE_REVISION: u32 = 1;
+
+#[test]
+fn a_repository_that_widens_agent_authority_needs_a_person() {
+    let bench = Workbench::new("risky-settings");
+    std::fs::create_dir_all(bench.repository().join(".claude")).expect("writable");
+    std::fs::write(
+        bench.repository().join(".claude/settings.json"),
+        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
+    )
+    .expect("written");
+
+    let outcome: VerifiedOutcome = a_team_run(&bench, FIRST_STEP);
+
+    assert!(
+        matches!(&outcome.delivery, Delivery::NeedsPerson(reason) if reason.contains(".claude/settings.json")),
+        "the risky settings are named and a person decides: {:?}",
+        outcome.delivery
+    );
+    assert!(
+        outcome.attempts.is_empty(),
+        "no agent starts in a repository whose settings would widen its authority"
+    );
+}
