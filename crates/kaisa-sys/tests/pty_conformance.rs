@@ -343,36 +343,52 @@ fn scenario_output_before_exit<B: Backend>() {
     );
 }
 
-/// Instantiates every scenario for one backend.
+/// Instantiates every scenario for one backend. With `comparison`, the tests are ignored by
+/// default: a library Kaisa compares against must not be able to block Kaisa's own CI, so its
+/// results come from a separate, non-blocking job that runs `cargo test -- --ignored`.
 macro_rules! conformance_suite {
     ($module:ident, $backend:ty) => {
+        conformance_suite!(@tests $module, $backend, );
+    };
+    ($module:ident, $backend:ty, comparison) => {
+        conformance_suite!(
+            @tests $module, $backend,
+            #[ignore = "PTY library comparison (ADR 0005): run with `-- --ignored`"]
+        );
+    };
+    (@tests $module:ident, $backend:ty, $(#[$attribute:meta])?) => {
         mod $module {
             use super::{
-                scenario_output_before_exit, scenario_prints, scenario_resize,
-                scenario_typed_input, scenario_unicode,
+                scenario_output_before_exit, scenario_prints, scenario_resize, scenario_typed_input,
+                scenario_unicode,
             };
 
             #[test]
+            $(#[$attribute])?
             fn a_backend_shows_what_the_agent_prints() {
                 scenario_prints::<$backend>();
             }
 
             #[test]
+            $(#[$attribute])?
             fn a_backend_delivers_typed_input() {
                 scenario_typed_input::<$backend>();
             }
 
             #[test]
+            $(#[$attribute])?
             fn unicode_text_survives_the_round_trip_through_the_terminal() {
                 scenario_unicode::<$backend>();
             }
 
             #[test]
+            $(#[$attribute])?
             fn a_backend_reports_a_resize_to_the_agent() {
                 scenario_resize::<$backend>();
             }
 
             #[test]
+            $(#[$attribute])?
             fn a_backend_keeps_output_written_just_before_exit() {
                 scenario_output_before_exit::<$backend>();
             }
@@ -381,4 +397,4 @@ macro_rules! conformance_suite {
 }
 
 conformance_suite!(kaisa, super::KaisaBackend);
-conformance_suite!(portable_pty_wezterm, super::PortablePtyBackend);
+conformance_suite!(portable_pty_wezterm, super::PortablePtyBackend, comparison);
