@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| Status | Draft v0.6 — M0 substrate in progress (ledger, keeper, workspace, PTY); everything else is design |
+| Status | Draft v0.6.1 — M0 substrate in progress (ledger, keeper, workspace, PTY); everything else is design |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
 | Date | 2026-10-30 |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
 | Core language | Rust (stable 1.99.1, edition 2024) |
 | Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) · [`research/ruflo-control.md`](research/ruflo-control.md) (how ruflo enforces, or only records, its capabilities) |
-| Reviews | [`reviews/2026-10-30-architecture-v0.2-codex.md`](reviews/2026-10-30-architecture-v0.2-codex.md) |
+| Reviews | [`reviews/2026-10-30-architecture-v0.2-codex.md`](reviews/2026-10-30-architecture-v0.2-codex.md) · [`reviews/2026-10-30-architecture-v0.6-codex.md`](reviews/2026-10-30-architecture-v0.6-codex.md) (findings B1–B3, M1–M12, N1; addressed in v0.6.1, Appendix C) |
 
 > Every performance or memory number here is a **budget to be measured**, not a claim.
 > Every security property is a **requirement to be proven by a negative test on each OS**
@@ -278,8 +278,10 @@ budget (§15).
 globs, proposed by the coordinator and checked by Kaisa against the repository index (§5.9).
 - Two Tasks whose write sets overlap are never in progress at the same time. The scheduler orders
   them; it does not ask the LLM to remember.
-- The broker refuses a write outside the attempt's write set and turns it into a question for the
-  coordinator ("this change also needs `src/auth/session.rs` — widen the write set?").
+- Writes outside the write set are impossible for **every** process of the attempt, not only for the
+  broker's `fs.write`: the OS sandbox grants write access to the write-set paths and to the
+  attempt's scratch area only (§5.7, "Write-set confinement"). A refused write is reported to the
+  coordinator as a question ("this change also needs `src/auth/session.rs` — widen the write set?").
 - The **impact set** — files that import or test what the write set changes, from the repository
   index — is added to the Task's verification (§5.8). This is how "fixing A broke B" is caught
   before delivery instead of after.
@@ -499,12 +501,26 @@ row on CI.
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
 | Filesystem confinement | Landlock ABI ≥ 3 (kernel ≥ 6.2) | Seatbelt profile (macOS ≥ 14) | AppContainer + ACLs on the worktree (Windows 11 / Server 2022) |
+| Write-set confinement | Landlock write rules on the write-set paths + scratch only | Seatbelt `file-write*` on the write-set paths + scratch only | ACLs granting write on the write-set paths + scratch only |
 | Network to broker only | Landlock ABI ≥ 4 TCP connect rules (kernel ≥ 6.7), or a network namespace when user namespaces are allowed | Seatbelt network rules (localhost:broker only) | AppContainer without network capabilities + loopback exemption for the broker only |
 | Descendant containment | cgroup v2 delegated leaf | process group + descendant scan | Job Object, breakaway denied |
 | Syscall reduction | seccomp | n/a | n/a |
 
 If a capability is missing, the run either refuses to start or runs in a **reduced** mode. Reduced mode is labelled on the run and needs
 a human Gate. It is never silent (P13).
+
+**Write-set confinement (v0.6.1, review B1).** The write set is enforced by the OS for every process
+the attempt starts — the agent, `exec`, interpreters, build scripts and test runners alike:
+- Write access is granted to the write-set paths and to the attempt's **scratch area** only. The
+  scratch area holds build outputs and caches (`target/`, `node_modules/`, `.venv/`, tool caches),
+  is declared per profile, is never part of a candidate and is discarded at reclamation.
+- Rename, hard link and symbolic-link creation are allowed only when source and destination are
+  both inside the write set or both inside scratch; a link pointing out of the write set is refused
+  at creation (Landlock `REFER`, Seatbelt path rules, Windows ACL checks on the target).
+- A post-attempt diff check compares the worktree with its base and refuses a candidate with any
+  change outside the write set. It is a second line, not the enforcement.
+- A tool that cannot run under these rules fails with a fix option ("add `generated/` to the write
+  set"), never with a silently widened sandbox.
 
 **Egress broker.** Each attempt gets an HTTP(S) proxy with a domain allow-list, for example package registries and git remotes. This is needed
 because the OS layers alone cannot filter by domain. All direct network access is denied by the sandbox. Verification and
@@ -1249,6 +1265,7 @@ Stability is validated **after implementation** with:
   - `gix` against `git`: submodules, symlinks, long paths, sparse checkouts.
   - CoW fallback.
 - **Negative security tests.** Run per OS, and part of the definition of done for M0 and M1. An agent must be unable to:
+  - write outside its write set by any route: `exec` of a shell or interpreter, a build script, rename, hard link, symbolic link, an MCP server (§5.6) — one corpus case per route;
   - reach the control endpoint, `kaisa.db`, the keychain items or another attempt's keeper;
   - reach the network without the broker;
   - escape its descendants;
