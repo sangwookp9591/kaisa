@@ -50,7 +50,19 @@ impl RepositoryIndex {
     ///
     /// Returns an error if the revision cannot be read or its tree contains an invalid path.
     pub fn refresh(&mut self, repository: &Path, revision: &str) -> io::Result<Vec<RepoPath>> {
-        let tree = git_output(repository, &["ls-tree", "-r", "-l", "-z", revision, "--"])?;
+        // Resolved first by `rev-parse --end-of-options`, so a revision such as `--output=x`
+        // is only ever a name to git; `ls-tree` then sees a plain object id.
+        let tree_id = git_output(
+            repository,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{tree}}"),
+            ],
+        )?;
+        let tree_id = String::from_utf8_lossy(&tree_id).trim().to_owned();
+        let tree = git_output(repository, &["ls-tree", "-r", "-l", "-z", &tree_id])?;
         let mut next = BTreeMap::new();
         let mut changed = BTreeSet::new();
         for record in tree
@@ -342,6 +354,18 @@ pub(crate) mod tests {
         assert!(
             index.get(&session_path()).is_none(),
             "a deleted source must not survive in the index"
+        );
+    }
+
+    #[test]
+    fn a_revision_that_looks_like_an_option_is_refused_as_a_name() {
+        let project = GitProject::with_files(&[(SESSION_PATH, "pub fn session() {}\n")]);
+
+        let indexed = super::RepositoryIndex::build(project.root(), "--output=leak.txt");
+
+        assert!(
+            indexed.is_err() && !project.root().join("leak.txt").exists(),
+            "an option-like revision names nothing, and git never acts on it as an option"
         );
     }
 }
