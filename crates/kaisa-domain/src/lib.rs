@@ -13,4 +13,4 @@ pub use attempt::{
 };
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
-pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, RunId, TaskId};
+pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};

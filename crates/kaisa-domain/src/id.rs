@@ -1,4 +1,4 @@
-//! Newtype identifiers for runs, tasks and attempts.
+//! Newtype identifiers for missions, runs, tasks and attempts.
 //!
 //! The textual form is `<prefix>_<suffix>`, where the suffix is 1 to 32 lowercase ASCII
 //! letters or digits. Generating new identifiers is the ledger's job; this module only
@@ -99,7 +99,12 @@ macro_rules! define_id {
 }
 
 define_id!(
-    /// Identifies a run: a goal with its plan, budget and policy.
+    /// Identifies a mission: what the user asked for, with its budget and delivery.
+    MissionId,
+    "mis"
+);
+define_id!(
+    /// Identifies a run: a plan under one coordinator epoch, inside a mission.
     RunId,
     "run"
 );
@@ -121,7 +126,7 @@ define_id!(
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, RunId, TaskId};
+    use super::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
 
     /// Text for a run id whose suffix has exactly `length` valid characters.
     fn run_id_text_with_suffix_of_length(length: usize) -> String {
@@ -259,6 +264,31 @@ mod tests {
             intent.to_string(),
             worktree_intent,
             "Display must print exactly what was parsed"
+        );
+    }
+
+    #[test]
+    fn a_mission_id_with_the_mission_prefix_is_accepted() {
+        let mission_text: String = format!("{}_52", MissionId::PREFIX);
+
+        let mission: Result<MissionId, IdError> = MissionId::try_new(&mission_text);
+
+        assert!(
+            mission.is_ok(),
+            "a mission is addressed by its own prefix, got {mission:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_id_is_not_accepted_as_a_mission_id() {
+        let mission: Result<MissionId, IdError> = MissionId::try_new(run_forty_one());
+
+        assert_eq!(
+            mission,
+            Err(IdError::WrongPrefix {
+                expected: MissionId::PREFIX
+            }),
+            "a run and the mission it belongs to must never be confused"
         );
     }
 }
