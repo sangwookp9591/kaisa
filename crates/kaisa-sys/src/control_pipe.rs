@@ -46,10 +46,77 @@ impl ControlPipe {
     /// Returns the operating system's error; an existing instance by any process makes this fail,
     /// which is what stops a squatter from posing as the daemon.
     pub fn create_first(name: &str) -> io::Result<Self> {
+        Self::create_first_with(name, null())
+    }
+
+    /// Creates the first instance of the pipe `name` that the AppContainer `container_sid` may
+    /// also open: the attempt's broker endpoint, reachable from inside its container. The
+    /// descriptor admits the owner and that container only, with a low mandatory label so the
+    /// low-integrity container may write (spike check 4b).
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if the descriptor cannot be built or the pipe exists.
+    pub fn create_first_admitting(name: &str, container_sid: &str) -> io::Result<Self> {
+        use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+        if !container_sid.starts_with("S-1-15-2-")
+            || !container_sid
+                .chars()
+                .all(|character| character.is_ascii_digit() || matches!(character, 'S' | '-'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not an AppContainer SID",
+            ));
+        }
+        let sddl: Vec<u16> = OsStr::new(&format!(
+            "D:(A;;GA;;;OW)(A;;GRGW;;;{container_sid})S:(ML;;NW;;;LW)"
+        ))
+        .encode_wide()
+        .chain(once(0))
+        .collect();
+        let mut descriptor: *mut core::ffi::c_void = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: the SDDL is NUL-terminated; `descriptor` receives a LocalAlloc'd descriptor
+        // freed below.
+        let parsed: i32 = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                null_mut(),
+            )
+        };
+        if parsed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: NOT_INHERITED,
+        };
+        let created = Self::create_first_with(name, &raw const attributes);
+        #[allow(unsafe_code)]
+        // SAFETY: the descriptor was allocated above and the pipe keeps its own copy.
+        unsafe {
+            LocalFree(descriptor as HLOCAL);
+        }
+        created
+    }
+
+    fn create_first_with(
+        name: &str,
+        attributes: *const windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+    ) -> io::Result<Self> {
         let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(once(0)).collect();
         #[allow(unsafe_code)]
-        // SAFETY: the name is a NUL-terminated UTF-16 buffer that outlives the call; null security
-        // attributes give the default (creator-only) descriptor.
+        // SAFETY: the name is a NUL-terminated UTF-16 buffer that outlives the call; the
+        // attributes are null (default, creator-only descriptor) or point at a live descriptor.
         let handle: HANDLE = unsafe {
             CreateNamedPipeW(
                 wide.as_ptr(),
@@ -59,7 +126,7 @@ impl ControlPipe {
                 PIPE_BUFFER_BYTES,
                 PIPE_BUFFER_BYTES,
                 DEFAULT_TIMEOUT,
-                null(),
+                attributes,
             )
         };
         if handle == INVALID_HANDLE_VALUE {
@@ -90,6 +157,12 @@ impl ControlPipe {
         } else {
             Err(error)
         }
+    }
+
+    /// The connected pipe as a byte stream for reading and writing.
+    #[must_use]
+    pub fn into_stream(self) -> std::fs::File {
+        std::fs::File::from(self.handle)
     }
 
     /// True if the connected client runs as the same user as this process.
@@ -184,6 +257,9 @@ mod tests {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use std::ptr::null;
 
+    /// What the contained relay sends its broker.
+    const BROKER_HELLO: &str = "hello-broker-pipe";
+
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
 
@@ -247,6 +323,50 @@ mod tests {
         assert!(
             squatter.is_err(),
             "nobody else may pose as the daemon on an existing pipe name"
+        );
+    }
+
+    #[test]
+    fn a_broker_pipe_admits_its_container_and_carries_its_bytes() {
+        use std::io::Read;
+        let profile = crate::AppContainerProfile::ensure(&format!(
+            "kaisa.test.broker.{}",
+            std::process::id()
+        ))
+        .expect("a non-admin user can create a profile");
+        let name: String = format!(r"\\.\pipe\kaisa-broker-test-{}", std::process::id());
+        let pipe = ControlPipe::create_first_admitting(&name, &profile.sid_string().expect("sid"))
+            .expect("the broker pipe is created");
+        let server = std::thread::spawn(move || {
+            pipe.accept().expect("the contained client connects");
+            let mut received = String::new();
+            let _ = pipe.into_stream().read_to_string(&mut received);
+            received
+        });
+
+        let exit = profile.run(
+            r"C:\Windows\System32\cmd.exe",
+            &["/c".to_owned(), format!("echo {BROKER_HELLO}> {name}")],
+            std::path::Path::new(r"C:\Windows"),
+        );
+        let received: String = server.join().expect("the server thread finishes");
+        let _ = profile.delete();
+
+        assert!(
+            received.contains(BROKER_HELLO),
+            "the contained agent's relay reaches its broker pipe; exit {exit:?}"
+        );
+    }
+
+    #[test]
+    fn a_broker_pipe_refuses_a_descriptor_built_from_something_other_than_a_container_sid() {
+        let name: String = format!(r"\\.\pipe\kaisa-broker-bad-{}", std::process::id());
+
+        let created = ControlPipe::create_first_admitting(&name, "S-1-1-0)(A;;GA;;;WD");
+
+        assert!(
+            created.is_err(),
+            "only an AppContainer SID may be spliced into the pipe's descriptor"
         );
     }
 }
