@@ -47,3 +47,9 @@ style guide: "context strings in `assert!`").
 - Shared test vocabulary lives in a `test_support` module (`#[cfg(test)]`) or a `kaisa-testkit` crate
   once more than one crate needs it.
 - Integration tests live in `tests/` with the same naming rules.
+
+## Before every commit
+
+Run `scripts/check.sh` (or `scripts/check.sh --fix` to format first). It runs exactly what CI runs:
+stable and nightly rustfmt, clippy with `-D warnings`, and the tests. It stops at the first
+failure, so a failing check cannot be hidden by a pipe.
