@@ -3,6 +3,7 @@
 //! Design: `docs/architecture.md`. In M0 a goal runs in one process (`run_goal`); the long-lived
 //! daemon, its control endpoint and keeper reconnection wrap the same steps later.
 
+mod gate;
 mod goal;
 mod ids;
 mod mission;
@@ -11,6 +12,7 @@ mod review;
 mod sandbox;
 mod verify;
 
+pub use gate::{Delivery, RevisionReason, decide_delivery};
 pub use goal::{
     AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
     whole_repository,
