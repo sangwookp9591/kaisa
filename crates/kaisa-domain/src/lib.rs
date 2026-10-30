@@ -14,6 +14,7 @@ mod knowledge;
 mod plan;
 mod repo_path;
 mod sandbox;
+mod verdict;
 mod write_set;
 
 pub use attempt::{
@@ -30,4 +31,5 @@ pub use knowledge::{ContentDigest, DIGEST_HEX_LEN, DigestError, KnowledgeKind};
 pub use plan::{Plan, PlanError, PlannedTask};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use sandbox::{Network, Role, SandboxProfile, sandbox_profile};
+pub use verdict::{Finding, ReviewVerdict, Severity};
 pub use write_set::WriteSet;
