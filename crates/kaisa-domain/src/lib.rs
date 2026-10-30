@@ -7,6 +7,7 @@ mod effect;
 mod event;
 mod grade;
 mod id;
+mod knowledge;
 mod repo_path;
 mod write_set;
 
@@ -18,5 +19,6 @@ pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
 pub use grade::{BelowFloor, Grade, GradeFloor};
 pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
+pub use knowledge::{ContentDigest, DIGEST_HEX_LEN, DigestError, KnowledgeKind};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use write_set::WriteSet;
