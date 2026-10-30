@@ -10,6 +10,7 @@ mod conpty;
 mod console_process;
 #[cfg(windows)]
 mod control_pipe;
+mod identity;
 #[cfg(windows)]
 mod job;
 #[cfg(target_os = "linux")]
@@ -34,6 +35,7 @@ mod windows_command_line;
 pub use capture::{CapturedRun, Confinement, run_captured};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
+pub use identity::ProcessIdentity;
 #[cfg(target_os = "linux")]
 pub use landlock::{LandlockRuleset, write_ruleset};
 #[cfg(unix)]
