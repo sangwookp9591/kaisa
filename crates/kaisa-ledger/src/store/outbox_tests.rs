@@ -291,3 +291,74 @@ fn completing_an_unknown_intent_is_rejected() {
         "an effect that was never announced cannot be completed"
     );
 }
+
+/// The daemon stops abruptly: the store is dropped without any further call.
+fn the_daemon_crashes(store: EventStore) {
+    drop(store);
+}
+
+#[test]
+fn intents_left_pending_before_a_crash_are_listed_after_reopening() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+    the_daemon_crashes(store);
+
+    let recovered: EventStore = EventStore::open(&scratch.path()).expect("the ledger reopens");
+
+    assert_eq!(
+        intents_of(&recovered.pending_intents().expect("the outbox is readable")),
+        vec![create_worktree],
+        "after a crash Kaisa must know which effects may have started"
+    );
+}
+
+#[test]
+fn completed_intents_are_not_listed_after_reopening() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    let spawn_agent: Intent = intent_to_spawn_the_agent_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+    store
+        .record_intent(&spawn_agent)
+        .expect("recording succeeds");
+    store
+        .complete(&create_worktree.id, worktree_created_receipt())
+        .expect("completion succeeds");
+    the_daemon_crashes(store);
+
+    let recovered: EventStore = EventStore::open(&scratch.path()).expect("the ledger reopens");
+
+    assert_eq!(
+        intents_of(&recovered.pending_intents().expect("the outbox is readable")),
+        vec![spawn_agent],
+        "only effects without a receipt are reconciled on recovery"
+    );
+}
+
+#[test]
+fn the_ledger_chain_still_verifies_after_intents_were_recorded_and_completed() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut store: EventStore = an_open_empty_ledger(&scratch);
+    let create_worktree: Intent = intent_to_create_the_worktree_of_attempt_41a();
+    store
+        .record_intent(&create_worktree)
+        .expect("recording succeeds");
+    store
+        .complete(&create_worktree.id, worktree_created_receipt())
+        .expect("completion succeeds");
+    the_daemon_crashes(store);
+
+    let recovered: EventStore = EventStore::open(&scratch.path()).expect("the ledger reopens");
+
+    assert!(
+        recovered.verify().is_ok(),
+        "outbox writes go through the same hash chain as every other event"
+    );
+}
