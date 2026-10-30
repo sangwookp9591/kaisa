@@ -1,16 +1,17 @@
 # Kaisa
 
-**Run coding agents safely in parallel. You only review what has already passed verification.**
+**Run coding agents safely. You only see work that has already passed verification.**
 
 Kaisa is a lightweight control plane for coding agents such as Claude Code and Codex. It gives each
-agent its own isolated copy of your repository and keeps it inside a sandbox. It checks the result
-against your tests and an independent reviewer, and asks you only when a human decision is actually
-needed. When one provider runs out of quota, Kaisa hands the work to another one without losing the
-plan or the work.
+attempt its own copy of your repository and keeps the agent inside an OS sandbox. It checks the result
+against your tests and an independent reviewer, sends it back for revision when the review finds a
+blocking problem, and asks you only when a human decision is actually needed.
 
-> **Status: design stage.** Nothing is implemented yet. Everything below describes the planned
-> behaviour of v1. Performance and security properties will be published only after they have been
-> measured and tested on every supported platform.
+> **Status: milestones M0 and M1 are implemented** (safe single attempt, verified team). CI runs on
+> macOS, Linux and Windows for every commit. Some protections are still *reduced* on some platforms;
+> the [protection status](#protection-status) table says exactly which. Performance and security
+> properties are published only after they have been measured and tested on every supported
+> platform. Task-level progress lives in [`docs/tasks/`](docs/tasks/).
 
 ---
 
@@ -18,82 +19,107 @@ plan or the work.
 
 | Without Kaisa | With Kaisa |
 |---|---|
-| You babysit agents, switch branches and clean up terminals | Every task runs in its own copy, and cleanup happens on its own |
-| Agents ask for permission all the time, or you turn permissions off | Routine work never asks. Only real decisions do (publishing, new network access) |
+| You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
+| Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
 | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
-| When a provider's quota runs out, work stops | Another provider takes over planning or coding, and the work so far is kept |
-| Cost and progress are invisible until the end | Kaisa shows a live plan, current activity and cost at all times |
+| A single agent loses track of a long task | Planned tasks, a reviewer, bounded revisions and project memory carry the context |
+| Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
 
-## How it works (planned)
-
-There are three verbs.
+## What works today
 
 ```bash
-kaisa "fix the flaky date test"      # start a task (add --n 3 for several candidates)
-kaisa watch                          # see progress and anything that needs you
-kaisa review                         # approve a verified candidate
+kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
+kaisa --agent codex "fix the flaky test"  # Codex develops (observed), Claude Code reviews
+kaisa watch                               # attempts, state, tokens and cost
+kaisa agent add local --endpoint http://127.0.0.1:11434/v1 --model qwen=T0
+kaisa agent list                          # personal agents and model servers
+kaisa policy show                         # your personal policy
+kaisa policy set revision_limit 3         # change it (validated before it is saved)
 ```
 
-You can also stay inside your agent:
+A goal ends with one of these results, which scripts and CI can rely on:
 
-```text
-/kaisa add rate limiting to the API, 2 candidates
-```
+| Exit code | Meaning |
+|---|---|
+| `0` | verified: the candidate passed fresh checks and the review |
+| `3` | waiting for you: a person must decide, and Kaisa says why |
+| `4` | not delivered: no fresh passing evidence, or revisions ran out |
+| `64` | usage error |
 
-1. **Plan.** A planner proposes the steps. Small tasks skip this.
-2. **Run.** Each step runs in its own copy of the repository, inside an OS sandbox. Network access goes through
-   an allow-list.
-3. **Verify.** Kaisa freezes the result, runs your project's checks on a clean checkout, detects weakened tests,
-   and asks a different model to review it.
-4. **Review.** You see the evidence and exactly what approving will do, for example "open PR #318 to main". Then
-   you approve.
-5. **Clean up.** Work is preserved first and cleaned up afterwards. Almost everything can be undone, and Kaisa
-   tells you beforehand when something can't.
+### How a verified run works
 
-## Planned features
+1. **Recall.** The context pack carries the project profile, the impact set of the goal and up to
+   five relevant lessons from earlier verified runs, so a second session needs no re-explanation.
+2. **Develop.** The developer agent works in its own worktree. On macOS and Linux it is confined by the
+   OS sandbox; its file writes go through Kaisa's broker, which enforces the write set.
+3. **Freeze.** The result becomes an immutable candidate (commit and tree digest).
+4. **Check.** Your project's test command runs on a clean checkout of the candidate, in the sandbox,
+   with no agent involved. A candidate that changes its own check definitions needs a person.
+5. **First pass (optional).** If you registered a T0 local model, it reviews first. Its blocking
+   findings send the candidate back without spending the full review; its approval is only advisory.
+6. **Review.** A reviewer reads the frozen candidate and answers with a structured verdict.
+   A malformed verdict never counts as approval.
+7. **Gate.** Only a candidate with fresh passing evidence and an approving verdict is delivered.
+   Blocking findings go back to the developer as a revision, up to the policy's revision limit.
+8. **Learn.** A delivered run records a lesson, verified by digest, for later runs.
 
-- **Real execution and supervision.** Kaisa owns the agent processes on macOS, Linux and Windows. It never starts a
-  duplicate when the state of an agent is uncertain.
-- **Containment.** Each agent gets a sandbox and an egress allow-list, and its effects go through a broker. Humans
-  and agents hold separate authority: an agent can never approve its own work.
-- **Verification.** Checks run on immutable snapshots. Kaisa detects tampered tests. Every candidate is reviewed by
-  a different model, and the receipt is bound to your approval.
-- **Provider failover.** When a provider runs out of quota, planning and coding move between providers, for
-  example from Claude to GPT.
-- **Cost control.** Budgets work per run, user and team, and an optional gateway can enforce them.
-- **Teams and admins.** Policy packs are signed, and templates, approval delegation and an audit log are
-  included.
-- **Small and portable.** Kaisa ships as one core binary per platform. It needs no Node, Python or Electron
-  runtime.
-- **Languages.** The UI is available in Korean and English.
+Before any agent starts, Kaisa scans the repository's agent settings and stops if they would widen
+an agent's authority. Every run records the policy snapshot it ran under. A run interrupted by a
+crash is found and tidied on the next `kaisa` start; an attempt in an unknown state is never retried
+without proof.
+
+### Protection status
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Scripted and brokered agents confined | ✓ Seatbelt | ✓ Landlock | ✓ AppContainer |
+| Trusted checks confined | ✓ | ✓ | reduced (labelled) |
+| Claude Code confined | reduced until T16.0 | reduced until T16.0 | reduced until T16.0 |
+| Codex | observed (writes checked against the write set afterwards) | observed | observed |
+| Local model (first-pass review) | ✓ confined, loopback only | ✓ confined, loopback only | reduced (AppContainer has no loopback) |
+
+*Reduced* runs are always labelled in the output. `kaisa --confine-claude "<goal>"` tries a confined
+Claude Code run; the steps to verify it on a machine with a logged-in CLI are in
+[`docs/research/brokered-mode-spike.md`](docs/research/brokered-mode-spike.md#closing-a-row-t35).
+
+## Planned
+
+- `kaisa review` to approve a verified candidate and see exactly what approving will do.
+- Several candidates per goal (`--n 3`), provider failover (for example Claude to GPT when a quota runs
+  out), budgets per run, user and team.
+- A full-screen TUI and `kaisa console` in the browser; `/kaisa` from inside your agent.
+- Team policy packs, approval delegation and an audit log.
+- Korean and English UI.
 
 ## Platforms
 
-macOS, Linux and Windows are all first-class targets. Minimum OS versions for full protection are
-listed in the [architecture](docs/architecture.md#57-guard-policy-sandbox-and-egress). On older systems
-Kaisa runs in a clearly labelled partial-protection mode, and only after you approve it.
+macOS, Linux and Windows are all first-class targets and release blockers. Minimum OS versions for
+full protection are listed in the
+[architecture](docs/architecture.md#57-guard-policy-sandbox-and-egress).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [User flows](docs/user-flows.md) | Every way people will use Kaisa: 35 flows, failure cases and usability targets |
-| [Architecture](docs/architecture.md) | Engine design, security model, cross-platform matrix, milestones and decision record |
-| [Prior-art research](docs/research/prior-art-rea.md) | Static analysis of Orca, LearnHarness and ruflo with REA |
+| [PRD](docs/prd.md) | Problem, users and requirements |
+| [User flows](docs/user-flows.md) | Every way people use Kaisa: flows, failure cases and usability targets |
+| [Architecture](docs/architecture.md) | Engine design, security model, cross-platform matrix, milestones and decisions |
+| [Tasks](docs/tasks/) | Milestone breakdowns with the test behind each task: [M0](docs/tasks/M0.md), [M1](docs/tasks/M1.md) |
+| [Test conventions](docs/testing.md) | How tests are named and written, and the checks before every commit |
+| [Research](docs/research/) | Prior-art analysis of Orca, LearnHarness and ruflo, and platform spikes |
 | [Reviews](docs/reviews/) | Independent reviews of the design, with their resolutions |
 
 ## Building
 
-Kaisa is written in Rust (edition 2024; the toolchain is pinned in `rust-toolchain.toml`) and follows the
-[Google Rust style guide](https://google.github.io/styleguide/rustguide.html). Milestone M0 has just
-started. The workspace builds, but only `kaisa --version` and `kaisa --help` work so far.
+Kaisa is written in Rust (edition 2024; the toolchain is pinned in `rust-toolchain.toml`) and follows
+the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html). It ships as one
+binary, `kaisa`, with no Node, Python or Electron runtime.
 
 ```bash
-cargo build                         # build everything
-cargo test --workspace              # run the tests
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all --check
-cargo +nightly fmt --all -- --check --config imports_granularity=Module,group_imports=StdExternalCrate
+cargo build                  # build everything
+scripts/check.sh             # exactly what CI runs: rustfmt (stable and nightly), clippy, tests,
+                             # and Windows/Linux cross-checks
+scripts/check.sh --fix       # format first, then check
 ```
 
 CI runs the same checks on macOS, Linux and Windows, plus `cargo-deny` for licences and advisories.
@@ -102,11 +128,13 @@ CI runs the same checks on macOS, Linux and Windows, plus `cargo-deny` for licen
 
 - **Measured claims only.** No benchmark number appears here before CI has measured it.
 - **Ease of use first.** If a flow is hard to use, the architecture changes. The flow does not.
+- **Honest labels.** Anything that runs with less protection than designed says so in its output.
 - **Ideas, not code, from prior art.** Kaisa studies existing tools but does not copy their code.
 
 ## Name
 
-The name was simply chosen as a name. Kaisa is an independent project with no connection to any game, character or trademark.
+The name was simply chosen as a name. Kaisa is an independent project with no connection to any game,
+character or trademark.
 
 ## License
 
