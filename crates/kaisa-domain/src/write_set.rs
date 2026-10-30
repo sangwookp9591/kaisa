@@ -25,6 +25,13 @@ impl WriteSet {
         &self.entries
     }
 
+    /// True if a Task owning this write set may change `path`: the path is one of the entries
+    /// or lies below one. The broker refuses every other write (architecture §5.2).
+    #[must_use]
+    pub fn permits(&self, path: &RepoPath) -> bool {
+        self.entries.iter().any(|entry| is_within(path, entry))
+    }
+
     /// True if some path could be changed by both write sets.
     #[must_use]
     pub fn overlaps(&self, other: &WriteSet) -> bool {
@@ -38,7 +45,7 @@ impl WriteSet {
 }
 
 /// True if `path` is `ancestor` itself or lies below it, comparing whole segments.
-pub(crate) fn is_within(path: &RepoPath, ancestor: &RepoPath) -> bool {
+fn is_within(path: &RepoPath, ancestor: &RepoPath) -> bool {
     let mut below = path.segments();
     ancestor
         .segments()
@@ -110,6 +117,26 @@ mod tests {
         assert!(
             !read_only_review.overlaps(&any_change),
             "a task that writes nothing never blocks a writer"
+        );
+    }
+
+    #[test]
+    fn a_path_inside_the_write_set_is_permitted() {
+        let session_fix: WriteSet = a_task_owning(&["src/auth"]);
+
+        assert!(
+            session_fix.permits(&path("src/auth/session.rs")),
+            "a file below an owned directory belongs to the task"
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_write_set_is_refused() {
+        let session_fix: WriteSet = a_task_owning(&["src/auth"]);
+
+        assert!(
+            !session_fix.permits(&path("src/billing/invoice.rs")),
+            "a write outside the write set becomes a question, never a silent change"
         );
     }
 }
