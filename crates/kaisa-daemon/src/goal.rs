@@ -59,6 +59,8 @@ pub struct GoalRequest<'request> {
     pub state_directory: &'request Path,
     /// The paths the attempt may change.
     pub write_set: &'request WriteSet,
+    /// Who does the work: it decides the attempt's tools and sandbox.
+    pub role: Role,
     /// How to start the agent.
     pub launch: AgentLauncher<'request>,
     /// The `kaisa` executable the agent's MCP config runs as its bridge.
@@ -284,7 +286,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     BridgeConfig {
         worktree: worktree.path().to_owned(),
         write_set: request.write_set.clone(),
-        role: Role::Developer,
+        role: request.role,
         scratch: None,
         broker_port: None,
     }

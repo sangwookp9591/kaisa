@@ -124,6 +124,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
             base: &base,
             state_directory: request.state_directory,
             write_set: &task.write_set,
+            role: task.role,
             launch: request.launch,
             kaisa_executable: request.kaisa_executable,
             confine_agent: request.confine_agent,

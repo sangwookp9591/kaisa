@@ -9,6 +9,7 @@
 //! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
 //! [--try-direct-write <path relative to its working directory>]
 //! (or `--fake-write-next <path prefix>`)
+//! (or `--fake-review-require <path>`: act as a reviewer that approves only if the path exists)
 //! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [--crash-after-write]
 //! [other flags]`
 //!
@@ -56,6 +57,45 @@ fn proxy_status_for(host: &str) -> Result<String, String> {
 /// How long a hanging agent waits: far longer than any test runs.
 const HANG: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The line of a review pack that names the candidate's tree.
+const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
+
+/// Reviews the candidate in the working directory: approves if `required` exists there, else
+/// reports one blocking finding. The verdict is the last line of standard output, as a real
+/// reviewer is asked to give it.
+fn review(required: &str) -> Result<(), String> {
+    let mut first_line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut first_line)
+        .map_err(|error| error.to_string())?;
+    let first: Value = serde_json::from_str(&first_line).map_err(|error| error.to_string())?;
+    let pack: &str = first
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tree: &str = pack
+        .lines()
+        .find_map(|line| {
+            line.trim_start_matches("> ")
+                .strip_prefix(CANDIDATE_TREE_LABEL)
+        })
+        .ok_or("the review pack names no candidate tree")?
+        .trim();
+    let approve: bool = std::path::Path::new(required).exists();
+    let findings: Value = if approve {
+        json!([])
+    } else {
+        json!([{"severity": "blocking", "path": required, "line": null,
+                "message": format!("{required} is missing")}])
+    };
+    println!(
+        "{}",
+        json!({"candidate_tree": tree, "approve": approve, "findings": findings})
+    );
+    Ok(())
+}
+
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
 }
@@ -63,6 +103,9 @@ fn flag_present(args: &[String], name: &str) -> bool {
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
+    if let Some(required) = flag(&args, "--fake-review-require") {
+        return review(&required);
+    }
     // `--fake-write-next src/step` writes the first of src/step-1.md, src/step-2.md, … that its
     // worktree (its working directory) does not have yet, so a mission's later task shows it
     // started from the earlier task's work.

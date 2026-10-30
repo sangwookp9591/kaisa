@@ -106,6 +106,7 @@ impl GoalCommand {
             base: "HEAD",
             state_directory: &state,
             write_set: &write_set,
+            role: kaisa_domain::Role::Developer,
             launch: &launch,
             kaisa_executable: &kaisa,
             // Claude Code needs the network; until its confined run is verified on every OS
