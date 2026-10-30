@@ -12,6 +12,7 @@ use crate::inventory::Inventory;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreservationReceipt {
     covered: BTreeSet<String>,
+    commit: Option<String>,
 }
 
 impl PreservationReceipt {
@@ -20,7 +21,23 @@ impl PreservationReceipt {
     pub fn covering(paths: &[&str]) -> Self {
         Self {
             covered: paths.iter().map(|path| (*path).to_owned()).collect(),
+            commit: None,
         }
+    }
+
+    /// A receipt for `paths` preserved in the WIP commit `commit`.
+    #[must_use]
+    pub fn committed(commit: &str, paths: &[&str]) -> Self {
+        Self {
+            commit: Some(commit.to_owned()),
+            ..Self::covering(paths)
+        }
+    }
+
+    /// The WIP commit holding the preserved work, if any was needed.
+    #[must_use]
+    pub fn commit(&self) -> Option<&str> {
+        self.commit.as_deref()
     }
 
     /// True when `path` is covered by this receipt.

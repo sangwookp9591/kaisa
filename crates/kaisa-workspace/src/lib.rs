@@ -4,6 +4,7 @@
 
 mod git;
 mod inventory;
+mod preserve;
 mod receipt;
 mod source;
 mod status;
@@ -13,6 +14,7 @@ mod worktree;
 
 pub use git::GitError;
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
+pub use preserve::preserve_as_commit;
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
