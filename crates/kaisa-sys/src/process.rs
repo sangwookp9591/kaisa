@@ -49,10 +49,7 @@ impl OwnedProcess {
     ///
     /// Returns the operating system's error if the program cannot be started.
     pub fn spawn(spec: &ProcessSpec) -> io::Result<Self> {
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(&spec.working_directory);
+        let mut command: Command = command_for(spec);
         #[cfg(unix)]
         {
             // The process leads a new process group, so everything it starts can be ended
@@ -69,6 +66,14 @@ impl OwnedProcess {
         }
         let child: Child = command.spawn()?;
         Self::adopt(child)
+    }
+
+    /// Starts a command whose stdio and session were already prepared by the caller, such as
+    /// an agent attached to a terminal. The caller is responsible for making the child lead
+    /// its own process group, so that [`kill_tree`](Self::kill_tree) reaches its descendants.
+    #[cfg(unix)]
+    pub(crate) fn spawn_prepared(mut command: Command) -> io::Result<Self> {
+        Self::adopt(command.spawn()?)
     }
 
     #[cfg(not(windows))]
@@ -164,6 +169,15 @@ impl OwnedProcess {
     }
 }
 
+/// A command that runs `spec` without a shell.
+pub(crate) fn command_for(spec: &ProcessSpec) -> Command {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .current_dir(&spec.working_directory);
+    command
+}
+
 #[cfg(all(target_os = "linux", test))]
 impl OwnedProcess {
     /// True when the process is held through a pidfd.
@@ -209,13 +223,16 @@ mod unix {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
 
     use super::ProcessSpec;
 
     /// How long a "long-running" test process would run if nobody ended it, in seconds.
     pub(crate) const LONG_RUNNING_SECONDS: u32 = 30;
 
-    fn shell(command: &str) -> ProcessSpec {
+    /// `command` run by the platform shell (`sh -c` or `cmd /C`).
+    pub(crate) fn shell(command: &str) -> ProcessSpec {
         let (program, args): (&str, Vec<String>) = if cfg!(windows) {
             ("cmd", vec!["/C".to_owned(), command.to_owned()])
         } else {
@@ -256,6 +273,60 @@ pub(crate) mod test_support {
         shell(&format!(
             "start /B ping -n {LONG_RUNNING_SECONDS} 127.0.0.1 > nul & ping -n {LONG_RUNNING_SECONDS} 127.0.0.1 > nul"
         ))
+    }
+
+    /// How long a test waits for a pid file or for a process to disappear.
+    #[cfg(unix)]
+    const PATIENCE: Duration = Duration::from_secs(10);
+    /// How often it checks while waiting.
+    #[cfg(unix)]
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+    /// A pid file path no other test uses.
+    #[cfg(unix)]
+    pub(crate) fn a_fresh_pid_file() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kaisa-sys-grandchild-{}-{:?}.pid",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// The pid a shell wrote to `pid_file`, once it appears.
+    #[cfg(unix)]
+    pub(crate) fn wait_for_pid_in(pid_file: &std::path::Path) -> libc::pid_t {
+        let deadline: Instant = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if let Some(pid) = std::fs::read_to_string(pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        panic!("the shell never reported its background child");
+    }
+
+    #[cfg(unix)]
+    fn is_alive(pid: libc::pid_t) -> bool {
+        #[allow(unsafe_code)]
+        // SAFETY: signal 0 only checks whether the process exists; no memory is touched.
+        let result: libc::c_int = unsafe { libc::kill(pid, 0) };
+        result == 0
+    }
+
+    /// True once `pid` no longer exists.
+    #[cfg(unix)]
+    pub(crate) fn disappears_within_patience(pid: libc::pid_t) -> bool {
+        let deadline: Instant = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if !is_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        false
     }
 
     /// A process that keeps running long enough for a test to end it.
@@ -337,55 +408,12 @@ mod tests {
     #[cfg(unix)]
     mod unix_tree {
         use std::path::PathBuf;
-        use std::time::{Duration, Instant};
 
         use super::super::OwnedProcess;
-        use super::super::test_support::a_process_that_starts_a_background_child;
-
-        /// How long the test waits for a pid file or for a process to disappear.
-        const PATIENCE: Duration = Duration::from_secs(10);
-        /// How often it checks while waiting.
-        const POLL_INTERVAL: Duration = Duration::from_millis(20);
-
-        fn a_fresh_pid_file() -> PathBuf {
-            std::env::temp_dir().join(format!(
-                "kaisa-sys-grandchild-{}-{:?}.pid",
-                std::process::id(),
-                std::thread::current().id()
-            ))
-        }
-
-        fn wait_for_pid_in(pid_file: &std::path::Path) -> libc::pid_t {
-            let deadline: Instant = Instant::now() + PATIENCE;
-            while Instant::now() < deadline {
-                if let Some(pid) = std::fs::read_to_string(pid_file)
-                    .ok()
-                    .and_then(|text| text.trim().parse().ok())
-                {
-                    return pid;
-                }
-                std::thread::sleep(POLL_INTERVAL);
-            }
-            panic!("the shell never reported its background child");
-        }
-
-        fn is_alive(pid: libc::pid_t) -> bool {
-            #[allow(unsafe_code)]
-            // SAFETY: signal 0 only checks whether the process exists; no memory is touched.
-            let result: libc::c_int = unsafe { libc::kill(pid, 0) };
-            result == 0
-        }
-
-        fn disappears_within_patience(pid: libc::pid_t) -> bool {
-            let deadline: Instant = Instant::now() + PATIENCE;
-            while Instant::now() < deadline {
-                if !is_alive(pid) {
-                    return true;
-                }
-                std::thread::sleep(POLL_INTERVAL);
-            }
-            false
-        }
+        use super::super::test_support::{
+            a_fresh_pid_file, a_process_that_starts_a_background_child, disappears_within_patience,
+            wait_for_pid_in,
+        };
 
         #[test]
         fn killing_the_tree_also_ends_a_grandchild() {
