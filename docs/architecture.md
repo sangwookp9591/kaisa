@@ -463,11 +463,23 @@ Any other tool comes from the catalog and is policy-gated.
 A new agent is a catalog row plus a passing conformance run, never new engine code. Hermes and other
 agents join the same way as Claude Code and Codex did.
 
-**User MCP servers.** A project or policy pack may list MCP servers (GitHub, a database, a browser).
-Agents never connect to them directly: the broker starts or connects to each server, exposes its
-tools to the attempt under the role's tool policy, injects credentials from the keychain so the
-agent never sees them, and records every call through the same chokepoint as built-in tools. A
-server that is not listed does not exist for the agent.
+**User MCP servers (v0.6.1, review B2).** A project or policy pack may list MCP servers (GitHub, a
+database, a browser). They are a way to reach the outside world, so they get the same boundaries as
+agents:
+- **Isolation.** Each server runs under its own sandbox profile and egress allow-list, with only the
+  credentials its row names, injected from the keychain by Kaisa; the agent never sees them.
+- **Pinning.** A server row pins its version and the digest of its tool list and schemas. A server
+  that advertises a different tool set is not started until an admin re-approves it.
+- **Effect classes.** Every tool is classified in its row: `read`, `write-local` (inside the attempt's
+  write set) or `external` (changes something outside Kaisa: a database row, a ticket, a deployment, a
+  browser click on a live site). A tool without a class is refused.
+- **External effects go through the outbox.** An `external` call is an outbox effect with an effect
+  preview (§5.12) and, where policy says so, a Decision before it runs; it cannot be used to deliver
+  around the delivery gate (§5.8). Effects that cannot be probed after a crash open a Gate (§5.2).
+- **Untrusted output.** Tool results and resources are untrusted data, size- and time-limited.
+  Sampling, elicitation and calls from one server to another are off unless the row enables them.
+- A server that is not listed does not exist for the agent, and every call passes the same
+  chokepoint and receipt as built-in tools.
 
 **Compaction snapshot.** This is ruflo ADR-505. Where the agent exposes a pre-compaction hook, the keeper keeps
 a bounded snapshot of the context about to be compacted. That snapshot feeds a re-injection after compaction and
@@ -1355,7 +1367,7 @@ usability targets (§10) are part of every milestone's exit criteria.
 | 0032 | Router on the spawn path: deterministic grader, per-category priors from verified outcomes, escalation by model before effort | Proposed |
 | 0033 | Local embeddings and vector search in Rust by default; Mojo only as an optional macOS/Linux accelerator, because Windows parity is a release blocker | Proposed |
 | 0034 | Local web console: loopback only, started by `kaisa console`, per-launch token, read-only by default | Proposed |
-| 0035 | Agent catalog kinds (`cli-agent`, `openai-compatible`); user MCP servers only through the broker | Proposed |
+| 0035 | Agent catalog kinds (`cli-agent`, `openai-compatible`); user MCP servers only through the broker, sandboxed, pinned, with effect classes and outbox-governed external effects | Proposed |
 
 ---
 
