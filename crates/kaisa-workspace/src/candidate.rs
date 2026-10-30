@@ -87,6 +87,41 @@ pub fn changed_check_definitions(
         .collect())
 }
 
+/// The paths changed between `base` and `candidate`, sorted and deduplicated.
+///
+/// Includes deletions. Renames are compared as a deletion and an addition, naming both paths.
+///
+/// # Errors
+///
+/// Returns [`GitError`] if git cannot compare the two.
+pub fn changed_paths(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<Vec<String>, GitError> {
+    // Unlike git_text, preserve leading whitespace in the first path as well as NULs.
+    let names: Vec<u8> = run_git(
+        repository,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            base,
+            &candidate.commit,
+            "--",
+        ],
+    )?;
+    let mut changed: Vec<String> = String::from_utf8_lossy(&names)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
+}
+
 /// A clean, detached checkout of a candidate for trusted checks (T21b): nothing the agent left
 /// in its own worktree is here, only what the candidate commit holds.
 #[derive(Debug)]
@@ -142,7 +177,9 @@ impl Drop for CandidateCheckout {
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, CandidateCheckout, changed_check_definitions, freeze_candidate};
+    use super::{
+        Candidate, CandidateCheckout, changed_check_definitions, changed_paths, freeze_candidate,
+    };
     use crate::test_support::{TemporaryRepository, a_repository_with_one_commit_on_main};
 
     #[test]
@@ -239,6 +276,129 @@ mod tests {
             changed,
             vec!["package.json".to_owned()],
             "a changed test script is named; ordinary source changes are not"
+        );
+    }
+
+    /// The original source path before a rename.
+    const ORIGINAL_SOURCE: &str = "src/auth/session.rs";
+    /// A changed source path.
+    const CHANGED_SOURCE: &str = "src/billing/invoice.rs";
+    /// Another changed path, earlier in sorted order.
+    const CHANGED_DOCUMENT: &str = "docs/billing.md";
+    /// A path whose leading and embedded newlines must survive git's output.
+    #[cfg(unix)]
+    const NEWLINE_PATH: &str = "\noutside\n.txt";
+    /// Identity used only to commit fixture deletions and renames.
+    const FIXTURE_IDENTITY: [&str; 4] = [
+        "-c",
+        "user.name=Kaisa Test",
+        "-c",
+        "user.email=kaisa-test@example.invalid",
+    ];
+
+    fn commit_tracked_changes(repository: &TemporaryRepository) {
+        let mut args: Vec<&str> = FIXTURE_IDENTITY.to_vec();
+        args.extend(["commit", "--quiet", "-am", "preserve tracked changes"]);
+        super::run_git(repository.path(), &args).expect("fixture changes are committed");
+    }
+
+    #[test]
+    fn a_changed_path_is_listed() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let base: Candidate = freeze_candidate(repository.path(), "HEAD").expect("the base exists");
+        repository.commit_file(CHANGED_SOURCE, "new source\n", "change source");
+        repository.commit_file(CHANGED_DOCUMENT, "new notes\n", "change document");
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_paths(repository.path(), &base.commit, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec![CHANGED_DOCUMENT.to_owned(), CHANGED_SOURCE.to_owned()],
+            "every changed path is named once in sorted order"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_path_is_not_listed() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        repository.commit_file(ORIGINAL_SOURCE, "existing source\n", "add unchanged source");
+        let base: Candidate = freeze_candidate(repository.path(), "HEAD").expect("the base exists");
+        repository.commit_file(CHANGED_SOURCE, "new source\n", "add changed source");
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_paths(repository.path(), &base.commit, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec![CHANGED_SOURCE.to_owned()],
+            "only the changed path is listed; the existing source remains unchanged"
+        );
+    }
+
+    #[test]
+    fn a_deleted_path_is_listed() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        repository.commit_file(CHANGED_SOURCE, "existing source\n", "add source");
+        let base: Candidate = freeze_candidate(repository.path(), "HEAD").expect("the base exists");
+        std::fs::remove_file(repository.path().join(CHANGED_SOURCE)).expect("fixture file exists");
+        commit_tracked_changes(&repository);
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_paths(repository.path(), &base.commit, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec![CHANGED_SOURCE.to_owned()],
+            "a deletion still changes the deleted path"
+        );
+    }
+
+    #[test]
+    fn a_rename_lists_both_the_old_and_the_new_path() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        repository.commit_file(ORIGINAL_SOURCE, "existing source\n", "add original source");
+        let base: Candidate = freeze_candidate(repository.path(), "HEAD").expect("the base exists");
+        let destination = repository.path().join(CHANGED_SOURCE);
+        std::fs::create_dir_all(
+            destination
+                .parent()
+                .expect("the destination source has a parent"),
+        )
+        .expect("fixture is writable");
+        super::run_git(repository.path(), &["mv", ORIGINAL_SOURCE, CHANGED_SOURCE])
+            .expect("fixture source is renamed");
+        commit_tracked_changes(&repository);
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_paths(repository.path(), &base.commit, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec![ORIGINAL_SOURCE.to_owned(), CHANGED_SOURCE.to_owned()],
+            "a rename changes both the original and destination paths in sorted order"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_with_a_newline_is_reported_exactly() {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let base: Candidate = freeze_candidate(repository.path(), "HEAD").expect("the base exists");
+        repository.commit_file(NEWLINE_PATH, "new source\n", "add unusual path");
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+
+        let changed: Vec<String> =
+            changed_paths(repository.path(), &base.commit, &candidate).expect("compared");
+
+        assert_eq!(
+            changed,
+            vec![NEWLINE_PATH.to_owned()],
+            "NUL-delimited paths preserve leading and embedded newlines exactly"
         );
     }
 

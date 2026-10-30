@@ -15,7 +15,9 @@ mod status;
 mod test_support;
 mod worktree;
 
-pub use candidate::{Candidate, CandidateCheckout, changed_check_definitions, freeze_candidate};
+pub use candidate::{
+    Candidate, CandidateCheckout, changed_check_definitions, changed_paths, freeze_candidate,
+};
 pub use git::GitError;
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
