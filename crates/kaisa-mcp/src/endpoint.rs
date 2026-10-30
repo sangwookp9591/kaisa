@@ -1,5 +1,9 @@
-//! The attempt's broker endpoint: a Unix socket in the private attempt directory, served by a
-//! process outside the agent's sandbox (architecture §4, §5.6).
+//! The attempt's broker endpoint: a Unix socket private to the user, served by a process outside
+//! the agent's sandbox (architecture §4, §5.6).
+//!
+//! The socket sits in the attempt directory when that path fits the OS limit on socket paths;
+//! otherwise in a private per-user runtime directory under the temporary directory. Either way
+//! the attempt directory records where it is, in `broker.endpoint`.
 //!
 //! A connection must first send one line, `{"token": "<capability>"}`. Only a caller holding the
 //! attempt's token is served; anyone else gets one refusal line and the connection is closed.
@@ -14,8 +18,50 @@ use serde_json::{Value, json};
 use crate::attempt::{BridgeConfig, attempt_server};
 use crate::token::AttemptToken;
 
-/// The socket file in an attempt directory.
+/// The socket file name when it fits in the attempt directory.
 pub const BROKER_SOCKET: &str = "broker.sock";
+
+/// The file in an attempt directory recording where its broker socket is.
+pub const BROKER_ENDPOINT_FILE: &str = "broker.endpoint";
+
+/// Longest socket path used, in bytes: below the smallest OS limit (104 on macOS).
+const SOCKET_PATH_LIMIT: usize = 100;
+
+/// Where the attempt's socket goes, creating a private runtime directory if the attempt
+/// directory's path is too long.
+fn socket_path(attempt_directory: &Path) -> io::Result<PathBuf> {
+    let beside: PathBuf = attempt_directory.join(BROKER_SOCKET);
+    if beside.as_os_str().len() < SOCKET_PATH_LIMIT {
+        return Ok(beside);
+    }
+    let own_uid: u32 = kaisa_sys::current_uid();
+    let runtime: PathBuf = std::env::temp_dir().join(format!("kaisa-{own_uid}"));
+    kaisa_sys::ensure_private_directory(&runtime)?;
+    let metadata = std::fs::symlink_metadata(&runtime)?;
+    if !metadata.is_dir() || std::os::unix::fs::MetadataExt::uid(&metadata) != own_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not a private directory of this user",
+                runtime.display()
+            ),
+        ));
+    }
+    let name: String = blake3::hash(attempt_directory.as_os_str().as_encoded_bytes()).to_hex()
+        [..SOCKET_NAME_DIGITS]
+        .to_owned();
+    Ok(runtime.join(format!("{name}.sock")))
+}
+
+/// Hex digits of the attempt-path digest naming a runtime socket.
+const SOCKET_NAME_DIGITS: usize = 24;
+
+/// The socket of the attempt in `attempt_directory`, as its broker recorded it.
+fn recorded_socket(attempt_directory: &Path) -> io::Result<PathBuf> {
+    Ok(PathBuf::from(
+        std::fs::read_to_string(attempt_directory.join(BROKER_ENDPOINT_FILE))?.trim(),
+    ))
+}
 
 /// The longest hello line accepted, in bytes; a token line is far shorter.
 const HELLO_LIMIT: u64 = 1024;
@@ -30,16 +76,22 @@ pub struct BrokerEndpoint {
 }
 
 impl BrokerEndpoint {
-    /// Binds the broker socket in `attempt_directory`, whose bridge config and token must
-    /// already be written.
+    /// Binds the broker socket of the attempt in `attempt_directory`, whose bridge config and
+    /// token must already be written, and records where it is.
     ///
     /// # Errors
     ///
     /// Returns the I/O error if the config or token cannot be read or the socket cannot be bound.
     pub fn bind(attempt_directory: &Path) -> io::Result<Self> {
-        let path: PathBuf = attempt_directory.join(BROKER_SOCKET);
+        let path: PathBuf = socket_path(attempt_directory)?;
+        let _ = std::fs::remove_file(&path);
+        let listener: UnixListener = UnixListener::bind(&path)?;
+        std::fs::write(
+            attempt_directory.join(BROKER_ENDPOINT_FILE),
+            path.as_os_str().as_encoded_bytes(),
+        )?;
         Ok(Self {
-            listener: UnixListener::bind(&path)?,
+            listener,
             config: BridgeConfig::load(attempt_directory)?,
             token: AttemptToken::load(attempt_directory)?,
             path,
@@ -66,11 +118,12 @@ impl BrokerEndpoint {
             .unwrap_or_default();
         let mut writer: UnixStream = stream;
         if !self.token.admits(&presented) {
-            writeln!(
+            // Best effort: a refused caller may already have hung up.
+            let _ = writeln!(
                 writer,
                 "{}",
                 json!({"error": "this broker serves another attempt"})
-            )?;
+            );
             return Ok(());
         }
         attempt_server(&self.config)?
@@ -92,7 +145,7 @@ pub fn relay(
     output: &mut dyn Write,
 ) -> io::Result<()> {
     let token: AttemptToken = AttemptToken::load(attempt_directory)?;
-    let mut stream: UnixStream = UnixStream::connect(attempt_directory.join(BROKER_SOCKET))?;
+    let mut stream: UnixStream = UnixStream::connect(recorded_socket(attempt_directory)?)?;
     writeln!(stream, "{}", json!({"token": token.as_str()}))?;
     let mut upstream: UnixStream = stream.try_clone()?;
     let forward = std::thread::spawn(move || -> io::Result<()> {
@@ -103,6 +156,14 @@ pub fn relay(
     forward
         .join()
         .map_err(|_| io::Error::other("the relay's forwarding thread panicked"))?
+}
+
+impl BrokerEndpoint {
+    /// Where the socket is bound.
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl Drop for BrokerEndpoint {
@@ -120,7 +181,7 @@ mod tests {
     use kaisa_domain::{RepoPath, Role, WriteSet};
     use serde_json::json;
 
-    use super::{BROKER_SOCKET, BrokerEndpoint, relay};
+    use super::{BROKER_ENDPOINT_FILE, BROKER_SOCKET, BrokerEndpoint, recorded_socket, relay};
     use crate::attempt::BridgeConfig;
     use crate::token::AttemptToken;
 
@@ -214,7 +275,10 @@ mod tests {
         let attempt = Attempt::new("forged");
         let broker = serve_one_in_background(&attempt);
 
-        let reply: String = a_bridge_writes(&attempt.directory().join(BROKER_SOCKET), FORGED_TOKEN);
+        let reply: String = a_bridge_writes(
+            &recorded_socket(&attempt.directory()).expect("recorded"),
+            FORGED_TOKEN,
+        );
         broker.join().expect("the broker thread finishes");
 
         assert!(
@@ -226,9 +290,14 @@ mod tests {
     #[test]
     fn the_relay_performs_no_file_writes_itself() {
         let attempt = Attempt::new("relay");
+        let socket: PathBuf = attempt.directory().join(BROKER_SOCKET);
         let listener =
-            std::os::unix::net::UnixListener::bind(attempt.directory().join(BROKER_SOCKET))
-                .expect("a stand-in broker binds");
+            std::os::unix::net::UnixListener::bind(&socket).expect("a stand-in broker binds");
+        std::fs::write(
+            attempt.directory().join(BROKER_ENDPOINT_FILE),
+            socket.as_os_str().as_encoded_bytes(),
+        )
+        .expect("the stand-in records its socket");
         let stand_in = std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("the relay connects");
             let received: Vec<String> = BufReader::new(stream.try_clone().expect("cloned"))
@@ -268,6 +337,28 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&agent_sees).contains("\"result\""),
             "the broker's reply reaches the agent"
+        );
+    }
+
+    #[test]
+    fn an_attempt_directory_too_deep_for_a_socket_path_still_gets_a_private_broker() {
+        let attempt = Attempt::new("deep");
+        let deep: PathBuf = attempt
+            .directory()
+            .join("x".repeat(super::SOCKET_PATH_LIMIT));
+        std::fs::create_dir_all(&deep).expect("writable");
+        for file in [crate::attempt::BRIDGE_CONFIG_FILE, crate::token::TOKEN_FILE] {
+            std::fs::copy(attempt.directory().join(file), deep.join(file)).expect("copied");
+        }
+
+        let endpoint = BrokerEndpoint::bind(&deep).expect("bound despite the long path");
+        let socket: PathBuf = endpoint.socket().to_owned();
+
+        assert!(
+            socket.as_os_str().len() < super::SOCKET_PATH_LIMIT
+                && recorded_socket(&deep).expect("recorded") == socket,
+            "the socket moved to a short private path and the attempt records it: {}",
+            socket.display()
         );
     }
 }

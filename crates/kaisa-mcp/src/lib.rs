@@ -13,10 +13,10 @@ mod server;
 mod token;
 mod tools;
 
-pub use attempt::{BRIDGE_CONFIG_FILE, BridgeConfig, serve_attempt};
+pub use attempt::{BRIDGE_CONFIG_FILE, BridgeConfig, bridge, serve_attempt};
 pub use broker::{ExecSandbox, FileBroker};
 #[cfg(unix)]
-pub use endpoint::{BROKER_SOCKET, BrokerEndpoint, relay};
+pub use endpoint::{BROKER_ENDPOINT_FILE, BROKER_SOCKET, BrokerEndpoint, relay};
 pub use server::{McpServer, ToolHandler, ToolOutcome};
 pub use token::{AttemptToken, TOKEN_FILE};
 pub use tools::{ToolDescription, tools_for};

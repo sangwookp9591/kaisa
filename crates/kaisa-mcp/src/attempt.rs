@@ -148,6 +148,32 @@ pub fn serve_attempt(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
 }
 
+/// What `kaisa mcp --attempt` does: relay to the attempt's broker when one is listening outside
+/// the sandbox, otherwise serve the attempt's tools in this process (Windows until T15.5s).
+///
+/// # Errors
+///
+/// Returns the I/O error from relaying or serving.
+pub fn bridge(attempt_directory: &Path, output: &mut dyn Write) -> io::Result<()> {
+    bridge_from(attempt_directory, io::stdin(), output)
+}
+
+/// [`bridge`] with its input given.
+fn bridge_from(
+    attempt_directory: &Path,
+    input: impl io::Read + Send + 'static,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    if attempt_directory
+        .join(crate::endpoint::BROKER_ENDPOINT_FILE)
+        .exists()
+    {
+        return crate::endpoint::relay(attempt_directory, input, output);
+    }
+    serve_attempt(attempt_directory, io::BufReader::new(input), output)
+}
+
 /// The MCP server holding the attempt's tools and its broker.
 pub(crate) fn attempt_server(config: &BridgeConfig) -> io::Result<McpServer<FileBroker>> {
     let mut broker: FileBroker = FileBroker::new(&config.worktree, config.write_set.clone())?;
@@ -167,7 +193,7 @@ mod tests {
     use kaisa_domain::{RepoPath, Role, WriteSet};
     use serde_json::json;
 
-    use super::{BridgeConfig, serve_attempt};
+    use super::{BridgeConfig, bridge_from, serve_attempt};
 
     #[test]
     fn the_bridge_command_serves_the_attempts_tools() {
@@ -204,6 +230,50 @@ mod tests {
         assert!(
             written,
             "the agent's MCP config starts this bridge, and its tools act on the attempt's worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_whose_broker_is_gone_fails_instead_of_acting_itself() {
+        let base: PathBuf =
+            std::env::temp_dir().join(format!("kaisa-bridge-gone-{}", std::process::id()));
+        let worktree: PathBuf = base.join("worktree");
+        let attempt: PathBuf = base.join("attempt");
+        for directory in [worktree.join("src/auth"), attempt.clone()] {
+            std::fs::create_dir_all(directory).expect("writable temp dir");
+        }
+        BridgeConfig {
+            worktree: worktree.clone(),
+            write_set: WriteSet::new(vec![RepoPath::try_new("src/auth").expect("valid")]),
+            role: Role::Developer,
+            scratch: None,
+            broker_port: None,
+        }
+        .write_to(&attempt)
+        .expect("the config is written");
+        crate::token::AttemptToken::issue(&attempt).expect("issued");
+        std::fs::write(
+            attempt.join(crate::endpoint::BROKER_ENDPOINT_FILE),
+            base.join("no-broker-here.sock")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .expect("recorded");
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "fs_write", "arguments": {"path": "src/auth/notes.md", "content": "x"}}});
+
+        let outcome = bridge_from(
+            &attempt,
+            std::io::Cursor::new(format!("{request}\n")),
+            &mut Vec::new(),
+        );
+        let written: bool = worktree.join("src/auth/notes.md").exists();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            outcome.is_err() && !written,
+            "an attempt with a broker never falls back to serving its tools in the agent's process"
         );
     }
 }

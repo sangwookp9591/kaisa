@@ -250,6 +250,15 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     }
     .write_to(&attempt_directory)
     .map_err(at("writing the bridge config"))?;
+    kaisa_mcp::AttemptToken::issue(&attempt_directory).map_err(at("issuing the attempt token"))?;
+    // The broker runs here, outside the agent's sandbox; the agent's bridge only relays to it.
+    #[cfg(unix)]
+    let broker = {
+        let endpoint = kaisa_mcp::BrokerEndpoint::bind(&attempt_directory)
+            .map_err(at("binding the attempt's broker"))?;
+        let socket: PathBuf = endpoint.socket().to_owned();
+        (std::thread::spawn(move || endpoint.serve_one()), socket)
+    };
     let kaisa: &Path = request.kaisa_executable;
     let mcp_config: PathBuf = attempt_directory.join("mcp.json");
     std::fs::write(
@@ -280,6 +289,8 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .map_err(at("running the agent"))?;
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)
         .map_err(at("saving the transcript"))?;
+    #[cfg(unix)]
+    finish_broker(broker)?;
 
     let status: ExitStatus = match finished.exit {
         Some(ProcessExit::Code(code)) => ExitStatus::Code(code),
@@ -321,6 +332,23 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         kept_back,
         context_pack: digest.as_str().to_owned(),
     })
+}
+
+/// Ends the broker thread: if the agent never connected, a throwaway connection releases it.
+#[cfg(unix)]
+fn finish_broker(
+    (broker, socket): (std::thread::JoinHandle<std::io::Result<()>>, PathBuf),
+) -> Result<(), GoalError> {
+    if !broker.is_finished() {
+        let _ = std::os::unix::net::UnixStream::connect(socket);
+    }
+    broker
+        .join()
+        .map_err(|_| GoalError {
+            step: "serving the broker",
+            detail: "the broker thread panicked".to_owned(),
+        })?
+        .map_err(at("serving the broker"))
 }
 
 /// The default M0 write set: every top-level entry of the repository except `.git`.

@@ -65,8 +65,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         }
         Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
             (Some("--attempt"), Some(directory)) => {
-                let stdin = io::stdin();
-                match kaisa_mcp::serve_attempt(std::path::Path::new(directory), stdin.lock(), out) {
+                match kaisa_mcp::bridge(std::path::Path::new(directory), out) {
                     Ok(()) => Ok(EXIT_SUCCESS),
                     Err(error) => {
                         writeln!(err, "kaisa mcp: {error}")?;
