@@ -199,6 +199,9 @@ dependencies = [
 [[package]]
 name = "kaisa-supervisor"
 version = "0.0.0"
+dependencies = [
+ "kaisa-domain",
+]
 
 [[package]]
 name = "kaisa-sys"
