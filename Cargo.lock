@@ -199,6 +199,7 @@ dependencies = [
  "blake3",
  "kaisa-domain",
  "kaisa-protocol",
+ "kaisa-sys",
  "serde_json",
 ]
 

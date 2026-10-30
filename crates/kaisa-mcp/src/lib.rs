@@ -9,6 +9,6 @@ mod broker;
 mod server;
 mod tools;
 
-pub use broker::FileBroker;
+pub use broker::{ExecSandbox, FileBroker};
 pub use server::{McpServer, ToolHandler, ToolOutcome};
 pub use tools::{ToolDescription, tools_for};

@@ -7,14 +7,34 @@
 //! question for its coordinator, not as a silent failure.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use kaisa_domain::{RepoPath, WriteSet};
+use kaisa_sys::{CapturedRun, Confinement, ProcessSpec, run_captured};
 use serde_json::Value;
 
 use crate::server::{ToolHandler, ToolOutcome};
 
 /// The largest file `fs_read` returns, in bytes.
 const READ_LIMIT_BYTES: u64 = 1024 * 1024;
+/// How long one `exec` may run.
+const EXEC_DEADLINE: Duration = Duration::from_secs(10 * 60);
+/// How much of an `exec`'s output goes back to the model, in bytes.
+const EXEC_OUTPUT_CAP: usize = 64 * 1024;
+
+/// The OS sandbox `exec` runs under.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ExecSandbox {
+    /// A Seatbelt policy (macOS).
+    #[cfg(target_os = "macos")]
+    Seatbelt(kaisa_sys::SeatbeltPolicy),
+    /// A Landlock ruleset with its UDP filter (Linux).
+    #[cfg(target_os = "linux")]
+    Landlock(kaisa_sys::LandlockRuleset),
+    /// No OS sandbox; the run must be labelled reduced (Windows until T15.5).
+    Unconfined,
+}
 
 /// The file tools of one attempt.
 #[derive(Debug)]
@@ -22,6 +42,8 @@ pub struct FileBroker {
     /// The worktree, canonicalised.
     root: PathBuf,
     write_set: WriteSet,
+    /// How `exec` is confined; `None` when the role has no `exec`.
+    exec: Option<ExecSandbox>,
 }
 
 impl FileBroker {
@@ -34,7 +56,50 @@ impl FileBroker {
         Ok(Self {
             root: root.canonicalize()?,
             write_set,
+            exec: None,
         })
+    }
+
+    /// Enables `exec`, confined by `sandbox`.
+    #[must_use]
+    pub fn with_exec(mut self, sandbox: ExecSandbox) -> Self {
+        self.exec = Some(sandbox);
+        self
+    }
+
+    fn exec(&self, arguments: &Value) -> ToolOutcome {
+        let Some(sandbox) = &self.exec else {
+            return ToolOutcome::Refused("exec is not available to this attempt".to_owned());
+        };
+        let argv: Vec<String> = arguments
+            .get("argv")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some((program, args)) = argv.split_first() else {
+            return ToolOutcome::Refused("exec needs a non-empty `argv`".to_owned());
+        };
+        let spec = ProcessSpec {
+            program: PathBuf::from(program),
+            args: args.to_vec(),
+            working_directory: self.root.clone(),
+        };
+        let confinement: Confinement<'_> = match sandbox {
+            #[cfg(target_os = "macos")]
+            ExecSandbox::Seatbelt(policy) => Confinement::Seatbelt(policy),
+            #[cfg(target_os = "linux")]
+            ExecSandbox::Landlock(ruleset) => Confinement::Landlock(ruleset),
+            ExecSandbox::Unconfined => Confinement::Unconfined,
+        };
+        match run_captured(&spec, &confinement, EXEC_DEADLINE, EXEC_OUTPUT_CAP) {
+            Ok(run) => ToolOutcome::Done(describe(&run)),
+            Err(error) => ToolOutcome::Refused(format!("{program} could not be run: {error}")),
+        }
     }
 
     /// The on-disk path for `relative`, refused if it leaves the worktree through a symbolic
@@ -117,6 +182,16 @@ impl FileBroker {
     }
 }
 
+fn describe(run: &CapturedRun) -> String {
+    let ending: String = match run.exit {
+        Some(kaisa_sys::ProcessExit::Code(code)) => format!("exit code {code}"),
+        Some(kaisa_sys::ProcessExit::Terminated) => "terminated".to_owned(),
+        None => "ended at its deadline".to_owned(),
+    };
+    let cut: &str = if run.truncated { " (output cut)" } else { "" };
+    format!("{ending}{cut}\n{}", String::from_utf8_lossy(&run.output))
+}
+
 fn path_argument(arguments: &Value) -> Result<RepoPath, String> {
     let text: &str = arguments
         .get("path")
@@ -130,6 +205,7 @@ impl ToolHandler for FileBroker {
         match tool {
             "fs_read" => self.read(arguments),
             "fs_write" => self.write(arguments),
+            "exec" => self.exec(arguments),
             other => ToolOutcome::Refused(format!("{other} is not available yet")),
         }
     }
@@ -237,6 +313,53 @@ mod tests {
         assert!(
             matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("symbolic link")),
             "a link planted in the worktree must not open the rest of the disk, got {outcome:?}"
+        );
+    }
+
+    /// An `exec` that tries to write into `src/billing`, which the attempt does not own.
+    fn an_exec_writing_billing(worktree: &ScratchWorktree) -> serde_json::Value {
+        json!({"argv": ["/bin/sh", "-c", format!("echo changed > '{}'", worktree.root.join("src/billing/invoice.rs").display())]})
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exec_runs_inside_the_sandbox() {
+        let worktree = ScratchWorktree::new("exec");
+        let auth: PathBuf = worktree
+            .root
+            .canonicalize()
+            .expect("exists")
+            .join("src/auth");
+        let mut broker: FileBroker = a_broker_owning_auth(&worktree).with_exec(
+            super::ExecSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+                writable: vec![auth],
+                ..kaisa_sys::SeatbeltPolicy::default()
+            }),
+        );
+
+        broker.call("exec", &an_exec_writing_billing(&worktree));
+
+        assert!(
+            !worktree.root.join("src/billing/invoice.rs").exists(),
+            "a command the agent runs is held to the same write set as its file tools"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exec_runs_inside_the_sandbox() {
+        let worktree = ScratchWorktree::new("exec");
+        let ruleset = kaisa_sys::write_ruleset(&[worktree.root.join("src/auth")], None)
+            .expect("the ruleset can be built")
+            .expect("the CI kernel supports Landlock");
+        let mut broker: FileBroker =
+            a_broker_owning_auth(&worktree).with_exec(super::ExecSandbox::Landlock(ruleset));
+
+        broker.call("exec", &an_exec_writing_billing(&worktree));
+
+        assert!(
+            !worktree.root.join("src/billing/invoice.rs").exists(),
+            "a command the agent runs is held to the same write set as its file tools"
         );
     }
 }
