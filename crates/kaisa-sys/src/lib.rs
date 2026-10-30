@@ -8,6 +8,8 @@ mod conpty;
 #[cfg(windows)]
 mod console_process;
 #[cfg(windows)]
+mod control_pipe;
+#[cfg(windows)]
 mod job;
 #[cfg(unix)]
 mod openpty;
@@ -24,6 +26,8 @@ mod windows_child;
 #[cfg(any(windows, test))]
 mod windows_command_line;
 
+#[cfg(windows)]
+pub use control_pipe::ControlPipe;
 #[cfg(unix)]
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
