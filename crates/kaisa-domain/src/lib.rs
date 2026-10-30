@@ -5,6 +5,7 @@
 mod attempt;
 mod attempt_codes;
 mod authority;
+mod containment;
 mod effect;
 mod event;
 mod grade;
@@ -19,6 +20,7 @@ pub use attempt::{
     Verification,
 };
 pub use authority::{Authority, Operation};
+pub use containment::{Admission, ContainmentCapability, ReducedModeDecision, admit};
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};
 pub use grade::{BelowFloor, Grade, GradeFloor};
