@@ -33,6 +33,27 @@ the shape the Claude adapter (T16) uses.
 does is found and tested, Codex is treated as **observed-only**: its own sandbox plus Kaisa's OS sandbox
 (Seatbelt, Landlock, AppContainer) and egress broker, labelled "observed" (architecture §5.6).
 
+### Config search, 2026-10-30 (macOS, codex-cli 0.165.0)
+
+Two `codex exec` runs in an empty directory with `-s read-only`, asked to list their tools without
+calling any:
+
+1. `--disable shell_tool --disable unified_exec --disable view_image --disable browser_use
+   --disable computer_use --disable apps -c include_apply_patch_tool=false -c web_search="disabled"`
+2. the same plus `--disable code_mode_host --disable multi_agent --disable sleep_tool
+   --disable tool_suggest -c 'mcp_servers={}'`
+
+Both reported the same tools: `functions.exec`, `functions.wait`, `functions.request_user_input*`,
+`collaboration.*` (spawn and message sub-agents) and an MCP server from the user's own setup
+(`mcp__cua_repl`). The second run's extra flags changed nothing, so either they do not reach those
+tools or the model's self-report does not reflect its real tool list (the user's Codex hooks also
+loaded). Neither outcome shows a way to leave Codex with only Kaisa's tools.
+
+Decision: Codex stays **observed-only**. A real test must check behaviour, not self-report: give it
+Kaisa's MCP bridge, ask it to change a file, and see whether the change arrives through the broker
+or around it. That needs an isolated `CODEX_HOME` (no user plugins or MCP servers) with credentials,
+which is the user's call.
+
 ## Still open
 
 | Agent | macOS | Linux | Windows |
