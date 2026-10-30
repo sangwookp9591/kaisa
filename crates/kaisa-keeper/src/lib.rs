@@ -2,6 +2,10 @@
 //!
 //! Design: `docs/architecture.md` §5.1.
 
+mod durable;
 mod exit_record;
+#[cfg(test)]
+mod test_support;
 
+pub use durable::{DurableError, exit_record_path, read_exit_record, write_exit_record};
 pub use exit_record::{ExitRecord, RecordError};
