@@ -1,5 +1,6 @@
 //! The SQLite-backed event store: the single writer of the ledger (architecture §5.4).
 
+mod context_packs;
 mod error;
 mod event_store;
 mod outbox;

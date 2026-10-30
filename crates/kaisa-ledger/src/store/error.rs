@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use kaisa_domain::IntentId;
+use kaisa_domain::{ContentDigest, IntentId};
 
 use crate::chain::ChainBreak;
 
@@ -43,6 +43,8 @@ pub enum StoreError {
     ReceiptConflict(IntentId),
     /// An outbox row cannot be decoded into an intent.
     CorruptOutbox,
+    /// Bytes offered under a content digest do not hash to it.
+    DigestMismatch(ContentDigest),
 }
 
 impl fmt::Display for StoreError {
@@ -65,6 +67,12 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::CorruptOutbox => write!(f, "an outbox row cannot be decoded"),
+            Self::DigestMismatch(digest) => {
+                write!(
+                    f,
+                    "the content offered as {digest} does not have that digest"
+                )
+            }
         }
     }
 }
@@ -78,7 +86,8 @@ impl std::error::Error for StoreError {
             Self::DuplicateIntent(_)
             | Self::UnknownIntent(_)
             | Self::ReceiptConflict(_)
-            | Self::CorruptOutbox => None,
+            | Self::CorruptOutbox
+            | Self::DigestMismatch(_) => None,
         }
     }
 }

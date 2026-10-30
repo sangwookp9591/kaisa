@@ -27,6 +27,10 @@ const SCHEMA: &str = "
         receipt           TEXT,
         recorded_sequence INTEGER NOT NULL REFERENCES events (sequence)
     );
+    CREATE TABLE IF NOT EXISTS context_packs (
+        digest TEXT PRIMARY KEY,
+        bytes  BLOB NOT NULL
+    );
 ";
 
 /// The ledger's event log. Holding an `EventStore` means holding the only write connection;
