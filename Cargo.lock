@@ -166,7 +166,11 @@ dependencies = [
 name = "kaisa-cli"
 version = "0.0.0"
 dependencies = [
+ "kaisa-agents",
+ "kaisa-daemon",
+ "kaisa-domain",
  "kaisa-mcp",
+ "kaisa-sys",
 ]
 
 [[package]]

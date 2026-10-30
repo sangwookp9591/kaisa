@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+kaisa-agents.workspace = true
+kaisa-daemon.workspace = true
+kaisa-domain.workspace = true
+kaisa-sys.workspace = true
 kaisa-mcp.workspace = true
 
 [lints]

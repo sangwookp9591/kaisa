@@ -6,6 +6,8 @@
 use std::io;
 use std::io::Write;
 
+mod goal;
+
 /// Exit status for a command that completed successfully.
 pub const EXIT_SUCCESS: u8 = 0;
 
@@ -18,14 +20,24 @@ pub const EXIT_FAILURE: u8 = 1;
 /// Exit status for a command used with the wrong arguments.
 pub const EXIT_USAGE: u8 = 64;
 
+/// Exit status of a goal whose agent failed or whose work was kept back (CI contract, F26).
+pub const EXIT_RUN_FAILED: u8 = 4;
+
+/// Command names reserved for later milestones; they answer "not implemented" instead of being
+/// mistaken for a goal.
+const PLANNED_COMMANDS: [&str; 18] = [
+    "watch", "review", "ask", "attach", "steer", "pause", "resume", "cancel", "undo", "restore",
+    "init", "doctor", "status", "console", "memory", "agent", "team", "admin",
+];
+
 /// The version of this build, taken from the workspace manifest (single source of truth).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const HELP: &str = "\
-Kaisa — run coding agents safely in parallel (design stage, nothing implemented yet)
+Kaisa — run coding agents safely (M0: one brokered agent per goal; more is planned)
 
 Usage:
-  kaisa \"<goal>\"     start a task          (planned)
+  kaisa \"<goal>\"     run one agent on the goal in this repository and preserve its work
   kaisa watch        follow progress       (planned)
   kaisa review       approve results       (planned)
 
@@ -67,13 +79,20 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
                 Ok(EXIT_USAGE)
             }
         },
-        Some(command) => {
+        Some(command) if PLANNED_COMMANDS.contains(&command) => {
             writeln!(
                 err,
                 "kaisa: `{command}` is not implemented yet. See docs/user-flows.md for the plan."
             )?;
             Ok(EXIT_NOT_IMPLEMENTED)
         }
+        Some(_) => match goal::GoalCommand::parse(args) {
+            Some(command) => command.run(out, err),
+            None => {
+                writeln!(err, "usage: kaisa \"<goal>\"")?;
+                Ok(EXIT_USAGE)
+            }
+        },
     }
 }
 
