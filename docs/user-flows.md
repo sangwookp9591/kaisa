@@ -206,7 +206,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   ```
 - **Variants:**
   - **Monorepo:** pick the packages, and each gets its own checks.
-  - **No tests:** "Kaisa can't verify without checks." [P] Propose checks (an agent drafts them, and you approve) · [S] Skip (results will be marked *unverified*).
+  - **No tests:** "Kaisa can't verify without checks." [P] Propose checks (an agent drafts them, and you approve) · [S] Skip — results are then *unverified*: they cannot be approved normally, only through a recorded override, and they are labelled so everywhere.
 
 ### B. Doing work
 
@@ -242,9 +242,9 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **User sees:**
   ```
   Run 43  "implement CSV export"      acceptance: export matches spec examples; all tests pass
-  ┌ A  Codex   ✓ tests ✓ lint · review: 1 minor · +120 −8 · $0.62   ★ recommended: passes all, smallest change
-  └ B  Claude  ✓ tests ✓ lint · review: 2 major · +310 −40 · $1.90
-    + 1 not eligible (tests failed) — [Show]
+  ┌ A  Codex   verified ✓ tests ✓ lint · review: 1 minor · +120 −8 · $0.62   ★ recommended: passes all, smallest change
+  └ B  Claude  verified ✓ tests ✓ lint · review: 1 minor (2 major fixed by revision) · +310 −40 · $1.90
+    + 1 not eligible: tests failed after 2 revisions — [Show]
   [Enter] diff  [Tab] side by side  [Space] choose  [R] request changes  [X] reject all
   ```
 - **Variants:**
@@ -286,7 +286,9 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 
 #### F09 A question, no code change
 - `kaisa ask "why is checkout slow on Windows?"`, or a question-shaped goal (F04).
-- The answer cites files, logs and verified knowledge. Before it starts, Kaisa shows the cost ceiling. Nothing is written to the repo.
+- The answer cites files, logs and verified knowledge. Kaisa checks that every citation exists and has
+  an independent reviewer confirm that the citations support the claims; unsupported claims are removed
+  or marked. Before it starts, Kaisa shows the cost ceiling. Nothing is written to the repo.
 
 ### C. While work is running
 

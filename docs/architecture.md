@@ -604,6 +604,25 @@ criteria and enter its context pack (§5.9). The revision budget is per Task; a 
 with the same id and location after a revision goes straight to a human, because the loop is not
 converging. Revisions are charged to the Mission budget like any attempt.
 
+**Eligibility is computed once (v0.6.1, review M7).** The daemon derives each candidate's state from
+its evidence and every screen shows that state; no client recomputes it:
+
+| State | Meaning | Can be approved |
+|---|---|---|
+| `verified` | all required evidence present and fresh, no open blocking finding | yes |
+| `needs-revision` | a blocking finding is open (revision running or budget spent) | no |
+| `unverified` | the project has no checks, or a required stage could not run | no; only a presence-checked override, recorded as such |
+| `tampered` | tamper detection fired | no |
+
+An override produces an `overridden` delivery, shown differently from `verified` everywhere,
+including in PRs and reports. Live progress and raw terminal output are always labelled as
+in-progress and never look like a delivered result.
+
+**Answers are candidates too.** A non-code result (`kaisa ask`, F09) goes through a smaller loop:
+every claim must cite a file and line, a log or a knowledge item; the daemon checks that each
+citation exists at the cited revision; and an independent reviewer of a different model checks that
+the citations support the claims. Unsupported claims are removed or marked before the answer is shown.
+
 **What counts as a candidate.** A Task's result, every integration merge, every conflict revision
 and the final Mission result are all candidates. Each needs its own evidence on its own source
 digest; evidence is never inherited from the parts (§5.13).
