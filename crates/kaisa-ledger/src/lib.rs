@@ -8,6 +8,6 @@ mod store;
 
 pub use chain::{BreakReason, ChainBreak, ChainHash, ChainedEvent, build_chain, verify_chain};
 pub use store::{
-    AttemptRow, Completion, CorruptReason, EventStore, Intent, PendingIntent, StoreError,
-    TaskProgress, TrustedKnowledge,
+    AttemptRow, AttemptUsage, Completion, CorruptReason, EventStore, Intent, PendingIntent,
+    StoreError, TaskProgress, TrustedKnowledge,
 };

@@ -84,11 +84,13 @@ pub enum EventKind {
     TaskStarted,
     /// A planned task is done; tasks waiting on it may start (the subject is the task).
     TaskFinished,
+    /// The tokens (and cost, when the agent reports one) an attempt used (T30b).
+    UsageRecorded,
 }
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -103,6 +105,7 @@ impl EventKind {
         Self::IntentCompleted,
         Self::TaskStarted,
         Self::TaskFinished,
+        Self::UsageRecorded,
     ];
 
     /// Stable textual code used in storage and in the canonical encoding.
@@ -123,6 +126,7 @@ impl EventKind {
             Self::IntentCompleted => "outbox.intent_completed",
             Self::TaskStarted => "task.started",
             Self::TaskFinished => "task.finished",
+            Self::UsageRecorded => "attempt.usage_recorded",
         }
     }
 

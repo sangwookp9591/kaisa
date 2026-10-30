@@ -410,6 +410,18 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .map_err(at("running the agent"))?;
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)
         .map_err(at("saving the transcript"))?;
+    if let Some(usage) = kaisa_agents::parse_usage(&String::from_utf8_lossy(&finished.output)) {
+        ledger
+            .record_usage(
+                &attempt,
+                &kaisa_ledger::AttemptUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cost_usd: usage.cost_usd,
+                },
+            )
+            .map_err(at("recording usage"))?;
+    }
     #[cfg(any(unix, windows))]
     finish_broker(broker)?;
     let confined: bool = !matches!(sandbox, AgentSandbox::Unconfined);

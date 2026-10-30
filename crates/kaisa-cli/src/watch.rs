@@ -19,27 +19,45 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         writeln!(out, "nothing has run yet")?;
         return Ok(crate::EXIT_SUCCESS);
     }
-    let rows: Vec<AttemptRow> =
-        match EventStore::open(&database).and_then(|mut ledger| ledger.all_attempts()) {
-            Ok(rows) => rows,
-            Err(error) => {
-                writeln!(err, "kaisa: the ledger cannot be read: {error}")?;
-                return Ok(crate::EXIT_FAILURE);
-            }
-        };
+    let read = EventStore::open(&database).and_then(|mut ledger| {
+        let rows: Vec<AttemptRow> = ledger.all_attempts()?;
+        let usage: Vec<Option<kaisa_ledger::AttemptUsage>> = rows
+            .iter()
+            .map(|row| ledger.usage_for(&row.attempt))
+            .collect::<Result<_, _>>()?;
+        Ok((rows, usage))
+    });
+    let (rows, usage) = match read {
+        Ok(read) => read,
+        Err(error) => {
+            writeln!(err, "kaisa: the ledger cannot be read: {error}")?;
+            return Ok(crate::EXIT_FAILURE);
+        }
+    };
     writeln!(
         out,
-        "{:<24} {:<24} {:<16} CLEANUP",
-        "ATTEMPT", "TASK", "EXECUTION"
+        "{:<24} {:<24} {:<16} {:<12} {:<14} COST",
+        "ATTEMPT", "TASK", "EXECUTION", "CLEANUP", "TOKENS"
     )?;
-    for row in rows {
+    for (row, usage) in rows.iter().zip(usage) {
+        let (tokens, cost) = match usage {
+            Some(usage) => (
+                format!("{}/{}", usage.input_tokens, usage.output_tokens),
+                usage
+                    .cost_usd
+                    .map_or_else(|| "-".to_owned(), |cost| format!("${cost:.4}")),
+            ),
+            None => ("-".to_owned(), "-".to_owned()),
+        };
         writeln!(
             out,
-            "{:<24} {:<24} {:<16} {}",
+            "{:<24} {:<24} {:<16} {:<12} {:<14} {}",
             row.attempt.as_str(),
             row.task.as_str(),
             row.execution.code(),
-            row.cleanup.code()
+            row.cleanup.code(),
+            tokens,
+            cost
         )?;
     }
     Ok(crate::EXIT_SUCCESS)

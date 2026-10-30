@@ -106,6 +106,20 @@ fn run() -> Result<(), String> {
     if let Some(required) = flag(&args, "--fake-review-require") {
         return review(&required);
     }
+    // `--fake-usage <input>/<output>/<cost>` reports usage the way Claude Code's stream-json
+    // result event does, so usage recording can be tested without a model.
+    if let Some(usage) = flag(&args, "--fake-usage") {
+        let parts: Vec<&str> = usage.split('/').collect();
+        if let [input, output, cost] = parts.as_slice() {
+            println!(
+                "{}",
+                json!({"type": "result", "usage": {
+                    "input_tokens": input.parse::<u64>().unwrap_or_default(),
+                    "output_tokens": output.parse::<u64>().unwrap_or_default()},
+                    "total_cost_usd": cost.parse::<f64>().unwrap_or_default()})
+            );
+        }
+    }
     // `--fake-write-next src/step` writes the first of src/step-1.md, src/step-2.md, … that its
     // worktree (its working directory) does not have yet, so a mission's later task shows it
     // started from the earlier task's work.

@@ -549,3 +549,44 @@ fn an_unreachable_model_server_is_not_registered() {
         "a model server that does not answer is never offered to the router"
     );
 }
+
+/// Usage the scripted agent reports: input tokens, output tokens and cost.
+const REPORTED_USAGE: &str = "1200/340/0.0123";
+
+#[test]
+fn watch_shows_recorded_usage_per_attempt() {
+    let bench = Workbench::new("usage");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let state: PathBuf = bench.base.join("state");
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--agent-arg",
+            "--fake-usage",
+            "--agent-arg",
+            REPORTED_USAGE,
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            "src/notes.md",
+            GOAL,
+        ])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+
+    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa watch runs");
+    let view: String = String::from_utf8_lossy(&watched.stdout).into_owned();
+
+    assert!(
+        view.contains("1200/340") && view.contains("$0.0123"),
+        "the attempt's tokens and cost are shown from the ledger: {view:?}"
+    );
+}
