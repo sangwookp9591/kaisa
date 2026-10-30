@@ -20,7 +20,9 @@ use kaisa_keeper::{ExitRecord, write_exit_record};
 use kaisa_ledger::EventStore;
 use kaisa_mcp::BridgeConfig;
 use kaisa_supervisor::{Reclamation, reclaim};
-use kaisa_sys::{CapturedRun, Confinement, ProcessExit, ProcessSpec, run_captured};
+use kaisa_sys::{
+    CapturedRun, Confinement, ProcessExit, ProcessIdentity, ProcessSpec, run_captured_reporting,
+};
 use kaisa_workspace::{IgnoredPolicy, Worktree, create_worktree};
 use serde_json::json;
 
@@ -66,6 +68,20 @@ pub struct GoalRequest<'request> {
     /// Paths outside the worktree the agent must be able to change (for example its own
     /// session files), besides its scratch directory.
     pub agent_writable: &'request [PathBuf],
+}
+
+/// The file in an attempt directory naming the agent process Kaisa started, so that after a
+/// crash Kaisa can tell whether that same process still runs.
+pub const AGENT_IDENTITY_FILE: &str = "agent.identity";
+
+/// Durably writes the agent's identity before it is given any work. An agent whose identity
+/// cannot be told (an OS without support) is recorded as unknown, which recovery treats as
+/// lost track rather than as gone.
+fn record_identity(path: &Path, identity: Option<ProcessIdentity>) -> std::io::Result<()> {
+    let line: String = identity.map_or_else(|| "unknown".to_owned(), |known| known.to_line());
+    let mut file = std::fs::File::create(path)?;
+    std::io::Write::write_all(&mut file, line.as_bytes())?;
+    file.sync_all()
 }
 
 /// Variables that point an agent's HTTP clients at its egress broker.
@@ -330,12 +346,14 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         let _ = egress_port;
         AgentSandbox::Unconfined
     };
-    let finished: CapturedRun = run_captured(
+    let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
+    let finished: CapturedRun = run_captured_reporting(
         &agent,
         &sandbox.confinement(),
         input.as_bytes(),
         AGENT_DEADLINE,
         TRANSCRIPT_CAP,
+        &mut |identity| record_identity(&identity_file, identity),
     )
     .map_err(at("running the agent"))?;
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)

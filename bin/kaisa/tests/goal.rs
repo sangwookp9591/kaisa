@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kaisa_daemon::{GoalOutcome, GoalRequest, run_goal};
+use kaisa_daemon::{AGENT_IDENTITY_FILE, GoalOutcome, GoalRequest, run_goal};
 use kaisa_domain::{RepoPath, WriteSet};
 use kaisa_sys::{ProcessExit, ProcessSpec};
 
@@ -126,6 +126,18 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
             .join(outcome.attempt.as_str())
             .exists(),
         "the worktree is reclaimed once the work is on its branch"
+    );
+    let recorded_identity: String = std::fs::read_to_string(
+        bench
+            .state()
+            .join("attempts")
+            .join(outcome.attempt.as_str())
+            .join(AGENT_IDENTITY_FILE),
+    )
+    .unwrap_or_default();
+    assert!(
+        !recorded_identity.is_empty(),
+        "the agent's identity was recorded so a crash of Kaisa can be recovered from"
     );
 }
 

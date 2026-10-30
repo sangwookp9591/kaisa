@@ -51,6 +51,24 @@ pub fn run_captured(
     deadline: Duration,
     cap: usize,
 ) -> io::Result<CapturedRun> {
+    run_captured_reporting(spec, confinement, input, deadline, cap, &mut |_| Ok(()))
+}
+
+/// [`run_captured`], telling `started` the process's identity as soon as it exists, before any
+/// input is sent, so a crash of the caller can later be recovered from (T16.6b).
+///
+/// # Errors
+///
+/// Returns the operating system's error if the program cannot be started or waited for, or
+/// the error `started` returned; in that case the process is ended first.
+pub fn run_captured_reporting(
+    spec: &ProcessSpec,
+    confinement: &Confinement<'_>,
+    input: &[u8],
+    deadline: Duration,
+    cap: usize,
+    started: &mut dyn FnMut(Option<crate::ProcessIdentity>) -> io::Result<()>,
+) -> io::Result<CapturedRun> {
     let (reader, writer) = io::pipe()?;
     let mut command: Command = confined_command(spec, confinement);
     command
@@ -63,6 +81,13 @@ pub fn run_captured(
         .stderr(Stdio::from(writer));
     let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
     let collector = std::thread::spawn(move || collect(reader, cap));
+    let identity: Option<crate::ProcessIdentity> =
+        crate::ProcessIdentity::of(process.id()).unwrap_or(None);
+    if let Err(error) = started(identity) {
+        let _ = process.kill_tree();
+        let _ = process.wait();
+        return Err(error);
+    }
     if let Some(mut stdin) = process.take_stdin() {
         let input: Vec<u8> = input.to_vec();
         // Written on a thread so a process that does not read cannot block the deadline.

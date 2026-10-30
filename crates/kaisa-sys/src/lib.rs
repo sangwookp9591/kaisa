@@ -32,7 +32,7 @@ mod windows_child;
 #[cfg(any(windows, test))]
 mod windows_command_line;
 
-pub use capture::{CapturedRun, Confinement, run_captured};
+pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
 pub use identity::ProcessIdentity;
