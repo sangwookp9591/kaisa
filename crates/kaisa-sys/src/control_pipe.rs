@@ -257,13 +257,13 @@ mod tests {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use std::ptr::null;
 
-    /// What the contained relay sends its broker.
-    const BROKER_HELLO: &str = "hello-broker-pipe";
-
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
 
     use super::ControlPipe;
+
+    /// What the contained relay sends its broker.
+    const BROKER_HELLO: &str = "hello-broker-pipe";
 
     /// No sharing, attributes or template for the client end.
     const NO_SHARING: u32 = 0;
