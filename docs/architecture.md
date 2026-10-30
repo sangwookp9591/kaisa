@@ -225,6 +225,7 @@ the protocol version. It holds no secret, and the sandbox profile makes it unrea
 **PTY layer**
 - macOS and Linux use `openpty`. Windows uses ConPTY.
 - The implementation is chosen by a **conformance suite** (§16) that compares our `kaisa-sys` wrapper with mature wrappers such as `portable-pty` (review M9). Release age alone does not decide.
+  Result (ADR 0005, accepted): Kaisa's own wrapper — see [`research/pty-conformance.md`](research/pty-conformance.md).
 - All `unsafe` code lives in `kaisa-sys`.
 
 **State dimensions (review M1).** An attempt has four independent state axes. Overloading one enum is what made v0.2 ambiguous.
@@ -1492,7 +1493,7 @@ usability targets (§10) are part of every milestone's exit criteria.
 | 0002 | One core binary, one daemon, one protocol; desktop as a separate GUI package | Proposed |
 | 0003 | SQLite event log + projections + outbox, single writer, signed checkpoints, upcast events | Proposed |
 | 0004 | tokio async (documented deviation from the guide's `[chrome]` rule) | Proposed |
-| 0005 | PTY layer chosen by a conformance suite (own wrapper vs `portable-pty`) | Proposed |
+| 0005 | PTY layer chosen by a conformance suite (own wrapper vs `portable-pty`) | **Accepted: own wrapper** — passes all scenarios on 3 OSes and keeps process-tree ownership; portable-pty 0.9.0 failed or hung on Windows ([`research/pty-conformance.md`](research/pty-conformance.md)) |
 | 0006 | Keep Orca's safety invariants; replace its operating model with Run / Task / Attempt / Gate and system-carried obligations | Proposed |
 | 0007 | Hooks are advisory; enforcement at the execution broker and the OS boundary; brokered vs observed trust modes | Proposed |
 | 0008 | Containment matrix with minimum OS versions; reduced modes need a Gate; egress through a per-attempt broker | Proposed |
