@@ -156,6 +156,9 @@ version = "0.0.0"
 [[package]]
 name = "kaisa-sys"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "kaisa-workspace"

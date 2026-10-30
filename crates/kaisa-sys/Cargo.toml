@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # Mirrors [workspace.lints] except `unsafe_code`, which is `deny` here so that each
 # `unsafe` block must be explicitly allowed and carry a `SAFETY:` comment.
 [lints.rust]
