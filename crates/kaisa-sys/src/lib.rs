@@ -13,6 +13,15 @@ mod process;
 mod pty;
 #[cfg(unix)]
 mod terminal;
+#[cfg(any(windows, test))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used once agents start in a pseudo console (T12.6c)"
+    )
+)]
+mod windows_command_line;
 
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
