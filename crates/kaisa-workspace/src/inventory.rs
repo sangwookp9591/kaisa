@@ -88,7 +88,7 @@ mod tests {
         let edited_login: StatusEntry = entry("src/login.rs", EntryKind::Tracked);
 
         assert_eq!(
-            inventory_of(&[edited_login.clone()]).preserve,
+            inventory_of(std::slice::from_ref(&edited_login)).preserve,
             [edited_login],
             "edits to tracked files are the attempt's work"
         );
@@ -99,7 +99,7 @@ mod tests {
         let new_test: StatusEntry = entry("tests/login_test.rs", EntryKind::Untracked);
 
         assert_eq!(
-            inventory_of(&[new_test.clone()]).preserve,
+            inventory_of(std::slice::from_ref(&new_test)).preserve,
             [new_test],
             "new files are work too, even though git does not track them yet"
         );
@@ -110,7 +110,7 @@ mod tests {
         let half_merged: StatusEntry = entry("src/session.rs", EntryKind::Conflicted);
 
         assert_eq!(
-            inventory_of(&[half_merged.clone()]).preserve,
+            inventory_of(std::slice::from_ref(&half_merged)).preserve,
             [half_merged],
             "an unresolved merge must never be thrown away"
         );
@@ -120,7 +120,7 @@ mod tests {
     fn ignored_build_output_is_left_out_of_the_inventory() {
         let compiled: StatusEntry = entry("target/debug/kaisa", EntryKind::Ignored);
 
-        let inventory: Inventory = inventory_of(&[compiled.clone()]);
+        let inventory: Inventory = inventory_of(std::slice::from_ref(&compiled));
 
         assert!(inventory.preserve.is_empty(), "build output can be rebuilt");
         assert_eq!(
@@ -135,7 +135,7 @@ mod tests {
         let local_secrets_template: StatusEntry = entry(".env.local", EntryKind::Ignored);
 
         assert_eq!(
-            inventory_of(&[local_secrets_template.clone()]).preserve,
+            inventory_of(std::slice::from_ref(&local_secrets_template)).preserve,
             [local_secrets_template],
             "an ignored file the policy does not know may be the user's data"
         );
@@ -146,7 +146,7 @@ mod tests {
         let look_alike: StatusEntry = entry("targets.md", EntryKind::Ignored);
 
         assert_eq!(
-            inventory_of(&[look_alike.clone()]).preserve,
+            inventory_of(std::slice::from_ref(&look_alike)).preserve,
             [look_alike],
             "`target` must match the directory, not every name starting with those letters"
         );
