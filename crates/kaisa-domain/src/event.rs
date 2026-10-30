@@ -55,8 +55,23 @@ impl fmt::Display for Sequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EventKind {
-    /// A run was created from a goal.
+    /// A mission was created from what the user asked for.
+    MissionCreated,
+    /// A run started inside a mission: the root run, or a sub-run whose parent is named in the
+    /// payload. One kind for both, so there is one way to say "a run began".
     RunStarted,
+    /// A writing task declared the paths it may change.
+    WriteSetDeclared,
+    /// The router chose an agent, model and effort for a task, with its reasons.
+    RouteDecided,
+    /// A context pack was assembled for an attempt; the payload names its digest.
+    ContextPackRecorded,
+    /// A knowledge item was proposed (not yet trusted).
+    KnowledgeProposed,
+    /// A knowledge item became trusted, with the evidence that promoted it.
+    KnowledgePromoted,
+    /// A knowledge item was given to an attempt; usefulness is scored against its outcome.
+    KnowledgeInjected,
     /// An attempt was admitted for a task.
     AttemptAdmitted,
     /// One of an attempt's state axes changed.
@@ -68,11 +83,34 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Every event kind, for exhaustive lookups.
+    pub const ALL: [Self; 12] = [
+        Self::MissionCreated,
+        Self::RunStarted,
+        Self::WriteSetDeclared,
+        Self::RouteDecided,
+        Self::ContextPackRecorded,
+        Self::KnowledgeProposed,
+        Self::KnowledgePromoted,
+        Self::KnowledgeInjected,
+        Self::AttemptAdmitted,
+        Self::AttemptStateChanged,
+        Self::IntentRecorded,
+        Self::IntentCompleted,
+    ];
+
     /// Stable textual code used in storage and in the canonical encoding.
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::MissionCreated => "mission.created",
             Self::RunStarted => "run.started",
+            Self::WriteSetDeclared => "task.write_set_declared",
+            Self::RouteDecided => "route.decided",
+            Self::ContextPackRecorded => "context_pack.recorded",
+            Self::KnowledgeProposed => "knowledge.proposed",
+            Self::KnowledgePromoted => "knowledge.promoted",
+            Self::KnowledgeInjected => "knowledge.injected",
             Self::AttemptAdmitted => "attempt.admitted",
             Self::AttemptStateChanged => "attempt.state_changed",
             Self::IntentRecorded => "outbox.intent_recorded",
@@ -83,15 +121,7 @@ impl EventKind {
     /// Looks a kind up by its stable code.
     #[must_use]
     pub fn from_code(code: &str) -> Option<Self> {
-        [
-            Self::RunStarted,
-            Self::AttemptAdmitted,
-            Self::AttemptStateChanged,
-            Self::IntentRecorded,
-            Self::IntentCompleted,
-        ]
-        .into_iter()
-        .find(|kind| kind.code() == code)
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
     }
 }
 
@@ -190,19 +220,25 @@ mod tests {
 
     #[test]
     fn every_event_kind_is_found_again_by_its_stable_code() {
-        for kind in [
-            EventKind::RunStarted,
-            EventKind::AttemptAdmitted,
-            EventKind::AttemptStateChanged,
-            EventKind::IntentRecorded,
-            EventKind::IntentCompleted,
-        ] {
+        for kind in EventKind::ALL {
             assert_eq!(
                 EventKind::from_code(kind.code()),
                 Some(kind),
                 "the stored code must map back to the same kind"
             );
         }
+    }
+
+    #[test]
+    fn no_two_event_kinds_share_a_code() {
+        let codes: std::collections::BTreeSet<&str> =
+            EventKind::ALL.into_iter().map(EventKind::code).collect();
+
+        assert_eq!(
+            codes.len(),
+            EventKind::ALL.len(),
+            "a shared code would replay one kind of event as another"
+        );
     }
 
     #[test]
