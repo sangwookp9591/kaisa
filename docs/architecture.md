@@ -1373,7 +1373,7 @@ Versions were checked on crates.io, npm and ziglang.org on 2026-10-30.
 |---|---|---|---|
 | Rust | 1.99.1, edition 2024 | everything | — |
 | tokio | 1.54.1 | async runtime | on |
-| rmcp | 3.8.0 | MCP bridges | on |
+| rmcp | 3.8.0 | MCP bridges | deferred: M0's bridge (`kaisa-mcp`) is a minimal server over the KRPC framing, because MCP stdio is the same newline-delimited JSON-RPC and M0 needs three methods; rmcp is re-evaluated when sampling, resources or HTTP transport are needed |
 | rusqlite | 0.41.1 (bundled) | ledger | on |
 | gix | 0.90.0 | git reads | on |
 | alacritty_terminal | 0.26.0 | terminal state | on |

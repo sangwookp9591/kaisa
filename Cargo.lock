@@ -193,6 +193,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaisa-mcp"
+version = "0.0.0"
+dependencies = [
+ "kaisa-domain",
+ "kaisa-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "kaisa-protocol"
 version = "0.0.0"
 dependencies = [

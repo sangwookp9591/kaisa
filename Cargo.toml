@@ -9,6 +9,7 @@ members = [
     "crates/kaisa-egress",
     "crates/kaisa-keeper",
     "crates/kaisa-ledger",
+    "crates/kaisa-mcp",
     "crates/kaisa-protocol",
     "crates/kaisa-supervisor",
     "crates/kaisa-sys",
@@ -31,6 +32,7 @@ kaisa-domain = { path = "crates/kaisa-domain" }
 kaisa-egress = { path = "crates/kaisa-egress" }
 kaisa-keeper = { path = "crates/kaisa-keeper" }
 kaisa-ledger = { path = "crates/kaisa-ledger" }
+kaisa-mcp = { path = "crates/kaisa-mcp" }
 kaisa-protocol = { path = "crates/kaisa-protocol" }
 kaisa-supervisor = { path = "crates/kaisa-supervisor" }
 kaisa-sys = { path = "crates/kaisa-sys" }
