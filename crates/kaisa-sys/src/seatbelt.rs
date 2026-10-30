@@ -23,6 +23,9 @@ pub struct SeatbeltPolicy {
     pub writable: Vec<PathBuf>,
     /// The loopback port of the attempt's egress broker; `None` means no network at all.
     pub broker_port: Option<u16>,
+    /// The Unix socket of the attempt's tool broker, the one local endpoint the agent may
+    /// connect to. Must be canonical, like `writable`.
+    pub broker_socket: Option<PathBuf>,
 }
 
 /// The rules every agent needs just to run: start processes, use its terminal and system
@@ -54,6 +57,12 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
         profile.push_str(&format!(
             "(allow file-write* (subpath {}))\n",
             sbpl_string(&path.to_string_lossy())
+        ));
+    }
+    if let Some(socket) = &policy.broker_socket {
+        profile.push_str(&format!(
+            "(allow network-outbound (literal {}))\n",
+            sbpl_string(&socket.to_string_lossy())
         ));
     }
     if let Some(port) = policy.broker_port {
@@ -284,6 +293,64 @@ mod tests {
                 (exit, was_reached(&broker)),
                 (ProcessExit::Code(0), true),
                 "the broker is the agent's one way out, and it must work"
+            );
+        }
+
+        /// A Unix socket listener in a fresh canonical directory, polled by the test.
+        fn a_unix_listener(name: &str) -> (std::os::unix::net::UnixListener, PathBuf) {
+            let directory: PathBuf =
+                std::env::temp_dir().join(format!("ksb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("writable temp dir");
+            let socket: PathBuf = directory.canonicalize().expect("exists").join("b.sock");
+            let listener =
+                std::os::unix::net::UnixListener::bind(&socket).expect("the socket binds");
+            listener
+                .set_nonblocking(true)
+                .expect("the listener can be polled");
+            (listener, socket)
+        }
+
+        /// An agent that connects to a Unix socket, as Kaisa's relay does.
+        fn an_agent_connecting_to_socket(socket: &Path) -> ProcessSpec {
+            ProcessSpec {
+                program: PathBuf::from("/usr/bin/nc"),
+                // `-z`: connect and hang up at once, so the test never waits on the connection.
+                args: vec![
+                    "-z".to_owned(),
+                    "-U".to_owned(),
+                    socket.to_string_lossy().into_owned(),
+                ],
+                working_directory: std::env::temp_dir(),
+            }
+        }
+
+        #[test]
+        fn a_sandboxed_agent_reaches_its_tool_broker_socket_and_no_other() {
+            let (broker, broker_socket) = a_unix_listener("own");
+            let (elsewhere, elsewhere_socket) = a_unix_listener("other");
+            let policy = SeatbeltPolicy {
+                broker_socket: Some(broker_socket.clone()),
+                ..SeatbeltPolicy::default()
+            };
+
+            run_sandboxed(&an_agent_connecting_to_socket(&broker_socket), &policy);
+            run_sandboxed(&an_agent_connecting_to_socket(&elsewhere_socket), &policy);
+            let reached_own: bool = broker.accept().is_ok();
+            let reached_other: bool = elsewhere.accept().is_ok();
+            for socket in [&broker_socket, &elsewhere_socket] {
+                if let Some(directory) = socket.parent() {
+                    let _ = std::fs::remove_dir_all(directory);
+                }
+            }
+
+            assert!(
+                reached_own,
+                "the relay inside the sandbox must reach its broker"
+            );
+            assert!(
+                !reached_other,
+                "no other local socket is reachable from the sandbox"
             );
         }
     }
