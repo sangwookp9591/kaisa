@@ -213,7 +213,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 
 #### F04 Quick task from the terminal (the core flow)
 - **Trigger:** `kaisa "fix the failing login test"`.
-- **Today (M1):** the goal must be one quoted word group. A first word that is a reserved command (`review`, `run`, `gc`, `wrap`, …) exits `2` with the quoted form to use; an unknown option exits `64`; `--` ends the options. Run from a subdirectory, Kaisa uses the enclosing repository and prints `using the git repository at <root>`. Exit codes: `0` verified, `3` waiting for you, `4` not delivered (including an agent that could not be started).
+- **Today (M1):** quote the goal, particularly if it starts with a reserved command; ordinary unquoted goal words are also joined with spaces. A first word that is a reserved command (`review`, `run`, `gc`, `wrap`, …) exits `2` with the quoted form to use; an unknown option exits `64`; `--` ends the options. Run from a subdirectory, Kaisa uses the enclosing repository and prints `using the git repository at <root>`. Exit codes: `0` verified, `3` waiting for you, `4` not delivered (including an agent that could not be started), `1` infrastructure or configuration failure (for example the state directory cannot be located, or an old policy disables a person gate). `0` means verified on the verified path; a run with `--agent-program` and no `--reviewer-arg` has no checks or review and can still exit `0`.
 - **User sees:**
   ```
   ▶ Run 41  fix the failing login test      budget $3 · est. 4–8 min
@@ -299,7 +299,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Layout.** `kaisa watch`, or Home, shows a **Needs you** lane at the top: decisions, questions and blockers, oldest first.
   Below it come the run cards, each with a plan tree, live cost and what each agent is doing right now.
 - **Filters:** `[n]` needs you · `[m]` mine · `[f]` failed · `[/]` search.
-- **Today (M1):** `kaisa watch` prints a table of attempts, state, tokens and cost and exits. It is read-only: it does not create, migrate or change anything in the state directory, so it is safe while a run is going.
+- **Today (M1):** `kaisa watch` prints a table of attempts, state, tokens and cost and exits. It is read-only: it does not append events, migrate the database or rebuild projections, so it is safe while a run is going. A closed ledger is read without file changes; reading a live WAL database can create or update SQLite shared-memory sidecars.
 - **Actions** are keys on the selected card: `[t]` take over · `[s]` steer · `[p]` pause · `[u]` undo · `[k]` keep.
 - **Accessibility.** `--plain` prints the same information as a text stream that screen readers can follow.
 - **Browser.** `kaisa console` opens the same view in your browser on this machine only (nothing
@@ -404,7 +404,7 @@ The default (marked ★) is always the safe choice.
 | F19d | Worker's provider out of quota | "Backend moved from Claude to Codex. Its work was saved; the new agent starts from it. It will be re-verified." | ★ Continue · [V] View · [Stop] |
 | F19e | No provider available | "Paused: no provider available. Next retry in 5 min. Checks already running continue." | ★ Auto-retry · [Retry now] · [Cancel] |
 | F19f | Sandbox blocked a file write | "Blocked: write to `~/.npmrc` (outside the project). A project-local `.npmrc` would work." | ★[Use project-local file] · [Allow once] (decision) · [Deny] |
-| F19g | Tests weakened | "Candidate B removed 2 tests, so it is not eligible." Also: `--passWithNoTests`, `--exit-zero` or `\|\| true` added to a test command; a CI pipeline file or a test-config file edited ("the candidate changed what its checks run: `.github/workflows/ci.yml`"). | ★[V] View diff · [Retry: keep tests] · [Appeal: these tests were obsolete] (decision; the reviewer confirms). **Today (M1):** these always stop for a person (exit `3`) with the file or signal named; no policy value turns it off, and the Appeal decision does not exist yet, so a flagged candidate can only be retried. |
+| F19g | Tests weakened | "Candidate B removed 2 tests, so it is not eligible." Also: `--passWithNoTests`, `--exit-zero` or `\|\| true` added to a test command; a CI pipeline file or a test-config file edited ("the candidate changed what its checks run: `.github/workflows/ci.yml`"). | ★[V] View diff · [Retry: keep tests] · [Appeal: these tests were obsolete] (decision; the reviewer confirms). **Today (M1):** no policy value lets these be delivered; when the gate is reached they stop for a person (exit `3`) with the file or signal named (earlier evidence, review or developer failures exit `4` first, and detection is lexical), and the Appeal decision does not exist yet, so a flagged candidate can only be retried. |
 | F19h | Base moved | "main moved since verification. Re-checking… ✓ still passes" or "✗ conflict in session.rs" | ★ Auto re-verify · [Let an agent rebase] · [Resolve myself] |
 | F19i | Agent logged out | "Codex is logged out. Run `codex login`, then press [C]." | [C] Check again · [Use another agent] |
 | F19j | Budget reached | "Run 44 reached $25 (100%). Paused." | [+ $10] (decision) · ★[Stop and keep work]. "Finish the step" is offered only if it fits the budget the user just approved. |

@@ -216,7 +216,7 @@ the protocol version. It holds no secret, and the sandbox profile makes it unrea
 - **Daemon restarts.** If the daemon restarts, it finds keepers by their per-attempt sockets and reconnects.
 - **Keeper loss.** If a keeper is lost, the process state stays `Unknown` until it can be proven otherwise. It is never converted into a retry or a destructive GC.
 
-> **Current state.** The keeper is a library, not a process. The CLI process owns the PTY-less captured child, takes an exclusive per-attempt owner lock, and writes the exit record itself. Recovery on the next `kaisa` start takes that lock first, skips a live owner, and ends (does not reattach) a leftover agent whose identity it can prove. Without proof the attempt stays `Unknown`. An attempt made before owner locks is kept for a person.
+> **Current state.** The keeper is a library, not a process. The CLI process owns the PTY-less captured child, takes an exclusive per-attempt owner lock, and writes the exit record itself. Recovery on the next `kaisa` start takes that lock first, skips a live owner, and ends (does not reattach) a leftover agent whose identity it can prove. Without proof the attempt is kept untouched, with its existing recorded execution state, and reported for a person. An attempt made before owner locks is kept for a person.
 
 **Containment of descendants**
 
@@ -396,7 +396,7 @@ Workers keep running during a coordinator handoff, because the daemon and their 
   - Upgrade and recovery tests replay recorded event logs from earlier versions.
 - **Disk full.** The writer refuses new runs, keeps the effects of running ones journaled, and opens a Gate.
 
-> **Current state.** Every process opens `kaisa.db` itself; there is no single-writer actor or OS lock on the ledger. The hash chain works. There are no signed checkpoints, upcasting or disk-full gate. `kaisa watch` opens the file read-only.
+> **Current state.** Every process opens `kaisa.db` itself; there is no single-writer actor or OS lock on the ledger. The hash chain works. There are no signed checkpoints, upcasting or disk-full gate. `kaisa watch` opens the file read-only (SQLite may still create or update `-shm` sidecars beside a live WAL database).
 
 ### 5.5 Workspace: isolation and preservation
 
@@ -586,7 +586,7 @@ blanket allow-lists, and hooks that call outside the repo, unless a human approv
 
 > **Current state.** The scanner reads Claude Code's `.claude/settings*.json` and Codex's `.codex/config.toml`. For Claude Code it flags `enableAllProjectMcpServers: true` and a non-empty `enabledMcpjsonServers` as well as the other rules. The first scan reads the working tree; the frozen candidate's own settings are scanned again before a reviewer or revision starts. There is no human approval path yet: in a verified goal a flagged repository stops with exit 3, naming each finding.
 
-**Child environments.** Every child Kaisa starts (agent, trusted check, local-model bridge) gets an allow-list built in `kaisa-sys`: locale, `PATH` and home locations, toolchain locations (Cargo, Rustup, Node, Go, Java, Python, Ruby, .NET, Deno and version managers), TLS certificate settings, XDG directories, `TZ`, and the proxy variables. Each agent adapter declares its own credential and endpoint variables (Claude Code: Anthropic, Bedrock, Vertex, Foundry, AWS; Codex: `OPENAI_*`, `CODEX_*`). A broker-backed attempt replaces the proxy variables and clears `NO_PROXY`. `GIT_*`, `SSH_AUTH_SOCK`, `LD_*`, `DYLD_*`, `CARGO_TARGET_DIR`, `RUSTFLAGS` and other providers' keys are never passed. `KAISA_PASS_ENV=NAME,NAME` forwards named variables to the Codex adapter only; names are not read from Codex's own configuration.
+**Child environments.** Every child Kaisa starts (agent, trusted check, local-model bridge) gets an allow-list built in `kaisa-sys`: locale, `PATH` and home locations, toolchain locations (Cargo, Rustup, Node, Go, Java, Python, Ruby, .NET, Deno and version managers), TLS certificate settings, XDG directories, `TZ`, and the proxy variables. Each agent adapter declares its own credential and endpoint variables (Claude Code: Anthropic, Bedrock, Vertex, Foundry, AWS; Codex: a fixed list of OpenAI and Codex names). A broker-backed attempt replaces the proxy variables and clears `NO_PROXY`. By default the base environment excludes `GIT_*`, `SSH_AUTH_SOCK`, `LD_*`, `DYLD_*`, `CARGO_TARGET_DIR`, `RUSTFLAGS` and other providers' keys. `KAISA_PASS_ENV=NAME,NAME` explicitly forwards any valid named variable to the Codex adapter only, including otherwise excluded ones; names are not read from Codex's own configuration.
 
 ### 5.8 Verification loop and delivery gate (review M6, v0.6)
 
@@ -694,7 +694,7 @@ is recorded as an override.
 
    A flagged candidate gets the verdict `Tampered`, which never counts as a pass.
 
-   > **Current state.** The gate does not name `Tampered`; it stops the run for a person (exit 3) and names the signal. Two stops are unconditional and no policy value switches them off: weakened tests (deleted or disabled tests, `.skip` and `.only` markers, tests commented out, tautological assertions, and newly added `--passWithNoTests`, `--pass-with-no-tests`, `--exit-zero`, `|| true` or `|| exit 0` on a test-running entry of `package.json`, `Makefile`, `justfile` or `tox.ini`, including indented multi-line recipes), and changed check definitions (the named manifest and test-config files, plus CI pipeline files: `.github/workflows/**`, `.buildkite/**`, `.circleci/config.yml`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.travis.yml`, `Jenkinsfile`). Changed paths are read NUL-delimited, so non-ASCII names count. The policy keys `require_person_when_tests_weaken` and `require_person_when_check_definitions_change` exist but accept only `true`. Detection is lexical: other spellings of a swallowed exit, `.github/actions/**` and other CI systems are not caught, and there is no presence-checked Decision to override a stop yet.
+   > **Current state.** The gate does not name `Tampered`; it stops the run for a person (exit 3) and names the signal. Two stops cannot be switched off by any policy value; when the relevant gate is reached they require a person (3), while earlier execution, evidence or review failures (absent or invalid evidence, a missing or stale verdict, an unsuccessful developer) end as not delivered (4) first: weakened tests (deleted or disabled tests, `.skip` and `.only` markers, tests commented out, tautological assertions, and newly added `--passWithNoTests`, `--pass-with-no-tests`, `--exit-zero`, `|| true` or `|| exit 0` on a test-running entry of `package.json`, `Makefile`, `justfile` or `tox.ini`, including indented multi-line recipes), and changed check definitions (the named manifest and test-config files, plus CI pipeline files: `.github/workflows/**`, `.buildkite/**`, `.circleci/config.yml`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.travis.yml`, `Jenkinsfile`). Changed paths are read NUL-delimited, so non-ASCII names count. The policy keys `require_person_when_tests_weaken` and `require_person_when_check_definitions_change` exist but accept only `true`. Detection is lexical: other spellings of a swallowed exit, `.github/actions/**` and other CI systems are not caught, and there is no presence-checked Decision to override a stop yet.
 5. **Independent review.** The reviewer is a different model from the implementer. It gets the requirements, the diff and the logs, and never the implementer's conclusions.
    Repository instructions and extracted facts count as untrusted input.
 6. **Receipt.** A verification receipt binds the snapshot digest, the environment digest, the log digests and the verdicts.
@@ -1446,7 +1446,7 @@ Versions were checked on crates.io, npm and ziglang.org on 2026-10-30.
 | Orphaned resources after the chaos suite | 0 | GC diff |
 | Work lost after the chaos suite | 0 bytes not covered by a receipt | preservation audit |
 | Coordinator handoff (signal → successor reconciled) | < 60 s, excluding agent startup | failover tests |
-| Per-role tool catalog + preamble | < 2k tokens | footprint report (not in CI yet) |
+| Per-role tool catalog + preamble | < 2k tokens | CI footprint report (current state: no such job yet, see §16) |
 | Light (read-only) attempt overhead, excluding the agent CLI | < 4 MB, no worktree | load tests |
 | 100 concurrent scripted agents on the reference host | daemon RSS < 200 MB, event append p99 < 5 ms, admission decision < 50 ms | scale benchmark (CI nightly, 10/50/100/200 agents) |
 | Context-pack assembly on a 10k-file repository | p95 < 300 ms | criterion |
@@ -1496,9 +1496,10 @@ Stability is validated **after implementation** with:
   - with the embedding model missing, retrieval reports "vector search off" instead of failing or pretending.
 - **Mutation testing.** `cargo-mutants` with a minimum score on the keeper, supervisor, scheduler, coordinator, policy,
   verify and ledger crates.
-- **Cross-OS CI.** Every PR runs on macOS, Linux and Windows: rustfmt, clippy, the workspace tests, a smoke run of the
-  binary and `cargo-deny`. The catalog digest is covered by an ordinary test; there is no schema digest check. There is no benchmark or footprint
-  job yet, so no §15 number is measured in CI.
+- **Cross-OS CI.** Every PR runs on macOS, Linux and Windows. CI also runs the catalog and schema digest checks and the
+  footprint report.
+
+  > **Current state.** CI runs rustfmt, clippy, the workspace tests, a smoke run of the binary and `cargo-deny`. The catalog digest is covered by an ordinary test; there is no schema digest check, and there is no benchmark or footprint job, so no §15 number is measured in CI yet.
 
 ---
 
@@ -1530,14 +1531,15 @@ design above.
   upcasting yet (§5.4).
 - **Outbox.** The intent and completion primitives work but spawn, worktree and removal do not go
   through them. There are no cursors, request receipts or epoch fences (§5.2).
-- **Index, impact and route.** The repository index, impact sets and route decisions are built but a
-  run does not use them; packs carry an empty impact set and `route.decided` is not recorded.
+- **Index, impact and route.** The repository index and impact sets are built but a run does not use
+  them; packs carry an empty impact set. Model routing is used by a run, but `route.decided` is not
+  recorded and the task signals are approximate.
   `run_mission` is not called from the CLI.
 - **Messages.** English only. There is no `ko`/`en` message catalog and no `--json` yet (§5.11).
 - **Retrieval.** BM25 over lessons only. There is no vector index and no "vector search off" label.
 - **Containment.** See the current-state note in §5.7: platform-limit admission, `state-read`, a
   process-tree walk instead of cgroups, and Claude Code unconfined by default (T16.0).
-- **Exit codes.** 0, 3, 4 and 64 work, with 2 for a reserved command word. 5 and 6 do not exist.
+- **Exit codes.** 0, 3, 4 and 64 work, with 2 for a reserved command word and 1 for infrastructure or configuration failure. 5 and 6 do not exist. `--agent-program` without `--reviewer-arg` runs no checks or review and can exit 0.
 - **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`, several
   candidates, the TUI and console.
 
