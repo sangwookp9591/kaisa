@@ -107,10 +107,12 @@ an agent's authority (for example `enableAllProjectMcpServers: true` or a non-em
 `enabledMcpjsonServers` in `.claude/settings.json` or `.claude/settings.local.json`); the frozen candidate's own settings are scanned again before a reviewer or a
 revision starts in it. Every run records the policy snapshot it ran under. A run interrupted by a
 crash is found and tidied on the next `kaisa` start; an attempt in an unknown state is never retried
-without proof. Each attempt holds an owner lock, so a second `kaisa` process skips a live attempt
-instead of ending its agent. An attempt left by an older Kaisa has no lock; it is kept, with the
-branch, the worktree and a `git worktree remove` command printed for you to run once you have
-confirmed its agent is gone. An agent program that cannot be started ends the goal with exit `4`, and
+without proof. Each attempt holds an owner lock and records its owner's process identity, so a
+second `kaisa` process skips a live attempt instead of ending its agent; if the recorded owner is
+provably dead, the lock no longer protects the attempt, even if another process holds it. An attempt
+left by an older Kaisa has no lock; it is kept, with the branch, the worktree and a
+`git worktree remove` command printed for you to run once you have confirmed its agent is gone. The
+next `kaisa` start then records that cleanup and stops reporting the attempt. An agent program that cannot be started ends the goal with exit `4`, and
 its attempt is reclaimed. A direct process-creation failure is recorded as `exited:failed-to-start` and reclaimed. On macOS a sandbox wrapper that starts but cannot exec the agent can instead report its own nonzero exit (for example `exited:71`); the goal still exits `4`.
 
 ### Protection status
@@ -184,8 +186,10 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 - **Missions** (`run_mission`) are not reachable from the CLI.
 - **Trusted checks** are derived from the repository's working tree when the run starts, not from the
   base revision.
-- **Concurrent goals.** An owner lock keeps a second `kaisa` process from ending a live attempt's agent.
-  Running several goals at once on one repository is otherwise not a tested workflow.
+- **Concurrent goals.** Several `kaisa` goals can run at once on one state directory: owner locks keep
+  them from ending each other's agents, ledger writes wait for each other instead of failing, and
+  attempt ids include the process id. A test runs eight writers against one ledger; there is still no
+  single ledger-writer process.
 
 ## Planned
 
