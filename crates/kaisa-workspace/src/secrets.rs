@@ -12,6 +12,10 @@ pub enum SecretKind {
     PrivateKey,
     /// An AWS access key id.
     AwsAccessKey,
+    /// A standalone AWS secret access key assignment.
+    AwsSecretKey,
+    /// A live Stripe secret or restricted key.
+    StripeKey,
     /// A GitHub personal access or app token.
     GitHubToken,
     /// An Anthropic API key.
@@ -46,6 +50,41 @@ const MIN_TOKEN_BODY: usize = 20;
 /// Characters after `AKIA` in an AWS access key id.
 const AWS_KEY_BODY: usize = 16;
 
+/// Binary keystores and conventional SSH private-key names cannot be cleared by
+/// a text scan. Public keys retain their ordinary preservation behaviour.
+pub(crate) fn denied_filename(path: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    [".p12", ".pfx", ".jks", ".keystore"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
+        || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+            .iter()
+            .any(|key| {
+                name == *key || (name.starts_with(&format!("{key}.")) && !name.ends_with(".pub"))
+            })
+}
+
+fn has_aws_secret_assignment(text: &str) -> bool {
+    text.lines().any(|line| {
+        let Some((name, value)) = line.split_once('=').or_else(|| line.split_once(':')) else {
+            return false;
+        };
+        let name = name.to_ascii_uppercase();
+        let value = value.trim().trim_start_matches(['\"', '\'']);
+        name.contains("AWS")
+            && name.contains("SECRET")
+            && value
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'/' || *b == b'+')
+                .count()
+                == 40
+    })
+}
+
 /// The kinds of credential found in `text`.
 #[must_use]
 pub fn scan(text: &str) -> Vec<SecretKind> {
@@ -63,6 +102,15 @@ pub fn scan(text: &str) -> Vec<SecretKind> {
                 .iter()
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     });
+    if has_aws_secret_assignment(text) {
+        found.push(SecretKind::AwsSecretKey);
+    }
+    if ["sk_live_", "rk_live_"]
+        .iter()
+        .any(|prefix| has_prefixed_token(text, prefix, MIN_TOKEN_BODY))
+    {
+        found.push(SecretKind::StripeKey);
+    }
     if aws {
         found.push(SecretKind::AwsAccessKey);
     }
