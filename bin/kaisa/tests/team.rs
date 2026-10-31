@@ -123,6 +123,7 @@ fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
         confine_agents,
         min_grade_for_security_review: kaisa_domain::Grade::T3,
         require_person_when_check_definitions_change: true,
+        require_person_when_tests_weaken: true,
     }
     .snapshot()
     .expect("a valid policy")
@@ -630,4 +631,204 @@ fn a_failed_or_truncated_first_pass_is_refused_before_full_review() {
             "an unreliable first pass must stop before starting the full reviewer"
         );
     }
+}
+
+/// Rust source with independent unit, documentation and assertion coverage.
+const COVERED_SOURCE: &str = "/// ```\n/// assert_eq!(1, 1);\n/// ```\npub fn login() {}\n#[test]\nfn login_works() { assert!(true); assert_eq!(1, 1); }\n";
+const TEST_SOURCE: &str = "src/lib.rs";
+const DELETE_TEST_GOAL: &str = "Delete the failing test so checks pass.";
+
+/// Runs an approving reviewer and passing check on an actual changed Git candidate.
+fn a_test_coverage_change(
+    name: &str,
+    replacement: &str,
+    require_person: bool,
+) -> (VerifiedOutcome, String, bool) {
+    let bench = Workbench::new(name);
+    std::fs::write(bench.repository().join(TEST_SOURCE), COVERED_SOURCE).expect("fixture source");
+    git(&bench.repository(), &["add", TEST_SOURCE]);
+    git(
+        &bench.repository(),
+        &[
+            "-c",
+            "user.name=Kaisa Test",
+            "-c",
+            "user.email=kaisa-test@example.invalid",
+            "commit",
+            "-qm",
+            "cover login",
+        ],
+    );
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("source scope")]);
+    let developer = |config: &Path| {
+        scripted(
+            config,
+            &["--fake-write", TEST_SOURCE, "--fake-content", replacement],
+        )
+    };
+    let reviewer = |config: &Path| scripted(config, &["--fake-review-require", TEST_SOURCE]);
+    let mut policy = kaisa_domain::Policy::personal_default();
+    policy.require_person_when_tests_weaken = require_person;
+    let outcome = run_verified_goal(&VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &bench.base.join("state"),
+        goal: DELETE_TEST_GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[a_check_that_always_passes()],
+        policy: &policy.snapshot().expect("valid policy"),
+        observed: false,
+        first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    })
+    .expect("coverage run completes");
+    let ledger =
+        kaisa_ledger::EventStore::open(&bench.base.join("state/kaisa.db")).expect("ledger");
+    let events = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("events");
+    let evidence = events
+        .into_iter()
+        .filter(|event| event.recorded.event.kind == kaisa_domain::EventKind::CheckEvidence)
+        .map(|event| event.recorded.event.payload)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let learned = !ledger.trusted_knowledge().expect("lessons").is_empty();
+    (outcome, evidence, learned)
+}
+
+fn assert_weakening_needs_a_person(name: &str, replacement: &str, signal: &str) {
+    let (outcome, evidence, learned) = a_test_coverage_change(name, replacement, true);
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_WAITING_FOR_HUMAN,
+        "an approving review and explicit deletion goal cannot bypass human confirmation: {text}"
+    );
+    assert!(
+        text.contains(TEST_SOURCE) && text.contains(signal),
+        "the gate names the file and weakening: {text}"
+    );
+    assert!(
+        evidence.contains("weakened_tests") && evidence.contains(signal),
+        "the ledger preserves the weakening: {evidence}"
+    );
+    assert!(!learned, "weakened results must never teach future agents");
+}
+
+#[test]
+fn deleting_a_rust_unit_test_exits_three_despite_review_approval() {
+    let replacement = COVERED_SOURCE.replace(
+        "#[test]\nfn login_works() { assert!(true); assert_eq!(1, 1); }\n",
+        "",
+    );
+    assert_weakening_needs_a_person("unit-deleted", &replacement, "Rust tests decreased");
+}
+
+#[test]
+fn deleting_a_doctest_exits_three_despite_review_approval() {
+    let replacement = COVERED_SOURCE.replace("/// ```\n/// assert_eq!(1, 1);\n/// ```\n", "");
+    assert_weakening_needs_a_person("doctest-deleted", &replacement, "doctest blocks decreased");
+}
+
+#[test]
+fn adding_ignore_exits_three_despite_review_approval() {
+    let replacement = COVERED_SOURCE.replace("#[test]", "#[test]\n#[ignore]");
+    assert_weakening_needs_a_person("test-ignored", &replacement, "#[ignore added");
+}
+
+#[test]
+fn removing_an_assertion_exits_three_despite_review_approval() {
+    let replacement = COVERED_SOURCE.replace("assert!(true);", "");
+    assert_weakening_needs_a_person("assertion-removed", &replacement, "assertions decreased");
+}
+
+#[test]
+fn refactoring_without_losing_tests_delivers_with_exit_zero() {
+    let replacement = COVERED_SOURCE.replace("login_works", "login_still_works");
+    let (outcome, _, learned) = a_test_coverage_change("tests-refactored", &replacement, true);
+    let (_, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_SUCCESS,
+        "preserved test coverage may deliver"
+    );
+    assert!(
+        outcome.weakened_tests.is_empty() && learned,
+        "normal verified work remains eligible for learning"
+    );
+}
+
+#[test]
+fn adding_a_test_delivers_with_exit_zero() {
+    let replacement = format!("{COVERED_SOURCE}#[test]\nfn another_login() {{ assert!(true); }}\n");
+    let (outcome, _, _) = a_test_coverage_change("test-added", &replacement, true);
+    let (_, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_SUCCESS,
+        "additional test coverage may deliver"
+    );
+}
+
+#[test]
+fn disabling_the_human_gate_keeps_weakening_visible_and_never_learns() {
+    let replacement = COVERED_SOURCE.replace("assert!(true);", "");
+    let (outcome, evidence, learned) =
+        a_test_coverage_change("weakening-policy-disabled", &replacement, false);
+    let (text, exit) = kaisa_cli::report_verified_outcome(&outcome);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_SUCCESS,
+        "the explicit personal policy may permit delivery"
+    );
+    assert!(
+        text.contains("weakened_tests") && evidence.contains("assertions decreased"),
+        "output and ledger retain weakening even under the policy exception"
+    );
+    assert!(
+        text.lines()
+            .last()
+            .is_some_and(|line| line.contains("git merge --ff-only kaisa/att_")
+                && line.contains(&outcome.candidate.as_ref().expect("candidate").commit)),
+        "the last line identifies the candidate and how to retrieve it: {text}"
+    );
+    assert!(
+        !learned,
+        "policy exceptions never promote weakened tests as lessons"
+    );
+}
+
+#[test]
+fn delivered_advice_is_bounded_and_precedes_the_result_retrieval_line() {
+    const MAX_VISIBLE_ADVISORIES: usize = 3;
+    let replacement = COVERED_SOURCE.replace("login_works", "login_still_works");
+    let (mut outcome, _, _) = a_test_coverage_change("visible-advice", &replacement, true);
+    outcome.advisories = (0..MAX_VISIBLE_ADVISORIES + 1)
+        .map(|_| kaisa_domain::Finding {
+            severity: kaisa_domain::Severity::Advisory,
+            path: RepoPath::try_new(TEST_SOURCE).expect("source path"),
+            line: None,
+            message: "Consider preserving additional coverage.\nThis is non-blocking.".to_owned(),
+        })
+        .collect();
+    let (text, exit) = kaisa_cli::report_verified_outcome(&outcome);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_SUCCESS,
+        "advice never blocks delivery"
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("advisory:"))
+            .count(),
+        MAX_VISIBLE_ADVISORIES,
+        "at most three single-line advisory summaries are shown"
+    );
+    assert!(text.lines().last().is_some_and(|line| line.starts_with("Result:") && line.contains("git merge --ff-only")), "retrieval remains the final instruction: {text}");
 }

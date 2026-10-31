@@ -52,6 +52,45 @@ pub fn report_delivery(delivery: &Delivery) -> (String, u8) {
     }
 }
 
+/// Adds bounded review advice and the preserved result's retrieval command.
+#[must_use]
+pub fn report_verified_outcome(outcome: &kaisa_daemon::VerifiedOutcome) -> (String, u8) {
+    let (mut text, status) = report_delivery(&outcome.delivery);
+    if !outcome.weakened_tests.is_empty() && !text.contains("weakened_tests:") {
+        text.push_str(&format!(
+            "\nweakened_tests: {}",
+            outcome.weakened_tests.join("; ")
+        ));
+    }
+    if matches!(outcome.delivery, Delivery::Deliver { .. }) {
+        for finding in outcome.advisories.iter().take(3) {
+            let message: String = finding
+                .message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(240)
+                .collect();
+            text.push_str(&format!("\nadvisory: {}: {message}", finding.path));
+        }
+        if let Some(candidate) = &outcome.candidate {
+            let branch = outcome
+                .attempts
+                .iter()
+                .find(|attempt| attempt.commit.as_ref() == Some(&candidate.commit))
+                .map(|attempt| attempt.branch.as_str());
+            if let Some(branch) = branch {
+                text.push_str(&format!(
+                    "\nResult: {branch} at {}; retrieve with git merge --ff-only {branch}",
+                    candidate.commit
+                ));
+            }
+        }
+    }
+    (text, status)
+}
+
 #[cfg(test)]
 mod tests {
     use kaisa_daemon::Delivery;

@@ -14,7 +14,7 @@ mod policy;
 mod verified;
 mod watch;
 
-pub use delivery::{EXIT_WAITING_FOR_HUMAN, report_delivery};
+pub use delivery::{EXIT_WAITING_FOR_HUMAN, report_delivery, report_verified_outcome};
 
 /// Exit status for a command that completed successfully.
 pub const EXIT_SUCCESS: u8 = 0;

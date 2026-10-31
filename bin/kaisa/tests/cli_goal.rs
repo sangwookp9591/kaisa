@@ -589,6 +589,32 @@ fn watch_shows_recorded_usage_per_attempt() {
         view.contains("1200/340") && view.contains("$0.0123"),
         "the attempt's tokens and cost are shown from the ledger: {view:?}"
     );
+    let mut ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("usage ledger");
+    let attempts = ledger.all_attempts().expect("recorded attempts");
+    for attempt in &attempts {
+        if let Some(mut usage) = ledger.usage_for(&attempt.attempt).expect("usage") {
+            usage.cost_usd = None;
+            ledger
+                .record_usage(&attempt.attempt, &usage)
+                .expect("provider reported tokens without cost");
+        }
+    }
+    let watched = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("watch without provider cost");
+    let view = String::from_utf8_lossy(&watched.stdout);
+    assert!(
+        view.contains("1200/340")
+            && view.contains("n/a (provider gives no cost; excluded from total)"),
+        "missing provider cost has an explanation and preserves tokens: {view}"
+    );
+    assert!(
+        view.contains("Reported cost total: $0.0000;")
+            && view.contains("unavailable cost excluded"),
+        "totals explicitly omit unavailable costs instead of estimating: {view}"
+    );
 }
 
 /// What the fake agent writes when it is started the way Codex is.

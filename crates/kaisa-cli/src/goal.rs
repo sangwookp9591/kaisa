@@ -367,7 +367,7 @@ impl GoalCommand {
                 for attempt in &outcome.attempts {
                     writeln!(out, "{}", attempt.summary())?;
                 }
-                let (line, status) = crate::report_delivery(&outcome.delivery);
+                let (line, status) = crate::delivery::report_verified_outcome(&outcome);
                 writeln!(out, "{line}")?;
                 Ok(status)
             }

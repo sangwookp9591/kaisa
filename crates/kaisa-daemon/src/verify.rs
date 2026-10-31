@@ -41,6 +41,10 @@ pub struct Evidence {
     /// Check-definition files the candidate changed since its base; when any are named, the
     /// check may be testing rules the agent wrote, so a person must accept the result.
     pub definitions_changed: Vec<String>,
+    /// File-specific test weakening signals, preserved even when policy permits delivery.
+    pub weakened_tests: Vec<String>,
+    /// Whether weakening requires human confirmation under this run policy.
+    pub require_person_when_tests_weaken: bool,
 }
 
 impl Evidence {
@@ -87,6 +91,8 @@ pub fn run_trusted_checks(
 ) -> Result<Vec<Evidence>, GoalError> {
     let definitions_changed: Vec<String> = changed_check_definitions(repository, base, candidate)
         .map_err(at("comparing check definitions"))?;
+    let weakened_tests = kaisa_workspace::weakened_tests(repository, base, candidate)
+        .map_err(at("comparing candidate tests"))?;
     let place: PathBuf = state_directory
         .join("checks")
         .join(format!("check_{}", fresh_suffix()));
@@ -138,6 +144,8 @@ pub fn run_trusted_checks(
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
+            weakened_tests: weakened_tests.clone(),
+            require_person_when_tests_weaken: true,
         });
         if source_changed {
             // Keep the failed evidence, but never let later checks run on changed sources.
