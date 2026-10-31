@@ -44,6 +44,8 @@ const SCHEMA: &str = "
 
 /// How long a CLI owner waits for another short ledger write or initial schema setup.
 const WRITE_PATIENCE: Duration = Duration::from_secs(30);
+/// How long a read-only open waits for a writer holding the WAL briefly.
+const READ_PATIENCE: Duration = Duration::from_secs(5);
 /// WAL mode negotiation can return BUSY without invoking SQLite's busy handler.
 const CONFIGURE_RETRY: Duration = Duration::from_millis(10);
 
@@ -108,6 +110,9 @@ impl EventStore {
         let live_writer_may_exist: bool = Path::new(&sidecar).exists();
         if live_writer_may_exist {
             if let Ok(connection) = Connection::open_with_flags(path, flags)
+                // A reader can briefly meet SQLITE_BUSY while a writer checkpoints or recovers
+                // the WAL; wait for it instead of failing the read.
+                && connection.busy_timeout(READ_PATIENCE).is_ok()
                 && connection
                     .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
                         row.get::<_, i64>(0)

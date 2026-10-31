@@ -216,7 +216,7 @@ the protocol version. It holds no secret, and the sandbox profile makes it unrea
 - **Daemon restarts.** If the daemon restarts, it finds keepers by their per-attempt sockets and reconnects.
 - **Keeper loss.** If a keeper is lost, the process state stays `Unknown` until it can be proven otherwise. It is never converted into a retry or a destructive GC.
 
-> **Current state.** The keeper is a library, not a process. The CLI process owns the PTY-less captured child, takes an exclusive per-attempt owner lock, and writes the exit record itself. Recovery on the next `kaisa` start takes that lock first, skips a live owner, and ends (does not reattach) a leftover agent whose identity it can prove. Without proof the attempt is kept untouched, with its existing recorded execution state, and reported for a person. An attempt made before owner locks is kept for a person.
+> **Current state.** The keeper is a library, not a process. The CLI process owns the PTY-less captured child, takes an exclusive per-attempt owner lock, and writes the exit record itself. Recovery on the next `kaisa` start takes that lock first, skips a live owner, and ends (does not reattach) a leftover agent whose identity it can prove. Without proof the attempt is kept untouched, with its existing recorded execution state, and reported for a person; on Windows a gone root process is not proof that its job tree has ended, so such an attempt is kept. An attempt made before owner locks is kept for a person. On Unix a process that detached from the agent's group and holds the owner lock keeps the attempt held; the message names the lock file and how to find the holder (`lsof`, and on Linux `/proc/locks` or `fuser`).
 
 **Containment of descendants**
 
