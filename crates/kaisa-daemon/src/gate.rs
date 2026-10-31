@@ -43,6 +43,9 @@ pub fn decide_delivery(
     if evidence.is_empty() {
         return Delivery::Refuse("no trusted check produced evidence".to_owned());
     }
+    if let Some(reason) = evidence.iter().find_map(Evidence::bounded_failure_reason) {
+        return Delivery::Refuse(reason);
+    }
     if evidence.iter().any(|piece| !piece.applies_to(candidate)) {
         return Delivery::Refuse("evidence was produced on other content".to_owned());
     }
@@ -114,6 +117,7 @@ mod tests {
 
     fn evidence_on(tree: &str, exit: ProcessExit) -> Evidence {
         Evidence {
+            failure_reason: None,
             candidate_tree: tree.to_owned(),
             check: vec!["cargo".to_owned(), "test".to_owned()],
             exit: Some(exit),
