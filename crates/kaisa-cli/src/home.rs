@@ -96,7 +96,11 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
                 let goal = goals.entry(run.to_owned()).or_insert_with(|| {
                     (
                         chained.recorded.sequence.value(),
-                        "goal".to_owned(),
+                        payload
+                            .get("goal")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("goal")
+                            .to_owned(),
                         String::new(),
                         String::new(),
                     )

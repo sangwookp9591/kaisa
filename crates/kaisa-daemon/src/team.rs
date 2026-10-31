@@ -241,6 +241,24 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
         .map_err(|error| preservation_error(error, &attempts))
 }
 
+/// Admission can fail before an attempt exists; keep the parent goal visible on Home.
+fn with_admission_gate(
+    context: &VerificationContext<'_, '_>,
+    result: Result<GoalOutcome, GoalError>,
+) -> Result<GoalOutcome, GoalError> {
+    if let Err(error) = &result
+        && error.not_admitted()
+    {
+        record_gate(
+            context,
+            &Delivery::NeedsPerson(error.detail.clone()),
+            None,
+            None,
+        )?;
+    }
+    result
+}
+
 fn preservation_error(mut error: GoalError, attempts: &[GoalOutcome]) -> GoalError {
     for attempt in attempts.iter().filter(|attempt| !attempt.confined) {
         error.detail = format!("{}\n{}", attempt.summary(), error.detail);
@@ -304,27 +322,30 @@ fn run_verified_goal_inner(
     let mut findings: Vec<String> = Vec::new();
     let no_paths = WriteSet::default();
     loop {
-        let developed: GoalOutcome = run_goal_with_context(
-            &GoalRequest {
-                repository: request.repository,
-                goal: request.goal,
-                base: &base,
-                state_directory: request.state_directory,
-                write_set: request.write_set,
-                role: Role::Developer,
-                launch: request.developer,
-                kaisa_executable: request.kaisa_executable,
-                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-                egress_hosts: request.egress_hosts,
-                agent_writable: request.agent_writable,
-                local_model_port: None,
-                observed: request.observed,
-                reduced_mode: request.reduced_mode,
-            },
-            &AttemptContext {
-                findings: &findings,
-                ..AttemptContext::default()
-            },
+        let developed: GoalOutcome = with_admission_gate(
+            &context,
+            run_goal_with_context(
+                &GoalRequest {
+                    repository: request.repository,
+                    goal: request.goal,
+                    base: &base,
+                    state_directory: request.state_directory,
+                    write_set: request.write_set,
+                    role: Role::Developer,
+                    launch: request.developer,
+                    kaisa_executable: request.kaisa_executable,
+                    confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                    egress_hosts: request.egress_hosts,
+                    agent_writable: request.agent_writable,
+                    local_model_port: None,
+                    observed: request.observed,
+                    reduced_mode: request.reduced_mode,
+                },
+                &AttemptContext {
+                    findings: &findings,
+                    ..AttemptContext::default()
+                },
+            ),
         )?;
         let commit: Option<String> = developed.commit.clone();
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
@@ -441,24 +462,27 @@ fn run_verified_goal_inner(
                 ),
                 _ => kaisa_domain::ReducedModeBasis::None,
             };
-            let glanced: GoalOutcome = run_goal_with_context(
-                &GoalRequest {
-                    repository: request.repository,
-                    goal: &review_instruction(request.goal, &candidate),
-                    base: &candidate.commit,
-                    state_directory: request.state_directory,
-                    write_set: &no_paths,
-                    role: Role::Reviewer,
-                    launch: first_pass.launch,
-                    kaisa_executable: request.kaisa_executable,
-                    confine_agent: !needs_loopback,
-                    egress_hosts: &[],
-                    agent_writable: &[],
-                    local_model_port: first_pass.model_port,
-                    observed: false,
-                    reduced_mode: &local_basis,
-                },
-                &review_context,
+            let glanced: GoalOutcome = with_admission_gate(
+                &context,
+                run_goal_with_context(
+                    &GoalRequest {
+                        repository: request.repository,
+                        goal: &review_instruction(request.goal, &candidate),
+                        base: &candidate.commit,
+                        state_directory: request.state_directory,
+                        write_set: &no_paths,
+                        role: Role::Reviewer,
+                        launch: first_pass.launch,
+                        kaisa_executable: request.kaisa_executable,
+                        confine_agent: !needs_loopback,
+                        egress_hosts: &[],
+                        agent_writable: &[],
+                        local_model_port: first_pass.model_port,
+                        observed: false,
+                        reduced_mode: &local_basis,
+                    },
+                    &review_context,
+                ),
             )?;
             record_review(&context, &candidate, &glanced, true)?;
             if let Some(failure) = reviewer_failure(&glanced) {
@@ -502,24 +526,27 @@ fn run_verified_goal_inner(
                 continue;
             }
         }
-        let reviewed: GoalOutcome = run_goal_with_context(
-            &GoalRequest {
-                repository: request.repository,
-                goal: &review_instruction(request.goal, &candidate),
-                base: &candidate.commit,
-                state_directory: request.state_directory,
-                write_set: &no_paths,
-                role: Role::Reviewer,
-                launch: request.reviewer,
-                kaisa_executable: request.kaisa_executable,
-                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-                egress_hosts: request.egress_hosts,
-                agent_writable: request.agent_writable,
-                local_model_port: None,
-                observed: false,
-                reduced_mode: request.reduced_mode,
-            },
-            &review_context,
+        let reviewed: GoalOutcome = with_admission_gate(
+            &context,
+            run_goal_with_context(
+                &GoalRequest {
+                    repository: request.repository,
+                    goal: &review_instruction(request.goal, &candidate),
+                    base: &candidate.commit,
+                    state_directory: request.state_directory,
+                    write_set: &no_paths,
+                    role: Role::Reviewer,
+                    launch: request.reviewer,
+                    kaisa_executable: request.kaisa_executable,
+                    confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                    egress_hosts: request.egress_hosts,
+                    agent_writable: request.agent_writable,
+                    local_model_port: None,
+                    observed: false,
+                    reduced_mode: request.reduced_mode,
+                },
+                &review_context,
+            ),
         )?;
         record_review(&context, &candidate, &reviewed, false)?;
         if let Some(failure) = reviewer_failure(&reviewed) {

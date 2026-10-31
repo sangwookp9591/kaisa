@@ -8,11 +8,12 @@ use kaisa_domain::RepoPath;
 
 /// Reads explicit checks from the working tree; invalid configuration never falls back to detection.
 pub(crate) fn profile(root: &Path) -> io::Result<ProjectProfile> {
-    let mut profile = kaisa_context::derive_profile(root)?;
     let path = root.join("kaisa.toml");
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(profile),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return kaisa_context::derive_profile(root);
+        }
         Err(error) => return Err(error),
     };
     let value: toml::Value = text.parse().map_err(invalid)?;
@@ -20,7 +21,7 @@ pub(crate) fn profile(root: &Path) -> io::Result<ProjectProfile> {
         .get("profile")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| invalid("kaisa.toml needs [profile]"))?;
-    profile.commands.clear();
+    let mut profile = ProjectProfile::default();
     for (key, purpose) in [
         ("test", Purpose::Test),
         ("build", Purpose::Build),
@@ -51,6 +52,9 @@ pub(crate) fn profile(root: &Path) -> io::Result<ProjectProfile> {
                 profile.commands.push(command(argv, directory, purpose)?);
             }
         }
+    }
+    if profile.commands.is_empty() {
+        return kaisa_context::derive_profile(root);
     }
     Ok(profile)
 }
@@ -152,6 +156,7 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
         }
     };
     crate::doctor::show_checks(&profile, out)?;
+    crate::doctor::show_manifest_warning(&root, out)?;
     crate::doctor::show_risks(&root, out)?;
     let destination = root.join("kaisa.toml");
     let mut files = integration_files(&root);

@@ -223,7 +223,12 @@ creating a child. No policy-pack fetching, saved onboarding decisions or interac
 A terminal requires Enter to apply (Q cancels); without a terminal it previews and exits `0`, unless
 `--yes` is supplied. Existing profile files are preserved, so rerunning is idempotent. `[profile]`
 commands are argv arrays, or lists of command tables with `argv` and optional relative `directory`;
-goals use the working-tree test definition, and a candidate changing `kaisa.toml` requires a person.
+goals use the working-tree test definition, and a candidate changing `kaisa.toml` or an existing
+file named by trusted check arguments requires a person. A nonempty profile replaces detection;
+an empty profile uses detection. Explicit checks still work with a malformed `package.json`,
+which doctor reports as a warning. Doctor and first-run Home stop an agent's version probe after
+two seconds and report when it did not answer. Admission refusals and expired Decisions are
+recorded as waiting goals even when no agent ran.
 Commands remain detected until actually run. Agent integration has a preview/apply extension seam;
 this flow does not yet add agent files. Integration replacements back up originals and JSON merges
 preserve unrelated keys. No automatic settings fixes, command execution, monorepo picker or editor.

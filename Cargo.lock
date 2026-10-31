@@ -223,6 +223,7 @@ dependencies = [
  "kaisa-sys",
  "kaisa-workspace",
  "serde_json",
+ "shell-words",
 ]
 
 [[package]]

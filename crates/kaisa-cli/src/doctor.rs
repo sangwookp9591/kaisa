@@ -5,6 +5,32 @@ use std::process::Command;
 
 use kaisa_context::{ProjectProfile, Purpose};
 
+/// Keep Home responsive even when an installed CLI hangs or prompts.
+const VERSION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const VERSION_OUTPUT_CAP: usize = 4096;
+
+/// Explicit checks are authoritative, but a broken optional manifest still deserves a warning.
+pub(crate) fn show_manifest_warning(root: &Path, out: &mut dyn Write) -> io::Result<()> {
+    if root.join("kaisa.toml").is_file() {
+        match std::fs::read_to_string(root.join("package.json")) {
+            Ok(text) => {
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&text) {
+                    writeln!(
+                        out,
+                        "! package.json warning: {error}; using kaisa.toml checks"
+                    )?;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => writeln!(
+                out,
+                "! package.json warning: {error}; using kaisa.toml checks"
+            )?,
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn git(root: &Path, args: &[&str]) -> Option<String> {
     let mut command = Command::new("git");
     command.args([
@@ -184,21 +210,38 @@ pub(crate) fn diagnose(out: &mut dyn Write) -> io::Result<bool> {
             "codex login",
         ),
     ] {
-        let version = Command::new(agent)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|output| output.status.success());
+        let version = kaisa_sys::run_captured(
+            &kaisa_sys::ProcessSpec {
+                program: PathBuf::from(agent),
+                args: vec!["--version".to_owned()],
+                working_directory: std::env::current_dir()?,
+                env: Vec::new(),
+            },
+            &kaisa_sys::Confinement::Unconfined,
+            &[],
+            VERSION_DEADLINE,
+            VERSION_OUTPUT_CAP,
+        )
+        .ok();
+        let answered = version
+            .as_ref()
+            .is_some_and(|run| run.exit == Some(kaisa_sys::ProcessExit::Code(0)));
         if agent == "claude" {
-            claude_found = version.is_some();
+            claude_found = answered;
         }
         match version {
-            Some(output) => writeln!(
+            Some(output) if answered => writeln!(
                 out,
                 "✓ Agent: {agent} {}",
-                visible(String::from_utf8_lossy(&output.stdout).trim())
+                visible(String::from_utf8_lossy(&output.output).trim())
             )?,
-            None => writeln!(
+            Some(output) if output.exit.is_none() => writeln!(
+                out,
+                "{} Agent: {agent} did not answer --version within {} seconds → check the installation, then retry",
+                if agent == "claude" { "✗" } else { "!" },
+                VERSION_DEADLINE.as_secs(),
+            )?,
+            _ => writeln!(
                 out,
                 "{} Agent: {agent} not available → {install}",
                 if agent == "claude" { "✗" } else { "!" }
@@ -251,7 +294,10 @@ pub(crate) fn diagnose(out: &mut dyn Write) -> io::Result<bool> {
         )?;
         ready &= committed;
         match crate::init::profile(&root) {
-            Ok(profile) => ready &= show_checks(&profile, out)?,
+            Ok(profile) => {
+                ready &= show_checks(&profile, out)?;
+                show_manifest_warning(&root, out)?;
+            }
             Err(error) => {
                 line(
                     out,

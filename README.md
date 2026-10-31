@@ -142,8 +142,13 @@ Kaisa never calls unchecked work verified.
 
 `kaisa init` previews detected build/test/lint commands and risky repository settings. It asks
 before writing on a terminal; without a terminal it only previews unless you pass `--yes`.
-Existing `kaisa.toml` files are kept unchanged. Goals read its `[profile]` commands from the working
-tree; changing that file in a candidate stops delivery for a person. A simple override is:
+Existing `kaisa.toml` files are kept unchanged. A nonempty `[profile]` replaces detected commands
+entirely; include `test` to keep verification available. An empty profile falls back to detection,
+so initializing a project before adding tests does not disable future detection. Valid explicit
+checks take precedence over a malformed `package.json`; doctor reports that manifest as a warning.
+Goals read the working-tree profile. Changing `kaisa.toml` or an existing repository file named
+by its trusted check argv stops delivery for a person. The same protection covers script files
+named by the base `package.json` test script and its lifecycle hooks. A simple override is:
 
 ```toml
 [profile]
