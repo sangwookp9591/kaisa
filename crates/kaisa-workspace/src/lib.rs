@@ -23,7 +23,7 @@ pub use git::{GitError, git_cli_path};
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
-pub use secrets::{SecretKind, scan as scan_for_secrets};
+pub use secrets::{SecretKind, scan as scan_for_secrets, scan_bytes};
 pub use settings_risk::{
     MAX_RISK_EXCERPT_BYTES, MAX_SETTINGS_FILE_BYTES, RiskFinding, RiskRule, scan_settings,
 };

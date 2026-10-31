@@ -214,7 +214,8 @@ impl ContextPack {
         }
     }
 
-    /// Adds trusted check receipts. Output and command strings remain quoted data.
+    /// Adds Kaisa-authored check receipts, rendered verbatim. The caller must JSON-escape
+    /// command arguments and quote every untrusted output line separately from metadata.
     #[must_use]
     pub fn with_checks(mut self, evidence: &str) -> Self {
         if !evidence.is_empty() {
@@ -294,10 +295,7 @@ impl ContextPack {
         let mut message: String = String::new();
         for section in &self.sections {
             match section.kind {
-                SectionKind::Findings
-                | SectionKind::Diff
-                | SectionKind::Checks
-                | SectionKind::Lessons => {
+                SectionKind::Findings | SectionKind::Diff | SectionKind::Lessons => {
                     message.push_str(&format!("## {}\n", heading(section.kind)));
                     message.push_str(UNTRUSTED_NOTICE);
                     for line in section.text.lines() {

@@ -159,8 +159,7 @@ pub fn run_trusted_checks(
 
 /// Scan the complete capture before taking a tail: truncation must not hide a secret.
 fn review_output_tail(run: &CapturedRun) -> String {
-    let output = String::from_utf8_lossy(&run.output);
-    if !kaisa_workspace::scan_for_secrets(&output).is_empty() {
+    if !kaisa_workspace::scan_bytes(&run.output).is_empty() {
         return "[omitted: secret detected]".to_owned();
     }
     // A truncated capture contains a prefix, not the process's final output. Do not imply
@@ -168,6 +167,7 @@ fn review_output_tail(run: &CapturedRun) -> String {
     if run.truncated {
         return "[omitted: check output exceeded capture limit]".to_owned();
     }
+    let output = String::from_utf8_lossy(&run.output);
     let mut start = output.len().saturating_sub(CHECK_OUTPUT_TAIL_BYTES);
     while !output.is_char_boundary(start) {
         start += 1;
@@ -525,6 +525,29 @@ mod output_tests {
             tail, "[omitted: secret detected]",
             "scanning only the bounded tail would conceal an earlier credential"
         );
+    }
+
+    #[test]
+    fn a_utf16_secret_in_check_output_omits_the_entire_output() {
+        const AWS_KEY_LINE: &str = "credential: AKIAABCDEFGHIJKLMNOP\n";
+        for little_endian in [true, false] {
+            let mut run = captured_output("");
+            run.output = AWS_KEY_LINE
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                review_output_tail(&run),
+                "[omitted: secret detected]",
+                "raw UTF-16 credentials must be caught before lossy decoding (LE={little_endian})"
+            );
+        }
     }
 
     #[test]
