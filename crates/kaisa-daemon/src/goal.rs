@@ -700,7 +700,9 @@ pub fn whole_repository(repository: &Path) -> std::io::Result<WriteSet> {
     let mut entries: Vec<RepoPath> = Vec::new();
     for entry in std::fs::read_dir(repository)? {
         let name: String = entry?.file_name().to_string_lossy().into_owned();
-        if name != ".git"
+        if ![".git", ".gitattributes", ".gitmodules"]
+            .iter()
+            .any(|control| name.eq_ignore_ascii_case(control))
             && let Ok(path) = RepoPath::try_new(&name)
         {
             entries.push(path);

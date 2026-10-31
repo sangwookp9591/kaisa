@@ -1366,3 +1366,127 @@ fn a_claude_default_cannot_spawn_a_scripted_or_local_model_process() {
         );
     }
 }
+
+/// A shell agent sends real MCP requests through the CLI bridge, without model credentials.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_repository_with_root_attributes_allows_exec_but_keeps_attributes_read_only() {
+    const ATTRIBUTES: &str = "* text=auto\n";
+    const EXEC_NOTES: &str = "exec-worked";
+    let bench = Workbench::new("root-attributes-exec");
+    let repository = bench.base.join("repo");
+    std::fs::write(repository.join(".gitattributes"), ATTRIBUTES).expect("root attributes");
+    git(&repository, &["add", ".gitattributes"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Kaisa Test",
+            "-c",
+            "user.email=kaisa-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "attributes",
+        ],
+    );
+    let agent = bench.base.join("exec-agent.sh");
+    let requests = [
+        serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}}),
+        serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{
+            "name":"exec", "arguments":{"argv":["/bin/sh", "-c",
+                format!("printf {EXEC_NOTES} > src/notes.md; printf tampered > .gitattributes")]}}}),
+        serde_json::json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{
+            "name":"fs_write", "arguments":{"path":".gitattributes", "content":"tampered"}}}),
+    ].map(|request| request.to_string()).join("\n");
+    std::fs::write(
+        &agent,
+        format!(
+            r#"#!/bin/sh
+config=$2
+bridge=$3
+IFS= read -r pack
+printf '%s\n' '{requests}' | "$bridge" mcp --attempt "$(dirname "$config")"
+"#
+        ),
+    )
+    .expect("scripted agent");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))
+        .expect("executable agent");
+    let state = bench.base.join("state");
+    let run = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &agent.to_string_lossy(),
+            "--agent-arg",
+            env!("CARGO_BIN_EXE_kaisa"),
+            GOAL,
+        ])
+        .current_dir(&repository)
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("CLI runs");
+    let attempts = std::fs::read_dir(state.join("attempts")).expect("attempts");
+    let transcripts: String = attempts
+        .map(|entry| {
+            std::fs::read_to_string(entry.expect("attempt").path().join("transcript.log"))
+                .expect("agent transcript")
+        })
+        .collect();
+    assert!(
+        run.status.success(),
+        "CLI must execute with root attributes: {run:?}; transcript: {transcripts}"
+    );
+    assert!(
+        transcripts.contains("\"isError\":true") && transcripts.contains(".gitattributes"),
+        "the broker must return a visible explanation when a control write is refused: {transcripts}"
+    );
+    let branches = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/heads/kaisa/"])
+        .current_dir(&repository)
+        .output()
+        .expect("preserved branch");
+    let branch = String::from_utf8_lossy(&branches.stdout);
+    let notes = Command::new("git")
+        .args(["show", &format!("{}:src/notes.md", branch.trim())])
+        .current_dir(&repository)
+        .output()
+        .expect("preserved exec output");
+    assert_eq!(
+        String::from_utf8_lossy(&notes.stdout),
+        EXEC_NOTES,
+        "exec must actually run and write an owned file, rather than being silently unavailable"
+    );
+    let attributes = Command::new("git")
+        .args(["show", &format!("{}:.gitattributes", branch.trim())])
+        .current_dir(&repository)
+        .output()
+        .expect("preserved attributes");
+    assert_eq!(
+        String::from_utf8_lossy(&attributes.stdout),
+        ATTRIBUTES,
+        "both OS-confined exec and broker fs_write must leave root attributes unchanged"
+    );
+}
+
+/// Whole-repository scope excludes every case spelling of root Git controls.
+#[test]
+fn whole_repository_excludes_root_controls_and_keeps_ordinary_entries() {
+    let bench = Workbench::new("whole-repository-controls");
+    let repository = bench.base.join("repo");
+    for control in [
+        ".gitattributes",
+        ".GiTattributes",
+        ".gitmodules",
+        ".GITmodules",
+    ] {
+        std::fs::write(repository.join(control), "control").expect("control fixture");
+    }
+    let scope = kaisa_daemon::whole_repository(&repository).expect("repository scope");
+    assert_eq!(
+        scope.entries(),
+        &[kaisa_domain::RepoPath::try_new("src").expect("source")],
+        "whole-repository scope must exclude Git controls regardless of case"
+    );
+}

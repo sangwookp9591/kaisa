@@ -33,6 +33,12 @@ pub struct BridgeConfig {
     pub broker_port: Option<u16>,
 }
 
+fn is_root_control(name: &str) -> bool {
+    [".git", ".gitattributes", ".gitmodules"]
+        .iter()
+        .any(|control| name.eq_ignore_ascii_case(control))
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -98,47 +104,58 @@ impl BridgeConfig {
         })
     }
 
-    /// Canonical grants must remain in this worktree. Additive backends cannot carve
-    /// root controls out of a root grant; Seatbelt instead uses an overriding deny.
+    /// Canonical grants stay inside this worktree and never cover its root controls.
     fn exec_writable(&self) -> io::Result<Vec<PathBuf>> {
-        self.exec_writable_with_root_deny(cfg!(target_os = "macos"))
-    }
-
-    fn exec_writable_with_root_deny(
-        &self,
-        can_deny_root_controls: bool,
-    ) -> io::Result<Vec<PathBuf>> {
         let root = self.worktree.canonicalize()?;
         let resolver = FileBroker::new(&root, self.write_set.clone())?;
+        let denied = |reason| io::Error::new(io::ErrorKind::PermissionDenied, reason);
+        let mut paths = sandbox_profile(self.role, &self.write_set).writable;
         let mut writable = Vec::new();
-        for path in sandbox_profile(self.role, &self.write_set).writable {
-            let target = resolver
-                .resolve(&path)
-                .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+        while let Some(path) = paths.pop() {
+            if is_root_control(path.as_str().split('/').next().unwrap_or_default()) {
+                continue;
+            }
+            let target = resolver.resolve(&path).map_err(denied)?;
+            if target == root {
+                // Additive sandboxes cannot subtract controls from a root grant.
+                // Expand it once into ordinary entries; root aliases grant nothing themselves.
+                for entry in std::fs::read_dir(&root)? {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    let name = name
+                        .to_str()
+                        .ok_or_else(|| denied("non-UTF-8 exec grant".to_owned()))?;
+                    if is_root_control(name) {
+                        continue;
+                    }
+                    let child =
+                        RepoPath::try_new(name).map_err(|error| denied(error.to_string()))?;
+                    if resolver.resolve(&child).map_err(denied)? != root {
+                        paths.push(child);
+                    }
+                }
+                continue;
+            }
             let relative = target
                 .strip_prefix(&root)
-                .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+                .map_err(|error| denied(error.to_string()))?;
             let root_control = relative
                 .components()
                 .next()
                 .and_then(|name| name.as_os_str().to_str())
-                .is_some_and(|name| {
-                    [".git", ".gitattributes", ".gitmodules"]
-                        .iter()
-                        .any(|control| name.eq_ignore_ascii_case(control))
-                });
+                .is_some_and(is_root_control);
             if root_control
-                || (!can_deny_root_controls && target == root)
                 || (target.is_file()
                     && crate::broker::existing_link_count(&target)?.is_none_or(|links| links > 1))
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "exec cannot safely exclude root Git controls from this write grant; use fs_write",
+                return Err(denied(
+                    "exec cannot safely exclude root Git controls or hardlinks from this write grant; use fs_write".to_owned(),
                 ));
             }
             writable.push(target);
         }
+        writable.sort();
+        writable.dedup();
         if let Some(scratch) = &self.scratch {
             let scratch = scratch.canonicalize()?;
             if scratch.starts_with(&root) || root.starts_with(&scratch) {
@@ -356,15 +373,18 @@ mod tests {
     }
 
     #[test]
-    fn existing_git_control_files_refuse_exec_even_when_owned() {
+    fn existing_git_control_files_are_excluded_without_disabling_exec() {
         let mut config = an_exec_attempt("controls");
         for control in [".git", ".gitattributes", ".gitmodules"] {
             std::fs::write(config.worktree.join(control), "control").expect("control file");
             config.write_set =
                 WriteSet::new(vec![RepoPath::try_new(control).expect("control path")]);
             assert!(
-                config.exec_writable().is_err(),
-                "exec must never grant {control}"
+                config
+                    .exec_writable()
+                    .expect("exec remains available")
+                    .is_empty(),
+                "exec must skip {control} without granting it"
             );
         }
         let _ = std::fs::remove_dir_all(&config.worktree);
@@ -404,6 +424,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_unsafe_exec_grant_returns_its_refusal_reason_to_the_caller() {
+        use crate::{FileBroker, ToolHandler, ToolOutcome};
+        let config = an_exec_attempt("visible-refusal");
+        std::fs::hard_link(
+            config.worktree.join("src/code.rs"),
+            config.worktree.join("alias.rs"),
+        )
+        .expect("hardlink");
+        let mut broker = FileBroker::new(&config.worktree, config.write_set.clone())
+            .expect("broker")
+            .with_exec(config.exec_sandbox().expect("sandbox result"));
+        let outcome = broker.call("exec", &json!({"argv": ["/bin/sh", "-c", "exit 0"]}));
+        let _ = std::fs::remove_dir_all(&config.worktree);
+        assert!(
+            matches!(outcome, ToolOutcome::Refused(ref reason)
+            if reason.contains("hardlinks") && reason.contains("fs_write")),
+            "exec refusal must explain the unsafe grant and the available alternative: {outcome:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn an_alias_outside_the_worktree_refuses_the_exec_grant() {
         let mut config = an_exec_attempt("outside");
         let outside = config.worktree.with_extension("outside.rs");
@@ -421,22 +463,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_root_alias_grant_is_carved_by_seatbelt_or_refused_by_additive_backends() {
+    fn a_root_alias_grant_is_split_into_safe_entries_on_every_backend() {
         let mut config = an_exec_attempt("root-alias");
         std::os::unix::fs::symlink(".", config.worktree.join("root-alias")).expect("root alias");
+        std::fs::write(config.worktree.join(".gitattributes"), "control").expect("control");
         config.write_set =
             WriteSet::new(vec![RepoPath::try_new("root-alias").expect("alias path")]);
-        let outcome = config.exec_writable();
-        let additive = config.exec_writable_with_root_deny(false);
+        let expected = config.worktree.join("src").canonicalize().expect("source");
+        let outcome = config.exec_writable().expect("split grants");
         let _ = std::fs::remove_dir_all(&config.worktree);
-        assert!(
-            additive.is_err(),
-            "additive backends must refuse a root grant: {additive:?}"
-        );
         assert_eq!(
-            outcome.is_ok(),
-            cfg!(target_os = "macos"),
-            "only Seatbelt can subtract root control paths from a root grant: {outcome:?}"
+            outcome,
+            vec![expected],
+            "root grants must become ordinary entry grants, excluding controls and root aliases"
         );
     }
 
