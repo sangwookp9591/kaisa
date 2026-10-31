@@ -27,6 +27,8 @@ blocking problem, and asks you only when a human decision is actually needed.
 
 ## What works today
 
+<!-- W3b 결과 반영 대기 -->
+
 ```bash
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
 kaisa --agent codex "fix the flaky test"  # Codex develops (observed), Claude Code reviews
@@ -48,23 +50,32 @@ A goal ends with one of these results, which scripts and CI can rely on:
 
 ### How a verified run works
 
-1. **Recall.** The context pack carries the project profile, the impact set of the goal and up to
-   five relevant lessons from earlier verified runs, so a second session needs no re-explanation.
-2. **Develop.** The developer agent works in its own worktree. On macOS and Linux it is confined by the
-   OS sandbox; its file writes go through Kaisa's broker, which enforces the write set.
+1. **Recall.** The context pack carries the project profile and up to five relevant lessons from
+   earlier verified runs *of this repository*; lessons never cross repositories. A second session
+   needs no re-explanation.
+2. **Develop.** The developer agent works in its own worktree; its file writes go through Kaisa's
+   broker, which enforces the write set. Before it starts, Kaisa compares what the OS sandbox really
+   guarantees (write confinement, TCP, UDP, descendants) with what is needed. A shortfall stops the run
+   with exit `3` and names what is missing, unless a documented default policy covers it (the output
+   names it, for example `claude-reduced-until-T16.0`) or you accept it for a limited time with
+   `--accept-reduced <write,tcp,udp,descendants> --accept-until <unix time in ms>`.
 3. **Freeze.** The result becomes an immutable candidate (commit and tree digest).
 4. **Check.** Your project's test command runs on a clean checkout of the candidate, in the sandbox,
-   with no agent involved. A candidate that changes its own check definitions needs a person.
+   with no agent involved. A candidate that changes its own check definitions needs a person. If a check
+   changes the candidate's source files, Kaisa refuses all evidence and the run is not delivered.
 5. **First pass (optional).** If you registered a T0 local model, it reviews first. Its blocking
    findings send the candidate back without spending the full review; its approval is only advisory.
-6. **Review.** A reviewer reads the frozen candidate and answers with a structured verdict.
-   A malformed verdict never counts as approval.
+6. **Review.** A reviewer reads the frozen candidate and answers with a structured verdict. Kaisa
+   reads the verdict only from one final `kaisa-verdict` region of the reviewer's answer; a missing,
+   repeated, quoted or malformed verdict never counts as approval.
 7. **Gate.** Only a candidate with fresh passing evidence and an approving verdict is delivered.
    Blocking findings go back to the developer as a revision, up to the policy's revision limit.
-8. **Learn.** A delivered run records a lesson, verified by digest, for later runs.
+8. **Learn.** A delivered run records a lesson, verified by digest, for later runs on the same
+   repository only.
 
 Before any agent starts, Kaisa scans the repository's agent settings and stops if they would widen
-an agent's authority. Every run records the policy snapshot it ran under. A run interrupted by a
+an agent's authority; the frozen candidate's own settings are scanned again before a reviewer or a
+revision starts in it. Every run records the policy snapshot it ran under. A run interrupted by a
 crash is found and tidied on the next `kaisa` start; an attempt in an unknown state is never retried
 without proof.
 
@@ -74,11 +85,12 @@ without proof.
 |---|---|---|---|
 | Scripted and brokered agents confined | ✓ Seatbelt | ✓ Landlock | ✓ AppContainer |
 | Trusted checks confined | ✓ | ✓ | reduced (labelled) |
-| Claude Code confined | reduced until T16.0 | reduced until T16.0 | reduced until T16.0 |
-| Codex | observed (writes checked against the write set afterwards) | observed | observed |
-| Local model (first-pass review) | ✓ confined, loopback only | ✓ confined, loopback only | reduced (AppContainer has no loopback) |
+| Claude Code confined | reduced until T16.0 (default policy `claude-reduced-until-T16.0`) | reduced until T16.0 (same policy) | reduced until T16.0 (same policy) |
+| Codex | observed (writes checked against the write set afterwards; default policy `observed-checked-afterwards`) | observed | observed |
+| Local model (first-pass review) | ✓ confined, loopback only | ✓ confined, loopback only | reduced (AppContainer has no loopback; default policy `windows-local-model-loopback`) |
 
-*Reduced* runs are always labelled in the output. `kaisa --confine-claude "<goal>"` tries a confined
+*Reduced* runs are always labelled in the output, with the name of the policy or Decision that allowed
+them. Any other shortfall stops the run until you accept it with `--accept-reduced` and `--accept-until`. `kaisa --confine-claude "<goal>"` tries a confined
 Claude Code run; the steps to verify it on a machine with a logged-in CLI are in
 [`docs/research/brokered-mode-spike.md`](docs/research/brokered-mode-spike.md#closing-a-row-t35).
 

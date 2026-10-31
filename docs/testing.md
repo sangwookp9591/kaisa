@@ -63,6 +63,13 @@ reason the test names**; then restore the guard. Examples: confining an observed
 observed-run test; dropping the write-set check after an observed run must let the outside write
 through.
 
+## Integration tests need the fake agent built first
+
+The binary's end-to-end tests start the scripted agent `kaisa-fake-agent` as a separate program. Cargo
+does not build it for `cargo test -p kaisa --test <name>`, so run `cargo build -p kaisa-fake-agent`
+first. Without it those tests fail with errors such as `sandbox-exec: execvp() of …/kaisa-fake-agent
+failed` (for example, 7 of the 9 tests in `--test goal`). `scripts/check.sh` already builds it.
+
 ## Before every commit
 
 Run `scripts/check.sh` (or `scripts/check.sh --fix` to format first). It runs exactly what CI runs:
