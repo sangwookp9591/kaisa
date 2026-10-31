@@ -19,7 +19,7 @@
 
 **A control plane for coding agents that hands you only what already passed your tests and an independent review.**
 
-[See it run](#see-it-run) · [Install](#install) · [First run](#first-run) · [Quick start](#quick-start) · [How a verified run works](#how-a-verified-run-works) · [Protection status](#protection-status) · [Docs](#documentation)
+[See it run](#see-it-run) · [Kaisa vs ruflo / Orca](#kaisa-vs-ruflo-and-orca) · [Install](#install) · [First run](#first-run) · [Quick start](#quick-start) · [How a verified run works](#how-a-verified-run-works) · [Protection status](#protection-status) · [Docs](#documentation)
 
 </div>
 
@@ -80,6 +80,34 @@ the review may even approve it, and Kaisa still refuses to deliver: the candidat
 | ✅ | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
 | 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
 | 📊 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
+
+<a id="kaisa-vs-ruflo-and-orca"></a>
+
+## ⚖️ Kaisa, ruflo and Orca
+
+They solve different problems. Orca and ruflo help you **run many agents comfortably**. Kaisa answers
+a narrower question with evidence: **can you trust what an agent hands back?**
+
+| | ruflo | Orca | Kaisa |
+|---|---|---|---|
+| What it is | An agent meta-harness: swarms, memory, plugins for Claude Code and Codex | A desktop workspace for many agent terminals and worktrees, with supervised orchestration | A verification gate for agent work |
+| What "done" means | A caller-supplied `success` or exit 0; in our reading a dual run counts as done even when its reviewer reports a vulnerability | The worker's own `worker_done` message | Your trusted checks passed **fresh, on the exact candidate tree**, and an **independent reviewer** approved it |
+| A change that weakens the tests | No built-in stop found | Not its job | Stops for a person (exit `3`), whatever the review says; seen in a real Claude Code run on macOS |
+| Agent containment | Roles are labels on records; few controls on the execution path | Agents run with their own permission modes (including bypass modes) | Own worktree per attempt, an OS sandbox, a broker that enforces the write set; any reduction is labelled |
+| Record of what happened | JSON records kept apart from execution | SQLite orchestration ledger | Hash-chained ledger; every check result and verdict is bound to the candidate's digest |
+| Footprint | about 1.7 GB installed (npm) | about 700 MB (Electron app) | one Rust binary |
+
+<sub>ruflo 3.65.0 and Orca 1.4.244, read statically on 2026-10-30; details and file citations in
+[`docs/research/ruflo-control.md`](docs/research/ruflo-control.md) and
+[`docs/research/prior-art-rea.md`](docs/research/prior-art-rea.md). Later versions may differ.</sub>
+
+**Use them together.** Run Kaisa from an Orca terminal, or hand a goal to Kaisa from inside Claude Code
+with `/kaisa`, and keep your swarm or workspace tool for everything else. What comes back through
+Kaisa has passed your checks and a review.
+
+**What Kaisa does not do yet:** several candidates or a swarm per goal, a plugin ecosystem, a web
+console, packaged releases, and real-agent runs on Linux and Windows. See
+[Planned](#planned) and [Current differences from the design](#current-differences-from-the-design).
 
 <a id="install"></a>
 
@@ -440,6 +468,8 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
   single ledger-writer process.
 
 </details>
+
+<a id="planned"></a>
 
 ## 🗺️ Planned
 
