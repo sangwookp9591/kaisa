@@ -93,8 +93,10 @@ fn windows_git_alias(component: &str) -> bool {
         .unwrap_or(component)
         .trim_end_matches(['.', ' ']);
     let short_name = base.to_ascii_uppercase();
-    let short_git = short_name.strip_prefix("GIT~").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    let short_git = ["GIT~", "GITMOD~", "GITATT~"].iter().any(|prefix| {
+        short_name.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
     });
     short_git
         || (base != component
@@ -127,6 +129,10 @@ mod tests {
             ".GiT. ",
             "GIT~1",
             "git~123",
+            "GITMOD~1",
+            "gitatt~123",
+            "src/GitMod~2",
+            "src/GITATT~9:stream",
             ".git::$INDEX_ALLOCATION",
             ".git:$DATA",
             "src/.gitattributes. ",
