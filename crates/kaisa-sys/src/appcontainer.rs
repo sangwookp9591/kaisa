@@ -108,6 +108,27 @@ impl AppContainerProfile {
         })
     }
 
+    /// Derives an identity without creating, deleting or changing a profile or its grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error Windows reports if the name cannot be converted to a SID.
+    pub fn derive_identity(name: &str) -> io::Result<Self> {
+        let name = wide(OsStr::new(name));
+        let mut sid: PSID = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: name is NUL-terminated, sid receives a SID freed with FreeSid.
+        let derived =
+            unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };
+        hresult(derived)?;
+        Ok(Self {
+            name: Vec::new(),
+            sid,
+            capability: None,
+            sid_from_text: false,
+        })
+    }
+
     /// Opens an existing attempt's container identity from its recorded SID, without
     /// creating a new profile or changing its filesystem grants.
     ///

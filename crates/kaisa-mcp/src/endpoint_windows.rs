@@ -56,10 +56,7 @@ impl BrokerEndpoint {
             &digest.to_hex()[..PIPE_NAME_DIGITS]
         );
         let (up_name, down_name) = pipe_names(&base);
-        let sid: Option<String> =
-            std::fs::read_to_string(attempt_directory.join(CONTAINER_SID_FILE))
-                .ok()
-                .map(|text| text.trim().to_owned());
+        let sid = crate::attempt::verified_container_sid(attempt_directory)?;
         let create = |name: &str| match &sid {
             Some(sid) => ControlPipe::create_first_admitting(name, sid),
             None => ControlPipe::create_first(name),

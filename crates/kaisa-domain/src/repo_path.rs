@@ -16,6 +16,8 @@ pub enum RepoPathError {
     Absolute,
     /// A `..` segment would climb out of the repository.
     ClimbsOut,
+    /// A Windows spelling aliases a protected Git control path.
+    GitControlAlias,
 }
 
 impl fmt::Display for RepoPathError {
@@ -23,6 +25,7 @@ impl fmt::Display for RepoPathError {
         match self {
             Self::Empty => f.write_str("a repository path cannot be empty"),
             Self::Absolute => f.write_str("a repository path must be relative to the repository"),
+            Self::GitControlAlias => f.write_str("a Windows path alias names a Git control file"),
             Self::ClimbsOut => f.write_str("a repository path cannot contain `..`"),
         }
     }
@@ -49,7 +52,12 @@ impl RepoPath {
             match segment {
                 "" | "." => {}
                 ".." => return Err(RepoPathError::ClimbsOut),
-                other => segments.push(other),
+                other => {
+                    if windows_git_alias(other) {
+                        return Err(RepoPathError::GitControlAlias);
+                    }
+                    segments.push(other);
+                }
             }
         }
         if segments.is_empty() {
@@ -76,6 +84,25 @@ impl fmt::Display for RepoPath {
     }
 }
 
+/// Keep canonical Git names available for reads; the broker separately denies writes.
+/// Reject alternate Windows spellings on every OS so portable policy cannot be bypassed.
+fn windows_git_alias(component: &str) -> bool {
+    let base = component
+        .split(':')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(['.', ' ']);
+    let short_name = base.to_ascii_uppercase();
+    let short_git = short_name.strip_prefix("GIT~").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    short_git
+        || (base != component
+            && [".git", ".gitattributes", ".gitmodules"]
+                .iter()
+                .any(|name| base.eq_ignore_ascii_case(name)))
+}
+
 /// True for Unix roots, Windows drive paths (`C:`) and UNC or root-relative Windows paths.
 fn is_absolute(text: &str) -> bool {
     let bytes: &[u8] = text.as_bytes();
@@ -91,6 +118,50 @@ mod tests {
 
     /// A source file an agent typically changes.
     const SESSION_SOURCE: &str = "src/auth/session.rs";
+
+    /// Windows resolves each of these spellings to Git metadata.
+    fn windows_git_control_aliases() -> Vec<&'static str> {
+        vec![
+            ".git.",
+            ".git ",
+            ".GiT. ",
+            "GIT~1",
+            "git~123",
+            ".git::$INDEX_ALLOCATION",
+            ".git:$DATA",
+            "src/.gitattributes. ",
+            "src/.gitmodules:stream",
+            "src/GIT~2/config",
+        ]
+    }
+
+    #[test]
+    fn windows_aliases_of_git_controls_are_rejected_on_every_os() {
+        for alias in windows_git_control_aliases() {
+            assert_eq!(
+                RepoPath::try_new(alias),
+                Err(RepoPathError::GitControlAlias),
+                "Windows-equivalent control path {alias:?} must not enter a portable write set"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_unix_colons_dots_and_spaces_remain_valid_paths() {
+        for ordinary in [
+            "source:stream",
+            "file.",
+            "file ",
+            "git~source",
+            ".github",
+            ".gitignore",
+        ] {
+            assert!(
+                RepoPath::try_new(ordinary).is_ok(),
+                "ordinary Unix name {ordinary:?} must remain available"
+            );
+        }
+    }
 
     #[test]
     fn a_relative_path_inside_the_repository_is_accepted() {

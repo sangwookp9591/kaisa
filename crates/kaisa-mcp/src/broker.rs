@@ -120,7 +120,7 @@ impl FileBroker {
 
     /// Resolves each existing component, including directory aliases. Missing suffixes are
     /// appended to the canonical ancestor; dangling links are refused rather than created.
-    fn resolve(&self, relative: &RepoPath) -> Result<PathBuf, String> {
+    pub(crate) fn resolve(&self, relative: &RepoPath) -> Result<PathBuf, String> {
         let mut resolved = self.root.clone();
         for component in Path::new(relative.as_str()).components() {
             resolved.push(component);
@@ -242,7 +242,7 @@ fn protected_git_path(path: &RepoPath) -> bool {
     })
 }
 
-fn existing_link_count(path: &Path) -> std::io::Result<Option<u64>> {
+pub(crate) fn existing_link_count(path: &Path) -> std::io::Result<Option<u64>> {
     #[cfg(any(unix, windows))]
     {
         match kaisa_sys::hard_link_count(path) {
