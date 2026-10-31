@@ -21,6 +21,8 @@ pub struct SeatbeltPolicy {
     /// Directories (or files) the agent may change: the write set and the scratch area. Paths
     /// must be absolute and canonical (`/private/var`, not `/var`).
     pub writable: Vec<PathBuf>,
+    /// Repository root whose Git controls must stay read-only, even under a root grant.
+    pub git_control_root: Option<PathBuf>,
     /// The loopback port of the attempt's egress broker; `None` means no network at all.
     pub broker_port: Option<u16>,
     /// The Unix socket of the attempt's tool broker, the one local endpoint the agent may
@@ -59,6 +61,17 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
             sbpl_string(&path.to_string_lossy())
         ));
     }
+    if let Some(root) = &policy.git_control_root {
+        let root = regex_literal(root.to_string_lossy().trim_end_matches('/'));
+        let controls = "[.][gG][iI][tT]([aA][tT][tT][rR][iI][bB][uU][tT][eE][sS]|[mM][oO][dD][uU][lL][eE][sS])?";
+        let pattern = format!("^{root}/{controls}(/|$)");
+        // Use a normal SBPL string: it safely quotes roots containing quotes or
+        // backslashes. The regex filter compiles the decoded string as its pattern.
+        profile.push_str(&format!(
+            "(deny file-write* (regex {}))\n",
+            sbpl_string(&pattern)
+        ));
+    }
     if let Some(socket) = &policy.broker_socket {
         profile.push_str(&format!(
             "(allow network-outbound (literal {}))\n",
@@ -89,6 +102,18 @@ pub fn sandboxed_spec(spec: &ProcessSpec, policy: &SeatbeltPolicy) -> ProcessSpe
         working_directory: spec.working_directory.clone(),
         env: spec.env.clone(),
     }
+}
+
+/// Escape a canonical root as literal text in the anchored control-path regex.
+fn regex_literal(text: &str) -> String {
+    let mut escaped = String::new();
+    for character in text.chars() {
+        if ".^$*+?()[]{}|\\".contains(character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// `text` as an SBPL string literal: wrapped in quotes, with backslashes and quotes escaped.
