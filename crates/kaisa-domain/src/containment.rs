@@ -18,16 +18,19 @@ pub enum ContainmentCapability {
     TcpEgress,
     /// Outgoing UDP limited to the egress broker.
     UdpEgress,
+    /// Kaisa storage and other attempts' credentials are unreadable.
+    StateReadIsolation,
     /// Every descendant process contained and endable together.
     DescendantContainment,
 }
 
 impl ContainmentCapability {
     /// Every capability: what a run without any OS sandbox is missing.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::WriteConfinement,
         Self::TcpEgress,
         Self::UdpEgress,
+        Self::StateReadIsolation,
         Self::DescendantContainment,
     ];
 
@@ -38,6 +41,7 @@ impl ContainmentCapability {
             Self::WriteConfinement => "write",
             Self::TcpEgress => "tcp",
             Self::UdpEgress => "udp",
+            Self::StateReadIsolation => "state-read",
             Self::DescendantContainment => "descendants",
         }
     }
@@ -57,6 +61,7 @@ impl fmt::Display for ContainmentCapability {
             Self::WriteConfinement => "write confinement (write)",
             Self::TcpEgress => "TCP egress through the broker (tcp)",
             Self::UdpEgress => "UDP egress through the broker (udp)",
+            Self::StateReadIsolation => "Kaisa state read isolation (state-read)",
             Self::DescendantContainment => "descendant containment (descendants)",
         })
     }
@@ -72,7 +77,8 @@ pub fn landlock_missing(abi: Option<i64>, udp_filtered: bool) -> Vec<Containment
     let Some(abi) = abi else {
         return ContainmentCapability::ALL.to_vec();
     };
-    let mut missing: Vec<ContainmentCapability> = Vec::new();
+    // The current ruleset handles writes and network, leaving file reads open.
+    let mut missing: Vec<ContainmentCapability> = vec![ContainmentCapability::StateReadIsolation];
     if abi < LANDLOCK_TRUNCATE_ABI {
         missing.push(ContainmentCapability::WriteConfinement);
     }
@@ -430,7 +436,10 @@ mod tests {
 
         assert_eq!(
             missing,
-            vec![ContainmentCapability::TcpEgress],
+            vec![
+                ContainmentCapability::StateReadIsolation,
+                ContainmentCapability::TcpEgress
+            ],
             "ABI 3 confines every write but leaves TCP open"
         );
     }
@@ -441,8 +450,20 @@ mod tests {
 
         assert_eq!(
             missing,
-            vec![ContainmentCapability::UdpEgress],
+            vec![
+                ContainmentCapability::StateReadIsolation,
+                ContainmentCapability::UdpEgress
+            ],
             "Landlock never covers UDP; only the seccomp filter does"
+        );
+    }
+
+    #[test]
+    fn a_landlock_sandbox_always_reports_that_kaisa_state_remains_readable() {
+        assert!(
+            landlock_missing(Some(LANDLOCK_NETWORK_ABI), true)
+                .contains(&ContainmentCapability::StateReadIsolation),
+            "write and network rules do not restrict reads of state or other attempt tokens"
         );
     }
 

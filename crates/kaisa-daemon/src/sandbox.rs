@@ -134,6 +134,8 @@ impl AgentSandbox {
 /// has no network: every change it makes goes through the broker.
 #[cfg(unix)]
 pub(crate) fn agent_sandbox(
+    state_directory: &Path,
+    worktree: &Path,
     scratch: &Path,
     agent_writable: &[PathBuf],
     broker_socket: &Path,
@@ -153,16 +155,34 @@ pub(crate) fn agent_sandbox(
             (Some(directory), Some(name)) => directory.canonicalize()?.join(name),
             _ => broker_socket.to_owned(),
         };
-        Ok(AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+        let attempt = scratch.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scratch has no attempt directory",
+            )
+        })?;
+        let mut readable = vec![worktree.canonicalize()?, scratch.canonicalize()?];
+        for file in [
+            "mcp.json",
+            kaisa_mcp::BRIDGE_CONFIG_FILE,
+            kaisa_mcp::TOKEN_FILE,
+            kaisa_mcp::BROKER_ENDPOINT_FILE,
+        ] {
+            readable.push(attempt.join(file));
+        }
+        let mut policy = kaisa_sys::SeatbeltPolicy {
+            readable,
             writable,
             broker_socket: Some(socket),
             broker_port: egress_port,
             ..kaisa_sys::SeatbeltPolicy::default()
-        }))
+        };
+        policy.protect_state(state_directory)?;
+        Ok(AgentSandbox::Seatbelt(policy))
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = broker_socket;
+        let _ = (state_directory, worktree, broker_socket);
         let existing: Vec<PathBuf> = writable.into_iter().filter(|path| path.exists()).collect();
         Ok(match kaisa_sys::write_ruleset(&existing, egress_port)? {
             Some(ruleset) => AgentSandbox::Landlock(ruleset),
@@ -171,7 +191,13 @@ pub(crate) fn agent_sandbox(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (writable, broker_socket, egress_port);
+        let _ = (
+            state_directory,
+            worktree,
+            writable,
+            broker_socket,
+            egress_port,
+        );
         Ok(AgentSandbox::Unconfined)
     }
 }
@@ -215,6 +241,89 @@ mod tests {
     use kaisa_domain::ContainmentCapability;
 
     use super::{AgentSandbox, beyond_admitted, expected_missing};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_agent_reads_its_bridge_and_worktree_but_not_daemon_or_other_attempt_secrets() {
+        use kaisa_sys::{ProcessExit, ProcessSpec, run_captured};
+        let root =
+            std::env::temp_dir().join(format!("kaisa-agent-read-isolation-{}", std::process::id()));
+        let state = root.join("state");
+        let attempt = state.join("attempts/own");
+        let other = state.join("attempts/other");
+        let scratch = attempt.join("scratch");
+        let worktree = state.join("worktrees/own");
+        for directory in [&scratch, &worktree, &other] {
+            std::fs::create_dir_all(directory).expect("isolated state fixture");
+        }
+        let allowed = [
+            attempt.join("bridge.token"),
+            attempt.join("bridge.json"),
+            attempt.join("mcp.json"),
+            attempt.join("broker.endpoint"),
+            worktree.join("source.rs"),
+        ];
+        let denied = [
+            state.join("kaisa.db"),
+            other.join("bridge.token"),
+            attempt.join("private.log"),
+        ];
+        for file in allowed.iter().chain(&denied) {
+            std::fs::write(file, "fixture contents").expect("planted fixture");
+        }
+        let sandbox = super::agent_sandbox(
+            &state,
+            &worktree,
+            &scratch,
+            &[],
+            &attempt.join("broker.sock"),
+            None,
+        )
+        .expect("agent sandbox");
+        let read = |path: &std::path::Path| {
+            let spec = ProcessSpec {
+                program: "/bin/cat".into(),
+                args: vec![path.to_string_lossy().into_owned()],
+                working_directory: worktree.clone(),
+                env: Vec::new(),
+            };
+            run_captured(
+                &spec,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("confined cat exits")
+            .exit
+            .expect("cat exits before deadline")
+        };
+        for secret in &denied {
+            assert_ne!(
+                read(secret),
+                ProcessExit::Code(0),
+                "agent constructor must hide {secret:?}"
+            );
+        }
+        for file in allowed
+            .iter()
+            .chain([&std::path::PathBuf::from("/etc/hosts")])
+        {
+            assert_eq!(
+                read(file),
+                ProcessExit::Code(0),
+                "the relay and agent still need {file:?}"
+            );
+        }
+        let alias = worktree.join("stolen-token");
+        std::os::unix::fs::symlink(&denied[1], &alias).expect("hostile symlink");
+        assert_ne!(
+            read(&alias),
+            ProcessExit::Code(0),
+            "a worktree symlink must not reopen state"
+        );
+        std::fs::remove_dir_all(root).expect("remove isolated state");
+    }
 
     #[test]
     fn an_unconfined_sandbox_is_missing_every_capability() {

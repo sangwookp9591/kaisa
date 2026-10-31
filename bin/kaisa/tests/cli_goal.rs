@@ -892,7 +892,7 @@ const USAGE_ERROR: i32 = 64;
 /// How long a person's Decision lasts in these tests: one hour, in milliseconds.
 const DECISION_LIFETIME_MS: u64 = 60 * 60 * 1000;
 /// Every capability a run without an OS sandbox is missing, as a person types them.
-const EVERY_CAPABILITY: &str = "write,tcp,udp,descendants";
+const EVERY_CAPABILITY: &str = "write,tcp,udp,state-read,descendants";
 
 /// Milliseconds since the Unix epoch, the ledger's clock.
 fn now_ms() -> u64 {

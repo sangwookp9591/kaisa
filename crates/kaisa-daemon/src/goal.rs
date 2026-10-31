@@ -528,8 +528,15 @@ fn run_goal_inner(
     };
     #[cfg(unix)]
     let sandbox = if confine_agent {
-        agent_sandbox(&scratch, request.agent_writable, &broker.1, egress_port)
-            .map_err(at("building the agent's sandbox"))?
+        agent_sandbox(
+            request.state_directory,
+            worktree.path(),
+            &scratch,
+            request.agent_writable,
+            &broker.1,
+            egress_port,
+        )
+        .map_err(at("building the agent's sandbox"))?
     } else {
         AgentSandbox::Unconfined
     };
