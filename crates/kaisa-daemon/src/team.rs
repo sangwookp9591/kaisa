@@ -697,6 +697,7 @@ mod tests {
             missing: vec![],
             admitted_on: ReducedModeBasis::None,
             observed: true,
+            permission_denials: Vec::new(),
         }];
         let summary = attempts[0].summary();
         let failed = finish(
