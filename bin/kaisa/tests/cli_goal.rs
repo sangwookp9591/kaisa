@@ -650,11 +650,22 @@ fn an_unknown_agent_is_a_usage_error() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
 
+/// The local reviewer's final answer, carried in its one-line `done` protocol.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Clone, Copy)]
+enum LocalReviewAnswer {
+    Dedicated,
+    Malformed,
+}
+
 /// A loopback OpenAI-compatible server standing in for a registered local model. It answers
 /// the registration probe with a greeting and every review pack with an approving verdict for
 /// the tree the pack names, counting the reviews it was asked for.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn a_local_reviewer_model(reviews: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+fn a_local_reviewer_model(
+    reviews: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    answer: LocalReviewAnswer,
+) -> u16 {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback works");
     let port: u16 = listener.local_addr().expect("bound").port();
@@ -705,7 +716,11 @@ fn a_local_reviewer_model(reviews: std::sync::Arc<std::sync::atomic::AtomicUsize
                 Some(tree) => {
                     reviews.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let verdict = serde_json::json!({"candidate_tree": tree, "approve": true, "findings": []});
-                    serde_json::json!({"done": verdict.to_string()}).to_string()
+                    let summary = match answer {
+                        LocalReviewAnswer::Dedicated => format!("kaisa-verdict: {verdict}"),
+                        LocalReviewAnswer::Malformed => "kaisa-verdict: {BROKEN".to_owned(),
+                    };
+                    serde_json::json!({"done": summary}).to_string()
                 }
                 None => "ready".to_owned(),
             };
@@ -724,11 +739,26 @@ fn a_local_reviewer_model(reviews: std::sync::Arc<std::sync::atomic::AtomicUsize
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_light_task_runs_on_the_registered_local_model() {
-    let bench = Workbench::new("light-work");
+    a_local_first_pass_that_reaches_full_review(LocalReviewAnswer::Dedicated);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_malformed_local_first_pass_leaves_the_decision_to_the_full_reviewer() {
+    a_local_first_pass_that_reaches_full_review(LocalReviewAnswer::Malformed);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_local_first_pass_that_reaches_full_review(answer: LocalReviewAnswer) {
+    const EXPECTED_FIRST_PASSES: usize = 1;
+    let bench = Workbench::new(match answer {
+        LocalReviewAnswer::Dedicated => "light-work",
+        LocalReviewAnswer::Malformed => "malformed-first-pass",
+    });
     let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
         .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
     let reviews = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let port: u16 = a_local_reviewer_model(std::sync::Arc::clone(&reviews));
+    let port: u16 = a_local_reviewer_model(std::sync::Arc::clone(&reviews), answer);
     let state: PathBuf = bench.base.join("state");
     let registered: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
         .args([
@@ -762,7 +792,7 @@ fn a_light_task_runs_on_the_registered_local_model() {
         "the person is told the first pass runs on the local model: {stdout:?}"
     );
     assert!(
-        reviews.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        reviews.load(std::sync::atomic::Ordering::SeqCst) == EXPECTED_FIRST_PASSES,
         "the local model was actually asked for the first-pass review"
     );
     assert!(

@@ -81,13 +81,32 @@ pub struct VerifiedOutcome {
 fn review_instruction(goal: &str, candidate: &Candidate) -> String {
     format!(
         "Review the candidate below for the goal it was made for. Report blocking problems only \
-         when the goal is not met or the change is unsafe. End your answer with exactly one JSON \
-         verdict: \
+         when the goal is not met or the change is unsafe. End your answer with exactly one \
+         unquoted ```kaisa-verdict fence containing only the JSON verdict below, then a closing \
+         ``` on its own line. No text may follow it; never repeat that dedicated marker in examples. \
+         A one-line-only protocol may instead end with exactly one line starting at column 1 \
+         with \"kaisa-verdict: \" followed by the complete JSON. Use exactly one of these formats. \
+         Verdict schema: \
          {{\"candidate_tree\": \"...\", \"approve\": true|false, \"findings\": [{{\"severity\": \
          \"blocking\"|\"advisory\", \"path\": \"...\", \"line\": n|null, \"message\": \"...\"}}]}}\n\n\
          Goal: {goal}\n{CANDIDATE_TREE_LABEL}{}\n",
         candidate.tree
     )
+}
+
+/// A review is consumable only after a successful process and a complete capture.
+fn reviewer_failure(review: &GoalOutcome) -> Option<Delivery> {
+    if review.truncated {
+        return Some(Delivery::Refuse(
+            "the reviewer transcript was truncated".to_owned(),
+        ));
+    }
+    if review.exit != Some(ProcessExit::Code(0)) {
+        return Some(Delivery::Refuse(
+            "the reviewer did not exit successfully with code 0".to_owned(),
+        ));
+    }
+    None
 }
 
 /// The verdict in a reviewer's recorded transcript, if it validates.
@@ -258,10 +277,15 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 observed: false,
                 reduced_mode: request.reduced_mode,
             })?;
+            if let Some(failure) = reviewer_failure(&glanced) {
+                attempts.push(glanced);
+                return Ok(finish(failure, Some(candidate), attempts));
+            }
             let glance: Option<ReviewVerdict> =
                 verdict_from(request.state_directory, &glanced, &candidate.tree);
             attempts.push(glanced);
-            // Only a send-back is acted on; anything else still goes to the full review.
+            // Only valid blocking findings act on the advisory first pass; an invalid answer
+            // still requires the full reviewer to make the decision.
             if let Some(glance) = glance
                 && let Delivery::Revise(reasons) =
                     decide_delivery(&candidate, &evidence, Some(&glance))
@@ -290,6 +314,10 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             observed: false,
             reduced_mode: request.reduced_mode,
         })?;
+        if let Some(failure) = reviewer_failure(&reviewed) {
+            attempts.push(reviewed);
+            return Ok(finish(failure, Some(candidate), attempts));
+        }
         let verdict: Option<ReviewVerdict> =
             verdict_from(request.state_directory, &reviewed, &candidate.tree);
         attempts.push(reviewed);
