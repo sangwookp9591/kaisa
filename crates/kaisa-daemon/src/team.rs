@@ -262,7 +262,7 @@ fn run_verified_goal_inner(
             return Ok(finish(
                 settings_widen_authority("the candidate's", &risks),
                 Some(candidate),
-                attempts,
+                std::mem::take(attempts),
             ));
         }
         let evidence: Vec<Evidence> = run_trusted_checks(
@@ -298,7 +298,7 @@ fn run_verified_goal_inner(
             })?;
             if let Some(failure) = reviewer_failure(&glanced) {
                 attempts.push(glanced);
-                return Ok(finish(failure, Some(candidate), attempts));
+                return Ok(finish(failure, Some(candidate), std::mem::take(attempts)));
             }
             let glance: Option<ReviewVerdict> =
                 verdict_from(request.state_directory, &glanced, &candidate.tree);
@@ -339,7 +339,7 @@ fn run_verified_goal_inner(
         })?;
         if let Some(failure) = reviewer_failure(&reviewed) {
             attempts.push(reviewed);
-            return Ok(finish(failure, Some(candidate), attempts));
+            return Ok(finish(failure, Some(candidate), std::mem::take(attempts)));
         }
         let verdict: Option<ReviewVerdict> =
             verdict_from(request.state_directory, &reviewed, &candidate.tree);
