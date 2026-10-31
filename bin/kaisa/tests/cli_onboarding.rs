@@ -38,6 +38,10 @@ impl Project {
         );
         project.write("src/lib.rs", "pub fn ready() {}\n");
         project.git(&["init", "--quiet", "--initial-branch=main"]);
+        // Git's automatic background maintenance after a commit can create and remove
+        // `.git/objects/maintenance.lock` at any moment, which would race the read-only snapshots.
+        project.git(&["config", "maintenance.auto", "false"]);
+        project.git(&["config", "gc.auto", "0"]);
         project.commit();
         project
     }

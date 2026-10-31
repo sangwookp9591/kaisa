@@ -430,13 +430,17 @@ fn recorded_test_goal_args(_meta: &Value) -> Vec<String> {
 /// Creates one directory readable only by its owner (`0700` on Unix; on Windows the private
 /// state directory's per-user profile location already restricts it, as for the state directory).
 fn create_private_directory(directory: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(kaisa_sys::PRIVATE_MODE);
+        fs::DirBuilder::new()
+            .mode(kaisa_sys::PRIVATE_MODE)
+            .create(directory)
     }
-    builder.create(directory)
+    #[cfg(not(unix))]
+    {
+        fs::DirBuilder::new().create(directory)
+    }
 }
 
 /// Opens `path` for appending (creating it) readable only by its owner (`0600` on Unix).
