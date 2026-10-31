@@ -50,7 +50,9 @@ const AWS_KEY_BODY: usize = 16;
 #[must_use]
 pub fn scan(text: &str) -> Vec<SecretKind> {
     let mut found: Vec<SecretKind> = Vec::new();
-    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
+    if text.contains("-----BEGIN")
+        && (text.contains("PRIVATE KEY-----") || text.contains("PRIVATE KEY BLOCK-----"))
+    {
         found.push(SecretKind::PrivateKey);
     }
     let bytes: &[u8] = text.as_bytes();
@@ -72,6 +74,28 @@ pub fn scan(text: &str) -> Vec<SecretKind> {
     }
     if has_prefixed_token(text, "sk-ant-", MIN_TOKEN_BODY) {
         found.push(SecretKind::AnthropicKey);
+    }
+    found
+}
+
+/// Scan UTF-8 and UTF-16 in either byte order. BOM-less UTF-16 is common in
+/// generated configuration; scanning both orders avoids trusting an encoding guess.
+pub(crate) fn scan_bytes(bytes: &[u8]) -> Vec<SecretKind> {
+    let mut found = scan(&String::from_utf8_lossy(bytes));
+    for little_endian in [true, false] {
+        let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        });
+        let decoded = String::from_utf16_lossy(&units.collect::<Vec<_>>());
+        for kind in scan(&decoded) {
+            if !found.contains(&kind) {
+                found.push(kind);
+            }
+        }
     }
     found
 }

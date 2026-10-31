@@ -73,10 +73,12 @@ pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitErr
 static NEXT_HOOKS_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 /// Owned by one preservation operation, outside the agent's worktree. Never reuse an
-/// existing directory: it may contain hooks. Drop removes only our still-empty directory.
+/// existing directory: it may contain hooks. A private parent also holds empty configuration
+/// and transient NUL-delimited pathspec files; Drop removes only owned files and empty directories.
 pub(crate) struct EmptyHooksDirectory {
     path: PathBuf,
     setting: String,
+    empty_file: PathBuf,
 }
 
 impl EmptyHooksDirectory {
@@ -95,7 +97,6 @@ impl EmptyHooksDirectory {
             let text = path.to_str().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "hooks path is not UTF-8")
             })?;
-            let setting = format!("core.hooksPath={text}");
             let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             let builder = {
@@ -105,7 +106,24 @@ impl EmptyHooksDirectory {
                 builder
             };
             match builder.create(&path) {
-                Ok(()) => return Ok(Self { path, setting }),
+                Ok(()) => {
+                    let empty_file = path.join("empty");
+                    if let Err(error) = std::fs::write(&empty_file, []) {
+                        let _ = std::fs::remove_dir(&path);
+                        return Err(error);
+                    }
+                    let hooks_path = path.join("hooks");
+                    if let Err(error) = std::fs::create_dir(&hooks_path) {
+                        let _ = std::fs::remove_file(&empty_file);
+                        let _ = std::fs::remove_dir(&path);
+                        return Err(error);
+                    }
+                    return Ok(Self {
+                        path: hooks_path,
+                        setting: format!("core.hooksPath={text}/hooks"),
+                        empty_file,
+                    });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -116,6 +134,11 @@ impl EmptyHooksDirectory {
 impl Drop for EmptyHooksDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir(&self.path);
+        let _ = std::fs::remove_file(self.empty_file.with_file_name("paths"));
+        let _ = std::fs::remove_file(&self.empty_file);
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 }
 
@@ -126,10 +149,114 @@ pub(crate) fn run_git_for_preservation(
     hooks: &EmptyHooksDirectory,
     args: &[&str],
 ) -> Result<Vec<u8>, GitError> {
-    // Inventory filenames must remain literal paths, even if they contain Git pathspec syntax.
-    let mut configured = vec!["-c", &hooks.setting, "--literal-pathspecs"];
-    configured.extend_from_slice(args);
-    run_git(directory, &configured)
+    let mut command = preservation_command(directory, hooks);
+    // `git config` only reads configuration; it does not run filters. Override every
+    // configured driver, including filters named only by worktree attributes.
+    let configured = preservation_command(directory, hooks)
+        .args([
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            "^filter\\..*\\.(clean|smudge|process|required)$",
+        ])
+        .output()
+        .map_err(GitError::Spawn)?;
+    if !configured.status.success() && configured.status.code() != Some(1) {
+        return Err(GitError::Failed {
+            args: vec!["config".into()],
+            stderr: String::from_utf8_lossy(&configured.stderr).into_owned(),
+        });
+    }
+    for key in configured
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = std::str::from_utf8(key).map_err(|error| {
+            GitError::Spawn(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+        let value = if key.ends_with(".required") {
+            "false"
+        } else {
+            ""
+        };
+        command.args(["-c", &format!("{key}={value}")]);
+    }
+    let output = command.args(args).output().map_err(GitError::Spawn)?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(GitError::Failed {
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
+    }
+}
+
+/// Every preservation command, including configuration discovery, uses this policy.
+fn preservation_command(directory: &Path, hooks: &EmptyHooksDirectory) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(directory)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &hooks.empty_file)
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .args([
+            "-c",
+            &hooks.setting,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.sshCommand=",
+            "-c",
+            "diff.external=",
+            "--literal-pathspecs",
+        ])
+        .args([
+            "-c",
+            &format!("core.attributesFile={}", hooks.empty_file.display()),
+        ]);
+    command
+}
+
+/// Stage literal paths without growing the process argument vector. The private file
+/// belongs to the same operation as the hooks policy and is removed before returning.
+pub(crate) fn stage_paths(
+    directory: &Path,
+    hooks: &EmptyHooksDirectory,
+    paths: &[String],
+) -> Result<(), GitError> {
+    let pathspec = hooks.empty_file.with_file_name("paths");
+    let mut bytes = Vec::new();
+    for path in paths {
+        bytes.extend_from_slice(path.as_bytes());
+        bytes.push(0);
+    }
+    std::fs::write(&pathspec, bytes).map_err(GitError::Spawn)?;
+    let result = run_git_for_preservation(
+        directory,
+        hooks,
+        &[
+            "add",
+            "--all",
+            "--force",
+            &format!("--pathspec-from-file={}", pathspec.display()),
+            "--pathspec-file-nul",
+        ],
+    );
+    let _ = std::fs::remove_file(pathspec);
+    result.map(|_| ())
 }
 
 /// Runs git and returns its stdout as trimmed text.
@@ -227,6 +354,56 @@ mod tests {
         assert!(
             std::error::Error::source(&refusal).is_some(),
             "the refusal must retain the OS error explaining why directory creation failed"
+        );
+    }
+    #[test]
+    fn preservation_overrides_executable_settings_and_uses_empty_global_configuration() {
+        let repository = a_repository_with_one_commit_on_main();
+        let hooks = EmptyHooksDirectory::create().expect("create private Git policy");
+        for (key, value) in [
+            ("core.fsmonitor", "false"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("core.sshCommand", ""),
+            ("diff.external", ""),
+        ] {
+            let output =
+                run_git_for_preservation(repository.path(), &hooks, &["config", "--get", key])
+                    .expect("read effective setting");
+            assert_eq!(
+                String::from_utf8(output).expect("setting is text").trim(),
+                value,
+                "preservation must enforce {key}"
+            );
+        }
+        let command = super::preservation_command(repository.path(), &hooks);
+        let environment: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")),
+            Some(&Some(std::ffi::OsStr::new("1"))),
+            "system configuration must be disabled"
+        );
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("GIT_CONFIG_GLOBAL")),
+            Some(&Some(hooks.empty_file.as_os_str())),
+            "global configuration must use the operation's empty file"
+        );
+        assert!(
+            std::fs::read(&hooks.empty_file)
+                .expect("read global configuration")
+                .is_empty(),
+            "global settings must not inherit executable programs"
+        );
+        let attributes = run_git_for_preservation(
+            repository.path(),
+            &hooks,
+            &["config", "--get", "core.attributesFile"],
+        )
+        .expect("read attributes policy");
+        assert_eq!(
+            String::from_utf8(attributes).expect("path is UTF-8").trim(),
+            hooks.empty_file.to_str().expect("owned path is UTF-8"),
+            "user attribute configuration must use the empty file"
         );
     }
 }

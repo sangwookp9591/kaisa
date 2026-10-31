@@ -4,10 +4,10 @@
 //! its worktree is reclaimed. The commit uses Kaisa's own identity and skips repository hooks:
 //! preservation must not run code from the repository it is preserving.
 
-use crate::git::{EmptyHooksDirectory, GitError, run_git_for_preservation};
+use crate::git::{EmptyHooksDirectory, GitError, run_git_for_preservation, stage_paths};
 use crate::inventory::Inventory;
 use crate::receipt::PreservationReceipt;
-use crate::secrets::{SecretKind, scan};
+use crate::secrets::{SecretKind, scan_bytes};
 use crate::worktree::{Worktree, WorktreeError};
 
 /// Files larger than this are not scanned in memory; they are treated as flagged, so they are
@@ -65,13 +65,9 @@ pub fn preserve_as_commit(
             covered.push(entry.path.clone());
         }
     }
-    // A previous agent may already have staged credentials. Restore their HEAD versions
-    // in the index without touching the files that a person must still preserve separately.
-    if !flagged.is_empty() {
-        let mut reset = vec!["reset", "--quiet", "HEAD", "--"];
-        reset.extend(flagged.iter().map(|(path, _)| path.as_str()));
-        run_git_for_preservation(worktree.path(), &hooks, &reset)?;
-    }
+    // Rebuild the index from scanned paths only, including when the agent staged
+    // an unrepresentable filename or a nested repository. Never touch working copies.
+    run_git_for_preservation(worktree.path(), &hooks, &["reset", "--quiet", "HEAD"])?;
     if paths.is_empty() {
         return Ok(Preservation {
             receipt: PreservationReceipt::default(),
@@ -79,9 +75,7 @@ pub fn preserve_as_commit(
         });
     }
     // `--force` because ignored files that the policy treats as user data must be kept too.
-    let mut add: Vec<&str> = vec!["add", "--all", "--force", "--"];
-    add.extend(paths.iter().map(String::as_str));
-    run_git_for_preservation(worktree.path(), &hooks, &add)?;
+    stage_paths(worktree.path(), &hooks, &paths)?;
     let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
     let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
     commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
@@ -104,11 +98,22 @@ fn expand_files(
     path: &str,
     files: &mut Vec<String>,
 ) -> Result<(), WorktreeError> {
+    // Inventory paths are UTF-8 strings. Never traverse a lossy name: it could
+    // collide with a different, valid filename. Genuine replacement-character
+    // names are conservatively left for manual preservation too.
+    if path.contains('\u{fffd}') {
+        files.push(path.to_owned());
+        return Ok(());
+    }
     let absolute = worktree.path().join(path);
     if absolute
         .symlink_metadata()
         .is_ok_and(|metadata| metadata.is_dir())
     {
+        if absolute.join(".git").symlink_metadata().is_ok() {
+            files.push(path.to_owned());
+            return Ok(());
+        }
         let children = std::fs::read_dir(&absolute).map_err(GitError::Spawn)?;
         for child in children {
             let child = child.map_err(GitError::Spawn)?;
@@ -127,7 +132,13 @@ fn expand_files(
 /// The credentials found in the file at `path`, or `None` for an entry that is not a readable
 /// file (a deletion). A file too large or unreadable to scan is reported as flagged.
 fn secrets_in(worktree: &Worktree, path: &str) -> Option<Vec<SecretKind>> {
+    if path.contains('\u{fffd}') {
+        return Some(vec![SecretKind::Unscannable]);
+    }
     let file = worktree.path().join(path);
+    if file.is_dir() && file.join(".git").symlink_metadata().is_ok() {
+        return Some(vec![SecretKind::Unscannable]);
+    }
     let metadata = match std::fs::symlink_metadata(&file) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -140,7 +151,7 @@ fn secrets_in(worktree: &Worktree, path: &str) -> Option<Vec<SecretKind>> {
         return Some(vec![SecretKind::Unscannable]);
     }
     match std::fs::read(&file) {
-        Ok(bytes) => Some(scan(&String::from_utf8_lossy(&bytes))),
+        Ok(bytes) => Some(scan_bytes(&bytes)),
         Err(_) => Some(vec![SecretKind::Unscannable]),
     }
 }
@@ -422,5 +433,300 @@ mod tests {
                 "{name} must not execute during preservation"
             );
         }
+    }
+    /// Install a real executable that leaves evidence whenever Git invokes it.
+    #[cfg(unix)]
+    fn a_marker_program(repository: &TemporaryRepository, name: &str) -> (String, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = repository.sibling(&format!("{name}.sh"));
+        let marker = repository.sibling(&format!("{name}-ran"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf ran > '{}'\nexit 0\n", marker.display()),
+        )
+        .expect("write marker program");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make program executable");
+        (script.to_string_lossy().into_owned(), marker)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preservation_with_fsmonitor_and_signing_programs_never_executes_them() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "source worth preserving");
+        let (monitor, monitor_marker) = a_marker_program(&repository, "fsmonitor");
+        let (signer, signer_marker) = a_marker_program(&repository, "gpg");
+        for (key, value) in [
+            ("core.fsmonitor", monitor.as_str()),
+            ("gpg.program", signer.as_str()),
+            ("commit.gpgsign", "true"),
+        ] {
+            git_text(repository.path(), &["config", key, value]).expect("configure executable");
+        }
+        let before = what_needs_preserving(&worktree);
+        let result = preserve_as_commit(&worktree, &before);
+        assert!(
+            !monitor_marker.exists(),
+            "inventory and preservation must never execute fsmonitor"
+        );
+        assert!(
+            !signer_marker.exists(),
+            "preservation must never execute a signing program"
+        );
+        result.expect("preservation must succeed with hostile executable settings");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preservation_with_an_attribute_filter_never_executes_its_programs() {
+        for driver in ["clean", "process"] {
+            let repository = a_repository_with_one_commit_on_main();
+            let worktree = a_worktree_for_attempt_41a(&repository);
+            let (filter, marker) = a_marker_program(&repository, "filter");
+            the_agent_writes(&worktree, ".gitattributes", "*.rs filter=hostile\n");
+            the_agent_writes(&worktree, NEW_SOURCE_FILE, "source worth preserving");
+            git_text(
+                repository.path(),
+                &["config", &format!("filter.hostile.{driver}"), &filter],
+            )
+            .expect("configure filter");
+            git_text(
+                repository.path(),
+                &["config", "filter.hostile.smudge", &filter],
+            )
+            .expect("configure smudge filter");
+            git_text(
+                repository.path(),
+                &["config", "filter.hostile.required", "true"],
+            )
+            .expect("require filter");
+            let result = preserve_as_commit(&worktree, &what_needs_preserving(&worktree));
+            assert!(
+                !marker.exists(),
+                "worktree attributes must never execute a configured {driver} filter"
+            );
+            result.expect("disabled filters must allow raw file preservation");
+            assert_eq!(
+                git_text(
+                    worktree.path(),
+                    &["show", &format!("HEAD:{NEW_SOURCE_FILE}")]
+                )
+                .expect("read committed blob"),
+                "source worth preserving",
+                "disabling filters must preserve the original bytes"
+            );
+        }
+    }
+
+    fn an_attempt_with_nested_repository(repository: &TemporaryRepository) -> Worktree {
+        repository.commit_file(".gitignore", "private/\n", "ignore private user data");
+        let worktree = a_worktree_for_attempt_41a(repository);
+        let nested = worktree.path().join("private/sub");
+        std::fs::create_dir_all(&nested).expect("nested directory is writable");
+        git_text(&nested, &["init", "--quiet"]).expect("initialize nested repository");
+        std::fs::write(nested.join("notes"), "irreplaceable nested data")
+            .expect("write nested data");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        worktree
+    }
+
+    #[test]
+    fn an_ignored_nested_repository_is_flagged_and_blocks_reclamation() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = an_attempt_with_nested_repository(&repository);
+        let before = what_needs_preserving(&worktree);
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("unrelated clean source is preserved");
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, _)| path.starts_with("private/")),
+            "nested repository must be reported as unpreservable"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "nested repository data must block deletion"
+        );
+        assert!(
+            check_deletion(&what_needs_preserving(&worktree), &preservation.receipt).is_err(),
+            "fresh inventory must still block reclamation"
+        );
+        assert!(
+            worktree.path().join("private/sub/notes").exists(),
+            "nested data must remain available for manual preservation"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_filename_is_flagged_while_clean_work_is_committed() {
+        use std::os::unix::ffi::OsStringExt;
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let name = std::ffi::OsString::from_vec(b"private-\xff".to_vec());
+        let file = worktree.path().join(name);
+        std::fs::write(&file, LEFTOVER_KEY).expect("write a non-UTF-8 file");
+        // Already-staged data must also be excluded from the final commit.
+        crate::git::run_git(worktree.path(), &["add", "--all"])
+            .expect("agent stages non-UTF-8 key");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let before = what_needs_preserving(&worktree);
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("clean work still commits");
+        assert!(
+            !preservation.flagged.is_empty(),
+            "unrepresentable filename must be named in the report"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "unrepresentable filename must block deletion"
+        );
+        assert!(
+            !committed_files(&worktree).contains("private-"),
+            "pre-staged unscannable data must not leak into the commit"
+        );
+        assert!(
+            file.exists(),
+            "the original filename and contents must remain on disk"
+        );
+    }
+
+    fn pgp_private_key() -> &'static str {
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate material\n"
+    }
+
+    fn utf16_private_key(little_endian: bool, with_bom: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if with_bom {
+            bytes.extend(if little_endian {
+                [0xff, 0xfe]
+            } else {
+                [0xfe, 0xff]
+            });
+        }
+        for unit in LEFTOVER_KEY.encode_utf16() {
+            bytes.extend(if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        bytes
+    }
+
+    fn git_status_with_an_unrepresentable_filename_and_clean_source() -> &'static [u8] {
+        b"? private-\xff\0? src/session.rs\0"
+    }
+
+    #[test]
+    fn pgp_and_utf16_private_keys_are_excluded_from_preservation() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, "pgp.asc", pgp_private_key());
+        let mut names = vec!["pgp.asc".to_owned()];
+        for little in [true, false] {
+            for bom in [true, false] {
+                let name = format!("key-{little}-{bom}");
+                std::fs::write(worktree.path().join(&name), utf16_private_key(little, bom))
+                    .expect("write UTF-16 key");
+                names.push(name);
+            }
+        }
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let before = what_needs_preserving(&worktree);
+        let preservation = preserve_as_commit(&worktree, &before).expect("clean source commits");
+        for name in names {
+            assert!(
+                preservation
+                    .flagged
+                    .iter()
+                    .any(|(path, kinds)| path == &name
+                        && kinds.contains(&crate::secrets::SecretKind::PrivateKey)),
+                "private key {name} must be detected in its original encoding"
+            );
+            assert!(
+                !preservation.receipt.covers(&name),
+                "private key {name} cannot be covered by a commit receipt"
+            );
+        }
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "encoded credentials must keep reclamation blocked"
+        );
+    }
+
+    #[test]
+    fn a_directory_exceeding_process_argument_limits_is_preserved() {
+        const FILE_COUNT: usize = 9000;
+        const NAME_PADDING: usize = 140;
+        let repository = a_repository_with_one_commit_on_main();
+        repository.commit_file(".gitignore", "private/\n", "collapse large user directory");
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        for number in 0..FILE_COUNT {
+            the_agent_writes(
+                &worktree,
+                &format!("private/{number}-{}", "n".repeat(NAME_PADDING)),
+                "notes",
+            );
+        }
+        let before = what_needs_preserving(&worktree);
+        let preservation = preserve_as_commit(&worktree, &before)
+            .expect("pathspec file avoids process argv limits");
+        assert_eq!(
+            committed_files(&worktree)
+                .lines()
+                .filter(|path| path.starts_with("private/"))
+                .count(),
+            FILE_COUNT,
+            "every expanded file must reach the commit"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_ok(),
+            "large directory must have complete coverage"
+        );
+    }
+    #[test]
+    fn a_lossily_decoded_status_path_is_flagged_without_losing_clean_work() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        // APFS rejects non-UTF-8 names. Feed real porcelain bytes through the parser
+        // and include a replacement-character collision to guard against lossy staging.
+        let raw_status = git_status_with_an_unrepresentable_filename_and_clean_source();
+        let entries = crate::status::parse_status(raw_status)
+            .expect("Git status with arbitrary filename bytes parses");
+        let before = crate::inventory::plan_inventory(&entries, &no_build_output());
+        let unrepresentable = &before
+            .preserve
+            .first()
+            .expect("status contains unrepresentable path")
+            .path;
+        the_agent_writes(&worktree, unrepresentable, "collision data");
+        git_text(worktree.path(), &["add", "--all"]).expect("agent stages a collision file");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("clean work still commits");
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, kinds)| path == unrepresentable
+                    && kinds.contains(&crate::secrets::SecretKind::Unscannable)),
+            "lossy status path must be reported as unscannable"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "unrepresentable original path must block reclamation"
+        );
+        assert!(
+            !committed_files(&worktree).contains("private-"),
+            "a lossy filename collision must never enter the commit"
+        );
+        assert!(
+            committed_files(&worktree).contains(NEW_SOURCE_FILE),
+            "unrepresentable data must not prevent clean work preservation"
+        );
     }
 }
