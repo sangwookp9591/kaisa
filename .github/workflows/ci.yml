@@ -32,6 +32,22 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Offline installer tests (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: sh
+        run: |
+          scripts/test-install.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck scripts/install.sh scripts/test-install.sh
+          fi
+      - name: Offline installer tests (PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: scripts/test-install.ps1
+      - name: Offline installer tests (pwsh)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/test-install.ps1
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy

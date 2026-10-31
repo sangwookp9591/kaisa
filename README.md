@@ -85,8 +85,33 @@ the review may even approve it, and Kaisa still refuses to deliver: the candidat
 
 ## 📦 Install
 
-Kaisa has no packaged release yet: there is no Homebrew formula, winget package or signed binary
-(planned, FR-01). You build it from source with Cargo. It is one binary, `kaisa`; SQLite is compiled in.
+**After the first release is published**, install without Rust or a C compiler:
+
+```sh
+# macOS / Linux
+curl -fsSL https://github.com/sangwookp9591/kaisa/releases/latest/download/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell 5.1+ or pwsh)
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing https://github.com/sangwookp9591/kaisa/releases/latest/download/install.ps1).Content))
+```
+
+The installers download one binary archive and verify it against the release's `SHA256SUMS` before
+installing. They need no administrator rights and start no daemon. macOS/Linux installs to
+`~/.local/bin` and prints the exact PATH line to add to your shell profile when needed; Windows
+installs to `%LOCALAPPDATA%\Programs\kaisa`, announces the user PATH update, then saves it and
+broadcasts the change. Open a new terminal, then run: `kaisa`.
+
+Set `KAISA_VERSION` (for example `v0.1.0`) to pin a release, or `KAISA_INSTALL_DIR` to choose an
+absolute install directory. `KAISA_INSTALL_BASE_URL` overrides the release root for mirrors or
+offline tests: it must provide `latest/download/VERSION` and `download/v<version>/<asset>` plus
+`SHA256SUMS` in that version's directory. Local `file://` roots are supported. Proxy and certificate
+handling follows curl / PowerShell; TLS verification stays enabled. Archives are checksummed,
+**not code-signed**; Homebrew and winget packages are not available yet. Linux binaries use musl
+on x86_64 and aarch64, with SQLite bundled; macOS supports both architectures and Windows supports x86_64.
+
+**Build from source**
 
 **You need**
 
@@ -98,7 +123,7 @@ Kaisa has no packaged release yet: there is no Homebrew formula, winget package 
 | An agent CLI, logged in | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`): the default developer and reviewer. Optional: [Codex CLI](https://github.com/openai/codex) (`codex`) for `--agent codex`, and an OpenAI-compatible local model server for the first-pass review | same | same |
 | Sandbox | Seatbelt, built in (macOS 14+) | Landlock: kernel 6.2+ confines every write, 6.7+ also TCP; older kernels run reduced and say so | AppContainer (Windows 11 / Server 2022) |
 
-**Install**
+**Source install**
 
 ```bash
 rustup toolchain install 1.99.1
@@ -149,7 +174,8 @@ repository until you merge or delete them.
 <summary><b>Update and uninstall</b></summary>
 
 ```bash
-# update: run the same install command again
+# binary install: rerun the one-line installer to update; delete its kaisa binary to uninstall
+# source install: update / uninstall with Cargo
 cargo +1.99.1 install --locked --git https://github.com/sangwookp9591/kaisa kaisa
 
 # uninstall

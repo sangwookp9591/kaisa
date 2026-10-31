@@ -123,6 +123,13 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 ### A. Getting started
 
 #### F01 Install
+- **Today (M1):** `scripts/install.sh` and `scripts/install.ps1` install checksum-verified release binaries
+  without Rust, to the per-user directories below; the README has the one-line commands, usable after
+  the first release is published. POSIX prints a quoted PATH line for the user to add; Windows announces
+  and updates HKCU\Environment PATH and broadcasts the change. Both support version, directory and
+  download-base overrides, and offline fixture tests run in CI (Windows on PowerShell 5.1 and pwsh).
+  Tag pushes build five native targets (Linux uses musl); manual workflow runs build assets without
+  publishing. No release has been published by this change; signing, Homebrew and winget remain planned.
 - **Install commands**
 
   | OS | Command |
