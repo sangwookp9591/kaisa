@@ -26,7 +26,7 @@ pub use learn::learn_from_delivery;
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
 pub use recall::{MAX_LESSONS_PER_PACK, relevant_lessons};
 pub use recover::{Recovered, recover_abandoned};
-pub use review::{VerdictError, parse_verdict};
+pub use review::{VerdictError, parse_verdict, verdict_in_answer};
 pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};
 pub use route::{ROUTE_EFFORT, RouteDecision, decide_route, record_route};
 pub use team::{

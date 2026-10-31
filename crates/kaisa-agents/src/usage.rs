@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use crate::transcript::{event_type, events};
+
 /// The token totals and optional provider-reported cost of an agent attempt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Usage {
@@ -26,11 +28,8 @@ pub struct Usage {
 #[must_use]
 pub fn parse_usage(transcript: &str) -> Option<Usage> {
     let mut usage = None;
-    for line in transcript.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match event.get("type").and_then(Value::as_str) {
+    for event in events(transcript) {
+        match event_type(&event) {
             Some("result") => usage = claude_usage(&event),
             Some("turn.completed") => usage = codex_usage(&event),
             _ => {}

@@ -129,10 +129,14 @@ fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
 }
 
 fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
+    a_team_run_with_a_reviewer(bench, &["--fake-review-require", reviewer_requires])
+}
+
+/// A team run whose scripted reviewer is started with `reviewer_args`.
+fn a_team_run_with_a_reviewer(bench: &Workbench, reviewer_args: &[&str]) -> VerifiedOutcome {
     let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
     let developer = |mcp_config: &Path| scripted(mcp_config, &["--fake-write-next", STEP_PREFIX]);
-    let reviewer =
-        |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", reviewer_requires]);
+    let reviewer = |mcp_config: &Path| scripted(mcp_config, reviewer_args);
     run_verified_goal(&VerifiedRequest {
         repository: &bench.repository(),
         state_directory: &bench.base.join("state"),
@@ -419,5 +423,118 @@ fn a_team_run_gives_its_agents_the_egress_broker() {
         matches!(outcome.delivery, Delivery::Deliver { .. }),
         "the developer found the egress broker in front of it, refusing an unlisted host: {:?}",
         outcome.delivery
+    );
+}
+
+#[test]
+fn a_reviewer_answering_in_claude_stream_json_gets_its_approval_delivered() {
+    let bench = Workbench::new("claude-format");
+
+    let outcome: VerifiedOutcome = a_team_run_with_a_reviewer(
+        &bench,
+        &[
+            "--fake-review-require",
+            FIRST_STEP,
+            "--fake-review-format",
+            "claude",
+        ],
+    );
+
+    assert!(
+        matches!(outcome.delivery, Delivery::Deliver { .. }),
+        "the verdict in Claude's result text is read, not the result event on the last line: {:?}",
+        outcome.delivery
+    );
+}
+
+#[test]
+fn a_claude_result_without_a_verdict_is_never_delivered() {
+    let bench = Workbench::new("claude-prose");
+
+    let outcome: VerifiedOutcome = a_team_run_with_a_reviewer(
+        &bench,
+        &[
+            "--fake-review-require",
+            FIRST_STEP,
+            "--fake-review-format",
+            "claude-prose",
+        ],
+    );
+
+    assert!(
+        matches!(outcome.delivery, Delivery::Refuse(_)) && outcome.candidate.is_some(),
+        "a review that answered in prose only gave no verdict, so nothing is delivered: {:?}",
+        outcome.delivery
+    );
+}
+
+/// Where Claude Code reads a repository's agent settings.
+const CLAUDE_SETTINGS: &str = ".claude/settings.json";
+/// Claude settings that let an agent act without asking.
+const BYPASS_PERMISSIONS: &str = r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
+/// Attempts when the run stops right after the first developer: that developer alone.
+const ONLY_THE_DEVELOPER: usize = 1;
+
+/// A test command that always passes, so only the settings decide the outcome.
+fn a_check_that_always_passes() -> DetectedCommand {
+    let argv: Vec<String> = if cfg!(windows) {
+        vec!["cmd".to_owned(), "/c".to_owned(), "exit 0".to_owned()]
+    } else {
+        vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()]
+    };
+    DetectedCommand {
+        argv,
+        ..the_projects_test_command()
+    }
+}
+
+#[test]
+fn a_candidate_that_widens_agent_settings_needs_a_person_before_any_reviewer_starts() {
+    let bench = Workbench::new("candidate-settings");
+    let write_set = WriteSet::new(vec![
+        RepoPath::try_new("src").expect("valid"),
+        RepoPath::try_new(".claude").expect("valid"),
+    ]);
+    let developer = |mcp_config: &Path| {
+        scripted(
+            mcp_config,
+            &[
+                "--fake-write",
+                CLAUDE_SETTINGS,
+                "--fake-content",
+                BYPASS_PERMISSIONS,
+            ],
+        )
+    };
+    let reviewer =
+        |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", CLAUDE_SETTINGS]);
+
+    let outcome: VerifiedOutcome = run_verified_goal(&VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &bench.base.join("state"),
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[a_check_that_always_passes()],
+        policy: &a_policy(true),
+        observed: false,
+        first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
+    })
+    .expect("the team run completes");
+
+    assert!(
+        matches!(&outcome.delivery, Delivery::NeedsPerson(reason) if reason.contains(CLAUDE_SETTINGS)),
+        "settings the developer widened are named and a person decides: {:?}",
+        outcome.delivery
+    );
+    assert_eq!(
+        outcome.attempts.len(),
+        ONLY_THE_DEVELOPER,
+        "no reviewer or revision starts in a candidate whose settings would widen its authority"
     );
 }

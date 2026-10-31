@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use kaisa_context::ContextPack;
-use serde_json::json;
+use serde_json::{Value, json};
+
+use crate::transcript::{event_type, events};
 
 /// What the router chose for one Claude attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +48,25 @@ pub fn claude_brokered_argv(launch: &ClaudeLaunch<'_>) -> Vec<String> {
 #[must_use]
 pub fn first_message(pack: &ContextPack) -> String {
     json!({"type": "user", "message": {"role": "user", "content": pack.render()}}).to_string()
+}
+
+/// What Claude Code finally answered in a stream-json `transcript`: the `result` text of its
+/// last `result` event, if that run succeeded. An assistant message is never taken instead: one
+/// before a missing or failed result may be a step the model went on from, not its answer.
+#[must_use]
+pub fn claude_final_answer(transcript: &str) -> Option<String> {
+    let result: Value = events(transcript)
+        .filter(|event| event_type(event) == Some("result"))
+        .last()?;
+    let succeeded: bool = result.get("subtype").and_then(Value::as_str) == Some("success")
+        && result.get("is_error").and_then(Value::as_bool) == Some(false);
+    if !succeeded {
+        return None;
+    }
+    result
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

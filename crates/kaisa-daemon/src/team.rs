@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use kaisa_context::DetectedCommand;
 use kaisa_domain::{ReviewVerdict, Role, WriteSet};
 use kaisa_sys::ProcessExit;
-use kaisa_workspace::{Candidate, freeze_candidate};
+use kaisa_workspace::{Candidate, CandidateCheckout, RiskFinding, freeze_candidate};
 
 use crate::gate::{Delivery, decide_delivery};
 use crate::goal::{AgentLauncher, GoalError, GoalOutcome, GoalRequest, at, run_goal};
-use crate::review::parse_verdict;
+use crate::ids::fresh_suffix;
+use crate::review::verdict_in_answer;
 use crate::revision::{RevisionBudget, revision_goal};
 use crate::verify::{Evidence, run_trusted_checks};
 
@@ -78,7 +79,8 @@ pub struct VerifiedOutcome {
 fn review_instruction(goal: &str, candidate: &Candidate) -> String {
     format!(
         "Review the candidate below for the goal it was made for. Report blocking problems only \
-         when the goal is not met or the change is unsafe. Answer with one JSON line, last: \
+         when the goal is not met or the change is unsafe. End your answer with exactly one JSON \
+         verdict: \
          {{\"candidate_tree\": \"...\", \"approve\": true|false, \"findings\": [{{\"severity\": \
          \"blocking\"|\"advisory\", \"path\": \"...\", \"line\": n|null, \"message\": \"...\"}}]}}\n\n\
          Goal: {goal}\n{CANDIDATE_TREE_LABEL}{}\n",
@@ -86,7 +88,7 @@ fn review_instruction(goal: &str, candidate: &Candidate) -> String {
     )
 }
 
-/// The verdict on the last non-empty line of a reviewer's transcript, if it validates.
+/// The verdict in a reviewer's recorded transcript, if it validates.
 fn verdict_from(state_directory: &Path, review: &GoalOutcome, tree: &str) -> Option<ReviewVerdict> {
     let transcript: String = std::fs::read_to_string(
         state_directory
@@ -95,11 +97,44 @@ fn verdict_from(state_directory: &Path, review: &GoalOutcome, tree: &str) -> Opt
             .join("transcript.log"),
     )
     .ok()?;
-    let last: &str = transcript
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())?;
-    parse_verdict(last.trim(), tree).ok()
+    verdict_in_transcript(&transcript, tree)
+}
+
+/// The one verdict in the final answer of `transcript`, read the way its agent writes it, if it
+/// validates as a verdict on `tree`.
+fn verdict_in_transcript(transcript: &str, tree: &str) -> Option<ReviewVerdict> {
+    let answer: String = kaisa_agents::final_answer(transcript)?;
+    verdict_in_answer(&answer, tree).ok()
+}
+
+/// Why a person must decide, naming each risky settings file in `whose` agent settings.
+fn settings_widen_authority(whose: &str, risks: &[RiskFinding]) -> Delivery {
+    let named: Vec<String> = risks
+        .iter()
+        .map(|risk| format!("{} ({:?})", risk.path, risk.rule))
+        .collect();
+    Delivery::NeedsPerson(format!(
+        "{whose} agent settings widen what an agent may do: {}",
+        named.join(", ")
+    ))
+}
+
+/// The risky agent settings in `candidate`'s own tree. A reviewer or revision developer starts
+/// in a worktree of that commit and loads what it holds, which the developer may have changed.
+fn candidate_settings_risks(
+    request: &VerifiedRequest<'_>,
+    candidate: &Candidate,
+) -> Result<Vec<RiskFinding>, GoalError> {
+    std::fs::create_dir_all(request.state_directory.join("checks"))
+        .map_err(at("preparing checks"))?;
+    let place: PathBuf = request
+        .state_directory
+        .join("checks")
+        .join(format!("settings_{}", fresh_suffix()));
+    let checkout = CandidateCheckout::create(request.repository, candidate, &place)
+        .map_err(at("checking out the candidate"))?;
+    kaisa_workspace::scan_settings(checkout.path())
+        .map_err(at("scanning the candidate's agent settings"))
 }
 
 /// Runs `request` until the gate delivers, refuses, needs a person, or revisions run out.
@@ -112,15 +147,8 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
     let risks = kaisa_workspace::scan_settings(request.repository)
         .map_err(at("scanning the repository's agent settings"))?;
     if !risks.is_empty() {
-        let named: Vec<String> = risks
-            .iter()
-            .map(|risk| format!("{} ({:?})", risk.path, risk.rule))
-            .collect();
         return Ok(VerifiedOutcome {
-            delivery: Delivery::NeedsPerson(format!(
-                "the repository's agent settings widen what an agent may do: {}",
-                named.join(", ")
-            )),
+            delivery: settings_widen_authority("the repository's", &risks),
             candidate: None,
             attempts: Vec::new(),
             revisions: 0,
@@ -194,6 +222,15 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 attempts,
             ));
         }
+        // Every later agent starts from this candidate, so its settings are judged again first.
+        let risks: Vec<RiskFinding> = candidate_settings_risks(request, &candidate)?;
+        if !risks.is_empty() {
+            return Ok(finish(
+                settings_widen_authority("the candidate's", &risks),
+                Some(candidate),
+                attempts,
+            ));
+        }
         let evidence: Vec<Evidence> = run_trusted_checks(
             request.repository,
             request.state_directory,
@@ -259,5 +296,79 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             }
             other => return Ok(finish(other, Some(candidate), attempts)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verdict_in_transcript;
+
+    /// The tree the captured reviews approve: git's empty tree.
+    const REVIEWED_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    /// Another candidate's tree.
+    const OTHER_TREE: &str = "9daeafb9864cf43055ae93beb0afd6c7d144bfa4";
+    /// A real Claude Code stream-json review whose answer wraps an approval in prose and a fence.
+    const CLAUDE_APPROVES: &str =
+        include_str!("../../kaisa-agents/src/fixtures/claude-review-approves.jsonl");
+    /// The same review answered in prose only: its last line is still a `result` event.
+    const CLAUDE_PROSE_ONLY: &str =
+        include_str!("../../kaisa-agents/src/fixtures/claude-review-prose-only.jsonl");
+    /// The review exactly as captured: the model invented a severity and a field name.
+    const CLAUDE_AS_CAPTURED: &str =
+        include_str!("../../kaisa-agents/src/fixtures/claude-review-captured.jsonl");
+    /// A real Codex `exec --json` review whose last agent message is a fenced approval.
+    const CODEX_APPROVES: &str =
+        include_str!("../../kaisa-agents/src/fixtures/codex-review-approves.jsonl");
+
+    #[test]
+    fn a_real_claude_review_transcript_delivers_its_approval() {
+        let verdict = verdict_in_transcript(CLAUDE_APPROVES, REVIEWED_TREE)
+            .expect("the approval in Claude's result text is found");
+
+        assert!(
+            verdict.approves(REVIEWED_TREE),
+            "a stream-json reviewer's approval reaches the gate, not its trailing result line"
+        );
+    }
+
+    #[test]
+    fn a_claude_result_without_a_verdict_never_counts_as_approval() {
+        assert_eq!(
+            verdict_in_transcript(CLAUDE_PROSE_ONLY, REVIEWED_TREE),
+            None,
+            "an approving tone in prose is not a verdict"
+        );
+    }
+
+    #[test]
+    fn a_real_claude_verdict_outside_the_schema_never_counts_as_approval() {
+        assert_eq!(
+            verdict_in_transcript(CLAUDE_AS_CAPTURED, REVIEWED_TREE),
+            None,
+            "a verdict with an unknown severity is malformed, so it is a failed review"
+        );
+    }
+
+    #[test]
+    fn a_real_codex_review_transcript_delivers_its_approval() {
+        let verdict = verdict_in_transcript(CODEX_APPROVES, REVIEWED_TREE)
+            .expect("the approval in Codex's last agent message is found");
+
+        assert!(
+            verdict.approves(REVIEWED_TREE),
+            "a Codex reviewer's approval reaches the gate, not its usage event"
+        );
+    }
+
+    #[test]
+    fn a_real_review_of_another_candidate_never_counts_as_approval() {
+        assert_eq!(
+            (
+                verdict_in_transcript(CLAUDE_APPROVES, OTHER_TREE),
+                verdict_in_transcript(CODEX_APPROVES, OTHER_TREE)
+            ),
+            (None, None),
+            "finding the verdict in an agent's answer still binds it to the reviewed tree"
+        );
     }
 }

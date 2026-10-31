@@ -1,5 +1,5 @@
-//! Validating a reviewer's verdict (T21c, ADR-0030). A verdict arrives as JSON from an agent;
-//! anything that does not validate is a failed review, never an approval.
+//! Validating a reviewer's verdict (T21c, ADR-0030). A verdict arrives as JSON in an agent's
+//! final answer; anything that does not validate is a failed review, never an approval.
 
 use std::fmt;
 
@@ -15,6 +15,10 @@ pub enum VerdictError {
     WrongCandidate,
     /// It says "approve" yet lists a blocking finding.
     Contradictory,
+    /// The answer holds no verdict.
+    Missing,
+    /// The answer holds more than one verdict, so none of them is the answer.
+    Ambiguous,
 }
 
 impl fmt::Display for VerdictError {
@@ -23,6 +27,8 @@ impl fmt::Display for VerdictError {
             Self::Malformed(what) => write!(f, "malformed verdict: {what}"),
             Self::WrongCandidate => f.write_str("the verdict is for another candidate"),
             Self::Contradictory => f.write_str("the verdict approves despite a blocking finding"),
+            Self::Missing => f.write_str("the answer holds no verdict"),
+            Self::Ambiguous => f.write_str("the answer holds more than one verdict"),
         }
     }
 }
@@ -91,11 +97,48 @@ pub fn parse_verdict(text: &str, tree: &str) -> Result<ReviewVerdict, VerdictErr
     Ok(verdict)
 }
 
+/// Finds the one verdict in a reviewer's final `answer` and validates it as a verdict on `tree`
+/// with [`parse_verdict`]. Prose or a Markdown code fence around the verdict is allowed; a
+/// verdict is a JSON object with a top-level `candidate_tree`.
+///
+/// # Errors
+///
+/// Returns [`VerdictError::Missing`] if there is no verdict, [`VerdictError::Ambiguous`] if
+/// there is more than one, and whatever [`parse_verdict`] refuses in the one there is.
+pub fn verdict_in_answer(answer: &str, tree: &str) -> Result<ReviewVerdict, VerdictError> {
+    let mut verdicts: Vec<&str> = Vec::new();
+    let mut searched: usize = 0;
+    while let Some(start) = answer
+        .get(searched..)
+        .and_then(|rest| rest.find('{'))
+        .map(|offset| searched + offset)
+    {
+        let rest: &str = answer.get(start..).unwrap_or_default();
+        let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        match values.next() {
+            Some(Ok(value)) => {
+                let end: usize = start + values.byte_offset();
+                if value.get("candidate_tree").is_some() {
+                    verdicts.push(answer.get(start..end).unwrap_or_default());
+                }
+                searched = end;
+            }
+            // `{` is one byte, so the next search starts on a character boundary.
+            _ => searched = start + 1,
+        }
+    }
+    match verdicts.as_slice() {
+        [] => Err(VerdictError::Missing),
+        [verdict] => parse_verdict(verdict, tree),
+        _ => Err(VerdictError::Ambiguous),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{VerdictError, parse_verdict};
+    use super::{VerdictError, parse_verdict, verdict_in_answer};
 
     /// The tree of the candidate under review.
     const REVIEWED_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -177,6 +220,61 @@ mod tests {
         assert!(
             verdict.approves(REVIEWED_TREE) && !verdict.approves(OTHER_TREE),
             "an approval holds for its own candidate tree only"
+        );
+    }
+
+    #[test]
+    fn a_verdict_in_a_code_fence_after_prose_is_found() {
+        let answer = format!(
+            "I read the change; it meets the goal.\n\n```json\n{}\n```",
+            a_verdict(REVIEWED_TREE, true, "advisory")
+        );
+
+        let verdict = verdict_in_answer(&answer, REVIEWED_TREE).expect("one valid verdict");
+
+        assert!(
+            verdict.approves(REVIEWED_TREE),
+            "a model wraps its verdict in prose and a fence; the verdict still counts"
+        );
+    }
+
+    #[test]
+    fn an_answer_without_a_verdict_never_counts_as_approval() {
+        let answer = "Looks good to me, ship it! {\"approve\": true}";
+
+        assert_eq!(
+            verdict_in_answer(answer, REVIEWED_TREE),
+            Err(VerdictError::Missing),
+            "JSON that names no candidate is not a verdict on this one"
+        );
+    }
+
+    #[test]
+    fn two_verdicts_in_one_answer_never_count_as_approval() {
+        let answer = format!(
+            "First thought:\n{}\nOn reflection:\n{}",
+            a_verdict(REVIEWED_TREE, false, "blocking"),
+            a_verdict(REVIEWED_TREE, true, "advisory")
+        );
+
+        assert_eq!(
+            verdict_in_answer(&answer, REVIEWED_TREE),
+            Err(VerdictError::Ambiguous),
+            "Kaisa does not pick between verdicts; an answer with two has given neither"
+        );
+    }
+
+    #[test]
+    fn a_contradictory_verdict_in_an_answer_is_still_refused() {
+        let answer = format!(
+            "```json\n{}\n```",
+            a_verdict(REVIEWED_TREE, true, "blocking")
+        );
+
+        assert_eq!(
+            verdict_in_answer(&answer, REVIEWED_TREE),
+            Err(VerdictError::Contradictory),
+            "finding the verdict in prose does not skip its validation"
         );
     }
 }

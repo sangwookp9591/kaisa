@@ -9,15 +9,18 @@ mod claude;
 mod codex;
 mod local_loop;
 mod openai_local;
+mod transcript;
 mod usage;
 
-pub use claude::{ClaudeLaunch, claude_brokered_argv, first_message};
+pub use claude::{ClaudeLaunch, claude_brokered_argv, claude_final_answer, first_message};
 pub use codex::{
-    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_observed_argv, codex_trust_mode,
+    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_final_answer,
+    codex_observed_argv, codex_trust_mode,
 };
 pub use local_loop::{
     LoopOutcome, MAX_TOOL_RESULT_BYTES, ModelReply, StopReason, ToolSpec, parse_reply, run_loop,
     system_prompt,
 };
 pub use openai_local::{ChatMessage, LocalEndpoint, LocalModelError, MAX_RESPONSE_SIZE, chat};
+pub use transcript::final_answer;
 pub use usage::{Usage, parse_usage};
