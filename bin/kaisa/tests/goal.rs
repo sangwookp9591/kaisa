@@ -667,6 +667,11 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
     let state: PathBuf = bench.state();
     std::fs::create_dir_all(state.join("worktrees")).expect("writable");
     let attempt = "att_interrupted";
+    let attempt_directory = state.join("attempts").join(attempt);
+    std::fs::create_dir_all(&attempt_directory).expect("attempt directory prepared");
+    let owner = std::fs::File::create(attempt_directory.join("owner.lock"))
+        .expect("the attempt has an owner lock before admission");
+    owner.lock().expect("the fixture owns its attempt");
     let mut ledger =
         kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
     ledger
@@ -686,6 +691,7 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
         &state.join("worktrees").join(attempt),
     )
     .expect("the worktree is created");
+    drop(owner); // As when the OS releases a killed owner's handle.
 
     let recovered =
         kaisa_daemon::recover_abandoned(&bench.repository(), &state).expect("recovery runs");

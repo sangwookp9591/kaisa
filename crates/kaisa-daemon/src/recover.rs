@@ -5,9 +5,10 @@
 //! work is preserved on its branch and its worktree reclaimed, exactly as after a normal run.
 //! Without proof nothing is touched and the attempt is reported for a person to decide.
 
+use std::fs::{OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
-use kaisa_domain::{AttemptId, AttemptState, Execution, ExitStatus};
+use kaisa_domain::{AttemptId, AttemptState, Cleanup, Execution, ExitStatus};
 use kaisa_keeper::{ExitRecord, exit_record_path, read_exit_record, write_exit_record};
 use kaisa_ledger::{AttemptRow, EventStore};
 use kaisa_supervisor::{Reclamation, reclaim};
@@ -21,6 +22,10 @@ use crate::ids::now_ms;
 
 /// The start of an attempt that recovery resolves (Kaisa starts each attempt once in M0).
 const FIRST_INCARNATION: u64 = 1;
+
+/// This file is never unlinked: all owners and reclaimers must lock the same inode.
+/// The OS releases the lock on process death; child processes do not inherit its handle.
+pub(crate) const OWNER_LOCK_FILE: &str = "owner.lock";
 
 /// What recovery did with one abandoned attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +119,15 @@ fn proven_exit(attempt_directory: &Path) -> Result<Result<(ExitStatus, bool), St
     Ok(Ok((ExitStatus::Terminated, ended)))
 }
 
+/// Quotes a path for a Unix shell, or PowerShell on Windows, in manual cleanup guidance.
+fn quoted_path(path: &Path) -> String {
+    #[cfg(not(windows))]
+    let escaped = path.to_string_lossy().replace('\'', "'\"'\"'");
+    #[cfg(windows)]
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    format!("'{escaped}'")
+}
+
 /// Recovers every attempt in `state_directory` that a previous run left unfinished.
 ///
 /// # Errors
@@ -134,6 +148,50 @@ pub fn recover_abandoned(
         .map_err(at("listing unfinished attempts"))?;
     let mut recovered: Vec<Recovered> = Vec::new();
     for row in rows {
+        let lock_path = state_directory
+            .join("attempts")
+            .join(row.attempt.as_str())
+            .join(OWNER_LOCK_FILE);
+        let owner = match OpenOptions::new().read(true).write(true).open(lock_path) {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A pre-lock-version attempt has no proof that its owner is gone.
+                recovered.push(Recovered::Kept {
+                    attempt: row.attempt.clone(),
+                    reason: format!(
+                        "recorded by an older Kaisa; Kaisa cannot prove its owner is gone (no owner lock). \
+                         After confirming its owner and agent have stopped, inspect worktree {} on \
+                         branch kaisa/{} and commit any uncommitted changes there; committed changes \
+                         stay on that branch. Then remove the worktree manually: git -C {} worktree remove {}",
+                        state_directory.join("worktrees").join(row.attempt.as_str()).display(),
+                        row.attempt,
+                        quoted_path(repository),
+                        quoted_path(&state_directory.join("worktrees").join(row.attempt.as_str())),
+                    ),
+                });
+                continue;
+            }
+            Err(error) => return Err(at("opening the attempt owner lock")(error)),
+        };
+        match owner.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => continue, // A live owner or another reclaimer.
+            Err(TryLockError::Error(error)) => return Err(at("locking the attempt owner")(error)),
+        }
+        // The snapshot may predate another owner's/reclaimer's completion. Refresh while
+        // exclusively owning this attempt before looking at its agent or worktree.
+        ledger
+            .rebuild_attempts()
+            .map_err(at("refreshing the attempts"))?;
+        let Some(row) = ledger
+            .attempt(&row.attempt)
+            .map_err(at("refreshing the attempt"))?
+        else {
+            continue;
+        };
+        if matches!(row.cleanup, Cleanup::Reclaimed | Cleanup::Retained) {
+            continue;
+        }
         if !matches!(
             row.execution,
             Execution::Admitted | Execution::Starting | Execution::Running | Execution::Exited(_)
@@ -214,7 +272,7 @@ fn recover_one(
             branch: worktree.branch().to_owned(),
             commit: receipt.commit().map(str::to_owned),
             ended,
-            started: !never_started,
+            started: !never_started && status != ExitStatus::FailedToStart,
         },
         Reclamation::Blocked { uncovered } => kept(&format!(
             "{} could not be preserved automatically",
