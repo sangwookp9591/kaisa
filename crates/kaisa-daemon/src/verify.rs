@@ -3,6 +3,7 @@
 //! report is evidence bound to the candidate's tree.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use kaisa_context::{DetectedCommand, Purpose};
@@ -16,6 +17,11 @@ use crate::ids::fresh_suffix;
 const CHECK_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How much of a check's output is kept for its digest, in bytes.
 const CHECK_OUTPUT_CAP: usize = 16 * 1024 * 1024;
+/// Maximum length of a Kaisa-authored check failure reason shown at the gate.
+const MAX_CHECK_FAILURE_REASON_CHARS: usize = 160;
+/// Fixed text only: never include check output, which may contain credentials.
+const CHANGED_CHECK_SOURCES: &str =
+    "체크가 후보 소스를 바꿨다. 체크 정의를 확인하라(예: 포매터를 --check 모드로 실행).";
 
 /// What one trusted check showed about one candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +32,8 @@ pub struct Evidence {
     pub check: Vec<String>,
     /// How it ended; `None` if it ran past its deadline.
     pub exit: Option<ProcessExit>,
+    /// A bounded, Kaisa-authored reason the check's evidence is invalid, regardless of exit.
+    pub failure_reason: Option<String>,
     /// The digest of its output, so the evidence can be matched to a stored transcript.
     pub output_digest: String,
     /// False if the check ran without OS confinement (Windows until checks get a container).
@@ -39,14 +47,24 @@ impl Evidence {
     /// True if the check exited successfully.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.exit == Some(ProcessExit::Code(0))
+        self.failure_reason.is_none() && self.exit == Some(ProcessExit::Code(0))
+    }
+
+    /// The reason at the delivery boundary, capped even for programmatically built evidence.
+    pub(crate) fn bounded_failure_reason(&self) -> Option<String> {
+        self.failure_reason.as_ref().map(|reason| {
+            reason
+                .chars()
+                .take(MAX_CHECK_FAILURE_REASON_CHARS)
+                .collect()
+        })
     }
 
     /// True if this evidence was produced on exactly `candidate`'s content. Any change to the
     /// candidate after the check, even one line, makes it stale (T21d).
     #[must_use]
     pub fn applies_to(&self, candidate: &Candidate) -> bool {
-        self.candidate_tree == candidate.tree
+        self.failure_reason.is_none() && self.candidate_tree == candidate.tree
     }
 }
 
@@ -57,7 +75,8 @@ impl Evidence {
 /// # Errors
 ///
 /// Returns [`GoalError`] if the checkout cannot be made or a check cannot be started. A check
-/// that runs and fails is evidence, not an error.
+/// that runs and fails is evidence, not an error. A check that changes tracked candidate
+/// sources produces invalid evidence with a fixed failure reason; no later check is run.
 pub fn run_trusted_checks(
     repository: &Path,
     state_directory: &Path,
@@ -74,6 +93,10 @@ pub fn run_trusted_checks(
     std::fs::create_dir_all(state_directory.join("checks")).map_err(at("preparing checks"))?;
     let checkout = CandidateCheckout::create(repository, candidate, &place)
         .map_err(at("checking out the candidate"))?;
+    // Record the gitdir before any check runs: never rediscover it through a pointer a
+    // check could have replaced, including on platforms where checks run reduced.
+    let sources = CheckedSources::record(checkout.path())
+        .map_err(at("recording the check checkout's Git directory"))?;
     let mut evidence: Vec<Evidence> = Vec::new();
     for check in checks.iter().filter(|check| check.purpose == Purpose::Test) {
         let Some((program, args)) = check.argv.split_first() else {
@@ -104,16 +127,92 @@ pub fn run_trusted_checks(
             CHECK_OUTPUT_CAP,
         )
         .map_err(at("running a trusted check"))?;
+        let source_changed = !sources
+            .matches(checkout.path(), &candidate.tree)
+            .map_err(at("validating checked candidate sources"))?;
         evidence.push(Evidence {
             candidate_tree: candidate.tree.clone(),
             check: check.argv.clone(),
             exit: run.exit,
+            failure_reason: source_changed.then(|| CHANGED_CHECK_SOURCES.to_owned()),
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
         });
+        if source_changed {
+            // Keep the failed evidence, but never let later checks run on changed sources.
+            break;
+        }
     }
     Ok(evidence)
+}
+
+/// The clean checkout's original Git metadata, pinned before executing untrusted checks.
+struct CheckedSources {
+    git_directory: PathBuf,
+}
+
+impl CheckedSources {
+    fn record(checkout: &Path) -> std::io::Result<Self> {
+        let pointer = std::fs::read_to_string(checkout.join(".git"))?;
+        let git_directory = pointer
+            .trim_end()
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| std::io::Error::other("invalid check checkout Git pointer"))?;
+        Ok(Self {
+            git_directory: checkout.join(git_directory).canonicalize()?,
+        })
+    }
+
+    fn matches(&self, checkout: &Path, tree: &str) -> std::io::Result<bool> {
+        let mut git_directory = std::ffi::OsString::from("--git-dir=");
+        git_directory.push(&self.git_directory);
+        let mut work_tree = std::ffi::OsString::from("--work-tree=");
+        work_tree.push(checkout);
+        let mut command = Command::new("git");
+        command
+            .current_dir(checkout)
+            .arg(git_directory)
+            .arg(work_tree)
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "diff.ignoreSubmodules=all",
+                "-c",
+                "submodule.recurse=false",
+                "diff",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=all",
+                tree,
+                "--",
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+        ] {
+            command.env_remove(key);
+        }
+        let output = command.output()?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(std::io::Error::other(format!(
+                "checking candidate sources failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+        }
+    }
 }
 
 /// A private directory per check, reclaimed even when starting the check fails.
@@ -161,16 +260,19 @@ impl CheckSandbox {
 }
 
 fn check_sandbox(checkout: &Path, temporary: &Path) -> std::io::Result<CheckSandbox> {
+    #[cfg(not(target_os = "linux"))]
     let writable: Vec<PathBuf> = vec![checkout.canonicalize()?, temporary.canonicalize()?];
     #[cfg(target_os = "macos")]
     {
         Ok(CheckSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
             writable,
+            git_control_root: Some(checkout.canonicalize()?),
             ..kaisa_sys::SeatbeltPolicy::default()
         }))
     }
     #[cfg(target_os = "linux")]
     {
+        let writable = linux_check_writable(checkout, temporary)?;
         Ok(match kaisa_sys::write_ruleset(&writable, None)? {
             Some(ruleset) => CheckSandbox::Landlock(ruleset),
             None => CheckSandbox::Unconfined,
@@ -180,5 +282,83 @@ fn check_sandbox(checkout: &Path, temporary: &Path) -> std::io::Result<CheckSand
     {
         let _ = writable;
         Ok(CheckSandbox::Unconfined)
+    }
+}
+
+/// Landlock grants cannot subtract root Git controls from a checkout-wide grant. Grant
+/// existing children instead, and prepare common build directories before confinement.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Vec<PathBuf>> {
+    for output in crate::goal::BUILD_OUTPUT {
+        let directory = checkout.join(output);
+        if !directory.try_exists()? {
+            std::fs::create_dir(&directory)?;
+        }
+    }
+    let mut writable = vec![temporary.canonicalize()?];
+    for entry in std::fs::read_dir(checkout)? {
+        let entry = entry?;
+        if [".git", ".gitattributes", ".gitmodules"]
+            .iter()
+            .any(|control| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(control)
+            })
+            || entry.file_type()?.is_symlink()
+        {
+            continue;
+        }
+        writable.push(entry.path().canonicalize()?);
+    }
+    Ok(writable)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::linux_check_writable;
+
+    #[test]
+    fn linux_check_grants_exclude_root_git_controls_and_symlinks_but_allow_build_directories() {
+        let base = std::env::temp_dir().join(format!("kaisa-check-grants-{}", std::process::id()));
+        let checkout = base.join("checkout");
+        let temporary = base.join("private-temp");
+        let outside = base.join("other-attempt");
+        let _ = std::fs::remove_dir_all(&base);
+        for directory in [&checkout, &temporary, &outside] {
+            std::fs::create_dir_all(directory).expect("the check fixture is writable");
+        }
+        for control in [".git", ".gitattributes", ".gitmodules"] {
+            std::fs::write(checkout.join(control), "protected").expect("a root Git control");
+        }
+        std::os::unix::fs::symlink(&outside, checkout.join("outside-link"))
+            .expect("a candidate symlink to private state");
+        let writable = linux_check_writable(&checkout, &temporary).expect("check grants");
+        assert!(
+            !writable.contains(&checkout.canonicalize().expect("checkout exists"))
+                && !writable.contains(&outside.canonicalize().expect("outside exists"))
+                && [".git", ".gitattributes", ".gitmodules"]
+                    .iter()
+                    .all(|control| !writable.contains(
+                        &checkout
+                            .join(control)
+                            .canonicalize()
+                            .expect("control exists")
+                    )),
+            "Landlock must never receive the root, a Git control, or an outside symlink grant: {writable:?}"
+        );
+        assert!(
+            crate::goal::BUILD_OUTPUT
+                .iter()
+                .all(|output| writable.contains(
+                    &checkout
+                        .join(output)
+                        .canonicalize()
+                        .expect("build directory exists")
+                )),
+            "build outputs must remain writable without a checkout-wide Landlock grant"
+        );
+        std::fs::remove_dir_all(base).expect("remove the check fixture");
     }
 }
