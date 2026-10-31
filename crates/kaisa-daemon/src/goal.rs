@@ -94,7 +94,10 @@ pub const AGENT_IDENTITY_FILE: &str = "agent.identity";
 /// Durably writes the agent's identity before it is given any work. An agent whose identity
 /// cannot be told (an OS without support) is recorded as unknown, which recovery treats as
 /// lost track rather than as gone.
-fn record_identity(path: &Path, identity: Option<ProcessIdentity>) -> std::io::Result<()> {
+pub(crate) fn record_identity(
+    path: &Path,
+    identity: Option<ProcessIdentity>,
+) -> std::io::Result<()> {
     let line: String = identity.map_or_else(|| "unknown".to_owned(), |known| known.to_line());
     let mut file = std::fs::File::create(path)?;
     std::io::Write::write_all(&mut file, line.as_bytes())?;
@@ -212,6 +215,8 @@ impl std::error::Error for GoalError {}
 
 /// The step named when an attempt is not admitted because its containment falls short.
 const ADMISSION_STEP: &str = "admitting the attempt";
+/// The step named when the OS rejects creation of the configured agent program.
+const START_AGENT_STEP: &str = "starting the agent";
 
 impl GoalError {
     /// True when the attempt never started because it lacked containment that no Decision or
@@ -224,7 +229,7 @@ impl GoalError {
     /// True when the OS proved that no agent process was started.
     #[must_use]
     pub fn failed_to_start(&self) -> bool {
-        self.step == "starting the agent"
+        self.step == START_AGENT_STEP
     }
 
     fn refused(missing: &[ContainmentCapability], basis: &ReducedModeBasis) -> Self {
@@ -391,13 +396,21 @@ fn run_goal_inner(
     std::fs::create_dir_all(&attempt_directory).map_err(at("preparing the attempt directory"))?;
     // Lock before recording admission, not just before spawn: recovery must never reclaim
     // a live invocation's in-progress preparation. Retain the handle through reclamation.
-    let _owner = OpenOptions::new()
+    let owner_directory = crate::recover::owner_directory(request.state_directory, &attempt);
+    std::fs::create_dir_all(&owner_directory).map_err(at("preparing the owner directory"))?;
+    let owner = OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
-        .open(attempt_directory.join(crate::recover::OWNER_LOCK_FILE))
+        .open(owner_directory.join(crate::recover::OWNER_LOCK_FILE))
         .map_err(at("creating the attempt owner lock"))?;
-    _owner.lock().map_err(at("locking the attempt owner"))?;
+    owner.lock().map_err(at("locking the attempt owner"))?;
+    record_identity(
+        &owner_directory.join(crate::recover::OWNER_IDENTITY_FILE),
+        ProcessIdentity::of(std::process::id()).map_err(at("identifying the attempt owner"))?,
+    )
+    .map_err(at("recording the attempt owner"))?;
+    let _held_owner = owner;
 
     record(
         &mut ledger,
@@ -646,7 +659,10 @@ fn run_goal_inner(
             )
             .map_err(at("reclaiming the failed start"))?;
             record_cleanup(&mut ledger, &attempt, state.cleanup())?;
-            return Err(at("starting the agent")(error));
+            return Err(GoalError {
+                step: START_AGENT_STEP,
+                detail: format!("{}: {error}", agent.program.display()),
+            });
         }
     };
     if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {

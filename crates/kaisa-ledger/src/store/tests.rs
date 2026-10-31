@@ -368,3 +368,79 @@ fn appending_after_the_last_hash_was_truncated_is_refused() {
         "new events must never be chained onto a hash that cannot be trusted"
     );
 }
+
+/// Enough independent owners to overlap SQLite read snapshots on every append.
+const CONCURRENT_OWNERS: usize = 8;
+/// Each owner starts several runs while its peers are appending.
+const RUNS_PER_OWNER: usize = 32;
+
+#[test]
+fn concurrent_owners_append_every_event_to_one_intact_hash_chain() {
+    let scratch = a_ledger_path_that_does_not_exist_yet();
+    let gate = std::sync::Barrier::new(CONCURRENT_OWNERS);
+    let stores: Vec<_> = (0..CONCURRENT_OWNERS)
+        .map(|_| an_open_empty_ledger(&scratch))
+        .collect();
+    let results = std::thread::scope(|scope| {
+        let workers: Vec<_> = stores
+            .into_iter()
+            .map(|mut store| {
+                let gate = &gate;
+                scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for _ in 0..RUNS_PER_OWNER {
+                        gate.wait();
+                        if let Err(error) = store.append(run_41_started()) {
+                            failures.push(error.to_string());
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("writer returns"))
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        results.is_empty(),
+        "each owner's append must wait for the writer, never lose an event: {results:?}"
+    );
+    let store = an_open_empty_ledger(&scratch);
+    let expected_events =
+        u64::try_from(CONCURRENT_OWNERS * RUNS_PER_OWNER).expect("small event count");
+    assert_eq!(
+        store.len().expect("events counted"),
+        expected_events,
+        "every concurrent append is committed exactly once"
+    );
+    assert!(
+        store.verify().is_ok(),
+        "concurrent writers must extend one unbroken hash chain"
+    );
+}
+
+#[test]
+fn concurrent_first_opens_configure_the_same_new_ledger_without_errors() {
+    let scratch = a_ledger_path_that_does_not_exist_yet();
+    let gate = std::sync::Barrier::new(CONCURRENT_OWNERS);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..CONCURRENT_OWNERS)
+            .map(|_| {
+                let gate = &gate;
+                let scratch = &scratch;
+                scope.spawn(move || {
+                    gate.wait();
+                    EventStore::open(&scratch.path())
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert!(
+                worker.join().expect("opener returns").is_ok(),
+                "schema and WAL setup must wait for other opening owners"
+            );
+        }
+    });
+}
