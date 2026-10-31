@@ -217,7 +217,8 @@ fn preservation_command(directory: &Path, hooks: &EmptyHooksDirectory) -> Comman
 
 /// Canonical paths retain extended Windows prefixes for identity comparisons;
 /// only Git CLI arguments use ordinary drive/UNC spelling.
-fn git_cli_path(path: &Path) -> String {
+#[must_use]
+pub fn git_cli_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     #[cfg(windows)]
     {

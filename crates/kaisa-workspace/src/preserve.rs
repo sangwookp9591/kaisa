@@ -1365,9 +1365,19 @@ mod tests {
             ],
         )
         .expect("stage matching parent gitlink");
+        // CI runners have no global Git identity, so the fixture names one, like the nested commit.
         git_text(
             worktree.path(),
-            &["commit", "--quiet", "-m", "record gitlink"],
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "record gitlink",
+            ],
         )
         .expect("commit gitlink before hostile configuration");
         let marker = repository.sibling("nested-filter-executed");

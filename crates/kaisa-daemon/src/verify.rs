@@ -173,10 +173,13 @@ impl CheckedSources {
     }
 
     fn matches(&self, checkout: &Path, tree: &str) -> std::io::Result<bool> {
-        let mut git_directory = std::ffi::OsString::from("--git-dir=");
-        git_directory.push(&self.git_directory);
-        let mut work_tree = std::ffi::OsString::from("--work-tree=");
-        work_tree.push(checkout);
+        // The recorded directory is canonical, which on Windows means a `\\?\` path that Git
+        // cannot follow to the worktree's `commondir`; Git gets the ordinary spelling.
+        let git_directory = format!(
+            "--git-dir={}",
+            kaisa_workspace::git_cli_path(&self.git_directory)
+        );
+        let work_tree = format!("--work-tree={}", kaisa_workspace::git_cli_path(checkout));
         let mut command = Command::new("git");
         command
             .current_dir(checkout)
