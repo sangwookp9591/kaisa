@@ -307,7 +307,7 @@ pub(crate) fn command_for(spec: &ProcessSpec) -> Command {
 
 /// The inherited environment shared by agents and trusted checks. Toolchain locations keep
 /// cargo, npm, Java and Python checks usable without forwarding provider keys or arbitrary
-/// configuration. Egress proxy variables are supplied explicitly by the broker, never inherited.
+/// configuration. User proxies are defaults; explicit broker overrides take precedence.
 #[must_use]
 pub fn base_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
@@ -359,6 +359,68 @@ fn is_base_variable(name: &str) -> bool {
                 | "VIRTUAL_ENV"
                 | "CONDA_PREFIX"
                 | "PYENV_ROOT"
+                | "SYSTEMDRIVE"
+                | "WINDIR"
+                | "PROGRAMFILES"
+                | "PROGRAMFILES(X86)"
+                | "PROGRAMW6432"
+                | "PROGRAMDATA"
+                | "COMMONPROGRAMFILES"
+                | "COMMONPROGRAMFILES(X86)"
+                | "COMMONPROGRAMW6432"
+                | "ALLUSERSPROFILE"
+                | "PUBLIC"
+                | "HOMEDRIVE"
+                | "HOMEPATH"
+                | "USERNAME"
+                | "COMPUTERNAME"
+                | "NUMBER_OF_PROCESSORS"
+                | "PROCESSOR_ARCHITECTURE"
+                | "OS"
+                | "PSMODULEPATH"
+                | "GOPATH"
+                | "GOROOT"
+                | "GOMODCACHE"
+                | "GOCACHE"
+                | "GOFLAGS"
+                | "GOPROXY"
+                | "GOPRIVATE"
+                | "GONOSUMDB"
+                | "GOTOOLCHAIN"
+                | "ASDF_DATA_DIR"
+                | "ASDF_DIR"
+                | "MISE_DATA_DIR"
+                | "MISE_CONFIG_DIR"
+                | "RBENV_ROOT"
+                | "PYENV_VERSION"
+                | "SDKMAN_DIR"
+                | "FNM_DIR"
+                | "GEM_HOME"
+                | "GEM_PATH"
+                | "BUNDLE_PATH"
+                | "DOTNET_ROOT"
+                | "DENO_DIR"
+                | "XDG_CONFIG_HOME"
+                | "XDG_CACHE_HOME"
+                | "XDG_DATA_HOME"
+                | "XDG_STATE_HOME"
+                | "XDG_RUNTIME_DIR"
+                | "DBUS_SESSION_BUS_ADDRESS"
+                | "SSL_CERT_FILE"
+                | "SSL_CERT_DIR"
+                | "REQUESTS_CA_BUNDLE"
+                | "CURL_CA_BUNDLE"
+                | "NODE_EXTRA_CA_CERTS"
+                | "TZ"
+                | "LANGUAGE"
+                | "HTTP_PROXY"
+                | "HTTPS_PROXY"
+                | "ALL_PROXY"
+                | "NO_PROXY"
+                | "http_proxy"
+                | "https_proxy"
+                | "all_proxy"
+                | "no_proxy"
         )
 }
 
@@ -396,50 +458,36 @@ mod unix {
     /// platform capability; a PPID walk is not a cgroup or a Job Object.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(super) fn kill_descendants(leader: u32) -> io::Result<()> {
-        let Some(root) = crate::ProcessIdentity::of(leader)? else {
+        kill_descendants_with_signal(leader, signal)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(super) fn kill_descendants_with_signal(
+        leader: u32,
+        mut send_signal: impl FnMut(u32, libc::c_int) -> io::Result<()>,
+    ) -> io::Result<()> {
+        // PPID discovery is best effort, not a kernel containment boundary. A vanished or
+        // inaccessible process must not prevent the caller's group/leader kill or turn a
+        // deadline into an I/O error. Failed stops also must not abort other branches.
+        let Ok(Some(root)) = crate::ProcessIdentity::of(leader) else {
             return Ok(());
         };
-        signal(root.pid, libc::SIGSTOP)?;
+        let _ = send_signal(root.pid, libc::SIGSTOP);
         let mut known = std::collections::BTreeMap::new();
-        let mut failure = None;
-        'discover: loop {
+        loop {
             let before = known.len();
             let mut parents = vec![root];
             parents.extend(known.values().copied());
             for parent in parents {
-                // Never walk children of an unrelated process that reused a recorded PID.
-                let children = parent.is_running().and_then(|running| {
-                    if running {
-                        children_of(parent.pid)
-                    } else {
-                        Ok(Vec::new())
-                    }
-                });
-                let children = match children {
-                    Ok(children) => children,
-                    Err(error) => {
-                        failure = Some(error);
-                        break 'discover;
-                    }
-                };
-                for pid in children {
-                    if let std::collections::btree_map::Entry::Vacant(entry) = known.entry(pid) {
-                        match crate::ProcessIdentity::of(pid) {
-                            Ok(Some(identity)) => {
-                                // Stop discovered parents before expanding their descendants so
-                                // a fork loop cannot outrun cleanup indefinitely.
-                                entry.insert(identity);
-                                if let Err(error) = signal(pid, libc::SIGSTOP) {
-                                    failure = Some(error);
-                                    break 'discover;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                failure = Some(error);
-                                break 'discover;
-                            }
-                        }
+                if !parent.is_running().unwrap_or(false) {
+                    continue;
+                }
+                for pid in children_of(parent.pid).unwrap_or_default() {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = known.entry(pid)
+                        && let Ok(Some(identity)) = crate::ProcessIdentity::of(pid)
+                    {
+                        entry.insert(identity);
+                        let _ = send_signal(pid, libc::SIGSTOP);
                     }
                 }
             }
@@ -447,23 +495,13 @@ mod unix {
                 break;
             }
         }
-        // Still kill everything recorded if enumeration failed, then let the caller kill the
-        // group. In particular, no stopped session-escaped child is left behind on error.
-        // Leave the stopped leader alive until the caller signals the group. Besides keeping
-        // its group ID reserved, this avoids a zombie-only group returning EPERM on macOS.
+        // Leave the leader alive until group termination to keep the group ID reserved.
         for identity in known.values() {
-            let result = identity.is_running().and_then(|running| {
-                if running {
-                    signal(identity.pid, libc::SIGKILL)
-                } else {
-                    Ok(())
-                }
-            });
-            if let Err(error) = result {
-                failure.get_or_insert(error);
+            if identity.is_running().unwrap_or(false) {
+                let _ = send_signal(identity.pid, libc::SIGKILL);
             }
         }
-        failure.map_or(Ok(()), Err)
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -519,11 +557,23 @@ mod unix {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    fn inaccessible_process(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+        ) || error.raw_os_error() == Some(libc::ESRCH)
+    }
+
     #[cfg(target_os = "linux")]
     fn children_of(parent: u32) -> io::Result<Vec<u32>> {
         let mut children = Vec::new();
         for entry in std::fs::read_dir("/proc")? {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if inaccessible_process(&error) => continue,
+                Err(error) => return Err(error),
+            };
             let Some(pid) = entry
                 .file_name()
                 .to_str()
@@ -533,7 +583,7 @@ mod unix {
             };
             let stat = match std::fs::read_to_string(entry.path().join("stat")) {
                 Ok(stat) => stat,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if inaccessible_process(&error) => continue,
                 Err(error) => return Err(error),
             };
             // comm (field 2) can contain ')' and spaces; state and PPID follow its last ')'.
@@ -566,6 +616,22 @@ mod unix {
             Ok(())
         } else {
             Err(error)
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn vanished_and_inaccessible_proc_entries_are_skipped_but_other_errors_surface() {
+            for errno in [libc::ENOENT, libc::ESRCH, libc::EACCES, libc::EPERM] {
+                assert!(
+                    super::inaccessible_process(&std::io::Error::from_raw_os_error(errno)),
+                    "routine process race or access denial {errno} must not stop the proc scan"
+                );
+            }
+            assert!(
+                !super::inaccessible_process(&std::io::Error::from_raw_os_error(libc::EIO)),
+                "an unrelated I/O failure must not be misclassified as a per-process race"
+            );
         }
     }
 }
@@ -738,12 +804,83 @@ mod tests {
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "AWS_SECRET_ACCESS_KEY",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
         ] {
             assert!(
                 !super::is_base_variable(secret),
                 "{secret} must be passed explicitly by its adapter or Kaisa's egress broker"
+            );
+        }
+    }
+
+    #[test]
+    fn user_proxies_and_reviewed_toolchain_inputs_are_in_the_base_environment() {
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "all_proxy",
+            "SYSTEMDRIVE",
+            "WINDIR",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+            "PROGRAMW6432",
+            "PROGRAMDATA",
+            "COMMONPROGRAMFILES",
+            "COMMONPROGRAMFILES(X86)",
+            "COMMONPROGRAMW6432",
+            "ALLUSERSPROFILE",
+            "PUBLIC",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "USERNAME",
+            "COMPUTERNAME",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "OS",
+            "PSMODULEPATH",
+            "GOPATH",
+            "GOROOT",
+            "GOMODCACHE",
+            "GOCACHE",
+            "GOFLAGS",
+            "GOPROXY",
+            "GOPRIVATE",
+            "GONOSUMDB",
+            "GOTOOLCHAIN",
+            "ASDF_DATA_DIR",
+            "ASDF_DIR",
+            "MISE_DATA_DIR",
+            "MISE_CONFIG_DIR",
+            "RBENV_ROOT",
+            "PYENV_VERSION",
+            "SDKMAN_DIR",
+            "FNM_DIR",
+            "GEM_HOME",
+            "GEM_PATH",
+            "BUNDLE_PATH",
+            "DOTNET_ROOT",
+            "DENO_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "TZ",
+            "LANGUAGE",
+        ] {
+            assert!(
+                super::is_base_variable(name),
+                "the reviewed runtime input {name} must reach children"
             );
         }
     }
@@ -899,6 +1036,42 @@ mod tests {
             assert!(
                 disappears_within_patience(grandchild),
                 "a background process left by the agent must not survive cleanup"
+            );
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[test]
+        fn a_failed_stop_still_discovers_children_and_leaves_group_cleanup_available() {
+            let pid_file = a_fresh_pid_file();
+            let mut agent =
+                OwnedProcess::spawn(&a_process_that_starts_a_background_child(&pid_file))
+                    .expect("the fixture starts");
+            let grandchild = wait_for_pid_in(&pid_file);
+            let result =
+                super::super::unix::kill_descendants_with_signal(agent.id(), |pid, signal| {
+                    if signal == libc::SIGSTOP {
+                        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                    }
+                    #[allow(unsafe_code)]
+                    // SAFETY: the walk checks the recorded identity; kill has no memory preconditions.
+                    let killed = unsafe { libc::kill(pid as libc::pid_t, signal) };
+                    if killed == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            let child_ended = disappears_within_patience(grandchild);
+            agent.kill_tree().expect("group cleanup still runs");
+            agent.wait().expect("leader reaped");
+            let _ = std::fs::remove_file(pid_file);
+            assert!(
+                result.is_ok(),
+                "best-effort descendant cleanup must preserve deadline outcomes"
+            );
+            assert!(
+                child_ended,
+                "failed stops must not abort descendant discovery and killing"
             );
         }
 

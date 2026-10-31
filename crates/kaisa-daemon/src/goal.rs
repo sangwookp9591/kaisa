@@ -102,7 +102,25 @@ fn record_identity(path: &Path, identity: Option<ProcessIdentity>) -> std::io::R
 }
 
 /// Variables that point an agent's HTTP clients at its egress broker.
-const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+const PROXY_VARIABLES: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+fn broker_proxy_environment(proxy: &str) -> Vec<(String, String)> {
+    PROXY_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), proxy.to_owned()))
+        .chain([
+            ("NO_PROXY".to_owned(), String::new()),
+            ("no_proxy".to_owned(), String::new()),
+        ])
+        .collect()
+}
 
 /// What came of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -529,11 +547,7 @@ fn run_goal_inner(
         )
         .map_err(at("starting the egress broker"))?;
         let proxy: String = format!("http://{}", broker.address());
-        agent.env.extend(
-            PROXY_VARIABLES
-                .iter()
-                .map(|name| ((*name).to_owned(), proxy.clone())),
-        );
+        agent.env.extend(broker_proxy_environment(&proxy));
         Some(broker)
     };
     let egress_port: Option<u16> = egress
@@ -812,6 +826,35 @@ mod tests {
     };
 
     use super::GoalOutcome;
+
+    #[test]
+    fn an_egress_broker_replaces_every_user_proxy_and_clears_bypass_lists() {
+        const BROKER_PROXY: &str = "http://127.0.0.1:43123";
+        let overrides = super::broker_proxy_environment(BROKER_PROXY);
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                overrides
+                    .iter()
+                    .any(|(key, value)| key == name && value == BROKER_PROXY),
+                "the broker must replace user proxy {name}"
+            );
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                overrides
+                    .iter()
+                    .any(|(key, value)| key == name && value.is_empty()),
+                "user bypass list {name} must not bypass the attempt broker"
+            );
+        }
+    }
 
     /// A kernel whose Landlock handles writes but neither truncation nor TCP (ABI 2).
     const LANDLOCK_ABI_TWO: i64 = 2;
