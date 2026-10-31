@@ -34,9 +34,21 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
             return Ok(crate::EXIT_FAILURE);
         }
     };
+    let attempt_width = rows
+        .iter()
+        .map(|row| row.attempt.as_str().len())
+        .max()
+        .unwrap_or_default()
+        .max("ATTEMPT".len());
+    let task_width = rows
+        .iter()
+        .map(|row| row.task.as_str().len())
+        .max()
+        .unwrap_or_default()
+        .max("TASK".len());
     writeln!(
         out,
-        "{:<24} {:<24} {:<16} {:<12} {:<14} COST",
+        "{:<attempt_width$} {:<task_width$} {:<16} {:<12} {:<14} COST",
         "ATTEMPT", "TASK", "EXECUTION", "CLEANUP", "TOKENS"
     )?;
     let total: f64 = usage
@@ -64,7 +76,7 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         };
         writeln!(
             out,
-            "{:<24} {:<24} {:<16} {:<12} {:<14} {}",
+            "{:<attempt_width$} {:<task_width$} {:<16} {:<12} {:<14} {}",
             row.attempt.as_str(),
             row.task.as_str(),
             row.execution.code(),
