@@ -330,7 +330,27 @@ preserve unrelated keys. No automatic settings fixes, command execution, monorep
 - **Layout.** `kaisa watch`, or Home, shows a **Needs you** lane at the top: decisions, questions and blockers, oldest first.
   Below it come the run cards, each with a plan tree, live cost and what each agent is doing right now.
 - **Filters:** `[n]` needs you · `[m]` mine · `[f]` failed · `[/]` search.
-- **Today (M1):** `kaisa watch` prints a table of attempts, state, tokens and cost and exits. It is read-only: it does not append events, migrate the database or rebuild projections, so it is safe while a run is going. A closed ledger is read without file changes; reading a live WAL database can create or update SQLite shared-memory sidecars.
+- **Today (M1):** `kaisa tui` opens a full-screen terminal home with a pinned Needs you lane for recorded
+  `NeedsPerson` gates and their reasons, followed by goals and developer/reviewer/revision attempts.
+  It polls the ledger read-only once a second, using the same safe open as `kaisa watch`; neither
+  command appends events, migrates the database or rebuilds projections. Closed-ledger refreshes
+  leave database bytes and directory entries unchanged; SQLite may update shared memory while
+  reading an existing live WAL. The detail pane shows recorded gate decisions, review summaries
+  and readable validated findings, trusted check commands and exits, result branches, the exact
+  `git merge --ff-only` command for a delivered candidate, and bounded transcript tails when readable.
+  Execution, cleanup, provider-reported tokens/cost and the recorded reduced/platform-limit basis
+  stay visible; unavailable usage is `n/a`, with unknown costs excluded from totals. Attempts without
+  a recorded verification-run link remain separate until that link appears; no association or
+  outcome is guessed. `↑`/`↓` or `j`/`k` selects, Enter opens details, Tab switches panes, `n`/`f`
+  toggles Needs-you/failed filters, `/` searches, `r` refreshes, `?` shows help, and `q`/Esc/Ctrl-C
+  exits and restores the terminal. In details, arrows and `j`/`k` scroll; PgUp/PgDn also scroll.
+  `g` opens a goal prompt: Enter starts a detached `kaisa "<goal>"` in the current repository,
+  with output in a state-directory log, and polling shows the recorded work. Take over, steer,
+  pause, undo and approve are labelled **not available yet** in help and do nothing.
+  `--plain`, or running without a TTY, prints one complete text frame and exits. TUI labels come
+  from a ko/en catalog (`KAISA_LANG` accepts a case-insensitive `ko` prefix; when unset,
+  `LC_ALL`, `LC_MESSAGES`, then `LANG` supplies the locale, defaulting to English). `kaisa watch` still prints its attempt table
+  and exits. The browser console and the broader decision/question actions below remain planned.
 - **Actions** are keys on the selected card: `[t]` take over · `[s]` steer · `[p]` pause · `[u]` undo · `[k]` keep.
 - **Accessibility.** `--plain` prints the same information as a text stream that screen readers can follow.
 - **Browser.** `kaisa console` opens the same view in your browser on this machine only (nothing
@@ -608,7 +628,7 @@ The default (marked ★) is always the safe choice.
 
 Every command supports `--json`, `--plain` and `--help`, in `ko` or `en`. Read-only commands never start the daemon or write state.
 
-**Today (M1):** `kaisa` (Home), `kaisa "<goal>"`, `watch`, `init`, `doctor`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no `--json`, `--plain` or `ko`/`en` yet.
+**Today (M1):** `kaisa` (Home), `kaisa "<goal>"`, `watch`, `tui`, `init`, `doctor`, `mcp serve`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no global `--json` yet. `kaisa tui --plain` prints one text frame; the TUI has ko/en labels, selected by `KAISA_LANG` or the POSIX locale as described in F10; other commands are English only.
 
 ---
 

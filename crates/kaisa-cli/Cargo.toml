@@ -20,6 +20,11 @@ kaisa-workspace.workspace = true
 toml = "0.8"
 
 serde_json.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
 
 [features]
 # Test fixtures that must never exist in a shipped binary (for example the MCP server's

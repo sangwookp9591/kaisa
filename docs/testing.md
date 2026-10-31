@@ -67,7 +67,8 @@ through.
 
 The binary's end-to-end tests start the scripted agent `kaisa-fake-agent` as a separate program. Cargo
 does not build it for `cargo test -p kaisa --test <name>`, so run `cargo build -p kaisa-fake-agent`
-first. Without it those tests fail with errors such as `sandbox-exec: execvp() of …/kaisa-fake-agent
+first. The `kaisa-cli` TUI unit tests also need fresh `kaisa` and `kaisa-fake-agent` binaries; run
+`cargo build -p kaisa -p kaisa-fake-agent` before `cargo test -p kaisa-cli`. Without it those tests fail with errors such as `sandbox-exec: execvp() of …/kaisa-fake-agent
 failed` (for example, 7 of the 9 tests in `--test goal`). `scripts/check.sh` already builds it.
 
 ## Before every commit
@@ -81,3 +82,18 @@ failure. There is no benchmark or footprint step in either (architecture §15, �
 Capture its exit code and commit only on zero, for example
 `scripts/check.sh --fix > check.log 2>&1; ec=$?`. Never pipe it into another command before an
 `&&`-chained commit, because the pipe hides the failure. Stage explicit paths, never `git add -A`.
+
+
+## Manual TUI terminal checks
+
+On Unix, open `kaisa tui` in a disposable PTY with an isolated `KAISA_STATE_DIR`.
+Compare `stty -g` before and after each of q, Esc, Ctrl-C and external SIGTERM,
+SIGINT and SIGHUP; check alternate-screen leave (`CSI ?1049l`), cursor-show
+(`CSI ?25h`) and bracketed-paste disable (`CSI ?2004l`) in captured output.
+The Unix signal handlers set an atomic flag; the 100ms event poll returns through
+the restore guard. The panic hook restores before diagnostics. SIGKILL cannot be handled.
+Native Windows console restoration still needs a Windows manual run.
+
+With `g` open, send a bracketed multiline paste containing `qng/` and verify that
+it remains goal text, with newlines replaced by spaces. Only a subsequent typed
+Enter may start the goal. Use the fake agent for any run; never a real provider.

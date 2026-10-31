@@ -972,7 +972,7 @@ same ledger, outbox and authority rules as the engine cores.
 **Localization and the plain-language renderer.** Used by U5 and U11.
 - **Message catalog.** Every user-facing string comes from a catalog in Fluent format, with `ko` and `en` from M0.
 
-  > **Current state.** There is no Fluent catalog and no `kaisa-i18n` crate; messages are English strings in the code. NFR-05 requires the `ko`/`en` catalog, so this is a gap, not a decision.
+  > **Current state.** There is no Fluent catalog and no `kaisa-i18n` crate; most messages are English strings in the code. The TUI has a local `catalog!` ko/en catalog selected by `KAISA_LANG` or the POSIX locale. NFR-05 requires the `ko`/`en` catalog, so this is a gap, not a decision.
 - **Rendering.** A renderer maps ledger events to plain sentences, for example `coordinator_handoff` becomes "Claude ran out of quota, so GPT took over planning; nothing was lost." Internal terms (epoch, generation, lease) appear only with `--verbose` or `--json`.
 - **Fix options.** Every blocking event type must declare at least one fix option. CI fails if one does not, which enforces "no unexplained blocks" (user-flows §10).
 
