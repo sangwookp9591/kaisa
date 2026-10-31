@@ -36,9 +36,8 @@ pub enum ExecSandbox {
     #[cfg(windows)]
     AppContainer(kaisa_sys::AppContainerProfile),
     /// Isolation could not be applied; exec must fail closed.
-    #[cfg(windows)]
     Unavailable(String),
-    /// No OS sandbox; the run must be labelled reduced.
+    /// No OS sandbox; broker exec always refuses this configuration.
     Unconfined,
 }
 
@@ -103,14 +102,15 @@ impl FileBroker {
             ExecSandbox::Landlock(ruleset) => Confinement::Landlock(ruleset),
             #[cfg(windows)]
             ExecSandbox::AppContainer(profile) => Confinement::AppContainer(profile),
-            #[cfg(windows)]
             ExecSandbox::Unavailable(reason) => return ToolOutcome::Refused(reason.clone()),
             #[cfg(windows)]
             ExecSandbox::Unconfined => {
                 return ToolOutcome::Refused("exec requires the attempt's AppContainer".to_owned());
             }
             #[cfg(not(windows))]
-            ExecSandbox::Unconfined => Confinement::Unconfined,
+            ExecSandbox::Unconfined => {
+                return ToolOutcome::Refused("exec requires OS sandbox isolation".to_owned());
+            }
         };
         match run_captured(&spec, &confinement, &[], EXEC_DEADLINE, EXEC_OUTPUT_CAP) {
             Ok(run) => ToolOutcome::Done(describe(&run)),
@@ -186,6 +186,9 @@ impl FileBroker {
             Some(actual) => actual,
             None => return ToolOutcome::Refused(format!("{path} is not a repository path")),
         };
+        if protected_git_path(&path) || protected_git_path(&actual) {
+            return ToolOutcome::Refused(format!("{path} is a protected Git control path"));
+        }
         if !self.write_set.permits(&actual) {
             return ToolOutcome::Refused(format!(
                 "{path} is outside your write set. If the change really needs it, ask your \
@@ -208,6 +211,17 @@ impl FileBroker {
         {
             return ToolOutcome::Refused(format!("{path} became a symbolic link"));
         }
+        // The link-count check also races with concurrent replacement/link creation.
+        // Removing this TOCTOU requires handle-relative I/O and an atomic replacement policy.
+        match existing_link_count(&file) {
+            Ok(Some(links)) if links > 1 => {
+                return ToolOutcome::Refused(format!("{path} is a hardlinked file"));
+            }
+            Err(error) => {
+                return ToolOutcome::Refused(format!("{path} cannot be checked: {error}"));
+            }
+            _ => {}
+        }
         match std::fs::write(&file, content) {
             Ok(()) => ToolOutcome::Done(format!(
                 "wrote {} bytes to {path} (blake3 {})",
@@ -216,6 +230,34 @@ impl FileBroker {
             )),
             Err(error) => ToolOutcome::Refused(format!("{path} cannot be written: {error}")),
         }
+    }
+}
+
+/// Deny at every depth, including nested repositories and case-insensitive filesystems.
+fn protected_git_path(path: &RepoPath) -> bool {
+    path.as_str().split('/').any(|component| {
+        [".git", ".gitattributes", ".gitmodules"]
+            .iter()
+            .any(|name| component.eq_ignore_ascii_case(name))
+    })
+}
+
+fn existing_link_count(path: &Path) -> std::io::Result<Option<u64>> {
+    #[cfg(any(unix, windows))]
+    {
+        match kaisa_sys::hard_link_count(path) {
+            Ok(links) => Ok(Some(links)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cannot inspect hardlinks",
+        ))
     }
 }
 
@@ -287,6 +329,119 @@ mod tests {
             WriteSet::new(vec![RepoPath::try_new("src/auth").expect("valid")]),
         )
         .expect("the worktree resolves")
+    }
+
+    fn a_broker_owning_paths(worktree: &ScratchWorktree, paths: &[&str]) -> FileBroker {
+        FileBroker::new(
+            &worktree.root,
+            WriteSet::new(
+                paths
+                    .iter()
+                    .map(|path| RepoPath::try_new(path).expect("valid owned path"))
+                    .collect(),
+            ),
+        )
+        .expect("the worktree resolves")
+    }
+
+    #[test]
+    fn git_control_paths_are_refused_even_when_explicitly_owned() {
+        let worktree = ScratchWorktree::new("git-controls");
+        let controls = [
+            ".git",
+            ".git/config",
+            ".gitattributes",
+            ".gitmodules",
+            "src/auth/.git/hooks/pre-commit",
+            "src/auth/.gitattributes",
+            "src/auth/.gitmodules",
+            ".GiT/config",
+        ];
+        let mut broker = a_broker_owning_paths(&worktree, &controls);
+        for path in controls {
+            let outcome = broker.call("fs_write", &json!({"path": path, "content": "changed"}));
+            assert!(
+                matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("protected Git")),
+                "Git controls stay protected regardless of write ownership: {path}: {outcome:?}"
+            );
+            assert!(
+                !worktree.root.join(path).exists(),
+                "refusal must not create {path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_owned_alias_to_git_controls_is_refused() {
+        let worktree = ScratchWorktree::new("git-alias");
+        std::fs::create_dir(worktree.root.join(".git")).expect("Git directory");
+        auth_alias(&worktree, "../../.git");
+        let mut broker = a_broker_owning_paths(&worktree, &["src/auth", ".git"]);
+        let outcome = write_through_auth_alias(&mut broker, "/config");
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("protected Git")),
+            "canonical Git targets stay protected through aliases: {outcome:?}"
+        );
+        assert!(
+            !worktree.root.join(".git/config").exists(),
+            "Git config must stay absent"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_owned_hardlink_to_an_unowned_file_refuses_the_write() {
+        let worktree = ScratchWorktree::new("hardlink");
+        let original = worktree.root.join("src/billing/invoice.rs");
+        let alias = worktree.root.join("src/auth/invoice.rs");
+        let original_content = "billing data";
+        std::fs::write(&original, original_content).expect("billing file");
+        std::fs::hard_link(&original, &alias).expect("a hardlink on the same filesystem");
+        let mut broker = a_broker_owning_auth(&worktree);
+        let outcome = broker.call(
+            "fs_write",
+            &json!({"path": "src/auth/invoice.rs", "content": "changed"}),
+        );
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("hardlinked")),
+            "owned hardlinks must not truncate an unowned inode: {outcome:?}"
+        );
+        for file in [original, alias] {
+            assert_eq!(
+                std::fs::read_to_string(file).expect("unchanged file"),
+                original_content,
+                "both names of the inode must retain their contents"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_isolation_refuses_exec_with_its_reason() {
+        let worktree = ScratchWorktree::new("exec-unavailable");
+        let reason = "test kernel has no isolation";
+        let mut broker =
+            a_broker_owning_auth(&worktree).with_exec(crate::attempt::unavailable_exec(reason));
+        let outcome = broker.call("exec", &json!({"argv": ["missing-command"]}));
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(message) if message.contains(reason)),
+            "sandbox failure must return its reason before spawning: {outcome:?}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_unconfined_exec_is_refused_before_spawning() {
+        let worktree = ScratchWorktree::new("exec-no-isolation");
+        let mut broker = a_broker_owning_auth(&worktree).with_exec(super::ExecSandbox::Unconfined);
+        let outcome = broker.call(
+            "exec",
+            &json!({"argv": ["/bin/sh", "-c", "echo unconfined"]}),
+        );
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("isolation")),
+            "exec must never fall back to an unconfined process: {outcome:?}"
+        );
     }
 
     #[test]

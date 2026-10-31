@@ -121,18 +121,26 @@ impl BridgeConfig {
         #[cfg(target_os = "linux")]
         {
             Ok(
-                match kaisa_sys::write_ruleset(&writable, self.broker_port)? {
-                    Some(ruleset) => ExecSandbox::Landlock(ruleset),
-                    None => ExecSandbox::Unconfined,
+                match kaisa_sys::write_ruleset(&writable, self.broker_port) {
+                    Ok(Some(ruleset)) => ExecSandbox::Landlock(ruleset),
+                    Ok(None) => unavailable_exec("Linux Landlock is not supported"),
+                    Err(error) => {
+                        unavailable_exec(&format!("Linux Landlock setup failed: {error}"))
+                    }
                 },
             )
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = writable;
-            Ok(ExecSandbox::Unconfined)
+            Ok(unavailable_exec("this OS has no supported exec sandbox"))
         }
     }
+}
+
+#[cfg(any(test, not(any(target_os = "macos", windows))))]
+pub(crate) fn unavailable_exec(reason: &str) -> ExecSandbox {
+    ExecSandbox::Unavailable(format!("exec requires OS sandbox isolation: {reason}"))
 }
 
 /// Serves the bridge of the attempt in `attempt_directory` from `input` to `output` until the
