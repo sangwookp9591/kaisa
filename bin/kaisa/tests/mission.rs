@@ -92,6 +92,7 @@ fn a_two_task_mission_runs_both_attempts_in_dependency_order() {
         launch: &launch,
         kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
         confine_agent: true,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the mission runs");
     let order: Vec<TaskId> = outcome.ran.iter().map(|(id, _)| id.clone()).collect();

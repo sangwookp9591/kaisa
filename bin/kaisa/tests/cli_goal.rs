@@ -828,3 +828,227 @@ fn a_trial_run_is_labelled() {
         "the person is told this is a trial and what Claude Code may reach: {stdout:?}"
     );
 }
+
+/// Exit status of a run that waits for a person (CI contract code 3).
+const WAITING_FOR_YOU: i32 = 3;
+/// Exit status of a command used with the wrong arguments.
+const USAGE_ERROR: i32 = 64;
+/// How long a person's Decision lasts in these tests: one hour, in milliseconds.
+const DECISION_LIFETIME_MS: u64 = 60 * 60 * 1000;
+/// Every capability a run without an OS sandbox is missing, as a person types them.
+const EVERY_CAPABILITY: &str = "write,tcp,udp,descendants";
+
+/// Milliseconds since the Unix epoch, the ledger's clock.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).expect("a date this century"))
+        .expect("the clock is after 1970")
+}
+
+/// A state directory whose personal policy turns agent confinement off, so a scripted agent
+/// would run without any OS sandbox.
+fn a_state_with_confinement_turned_off(bench: &Workbench) -> PathBuf {
+    let state: PathBuf = bench.base.join("state");
+    let set: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(["policy", "set", "confine_agents", "false"])
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa policy runs");
+    assert!(set.status.success(), "the personal policy is saved");
+    state
+}
+
+/// `--accept-reduced <capabilities> --accept-until <ms>`: a person's scoped Decision.
+fn a_decision_accepting(capabilities: &str, until_ms: u64) -> Vec<String> {
+    vec![
+        "--accept-reduced".to_owned(),
+        capabilities.to_owned(),
+        "--accept-until".to_owned(),
+        until_ms.to_string(),
+    ]
+}
+
+/// A scripted verified run with extra arguments in front, against `state`.
+fn kaisa_verified_with(bench: &Workbench, state: &Path, extra: &[String]) -> Output {
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let mut args: Vec<String> = extra.to_vec();
+    args.extend(a_verified_run(&fake_agent, true));
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(args)
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa runs")
+}
+
+/// The payloads of every `attempt.admitted` event in the ledger under `state`.
+fn admitted_attempts(state: &Path) -> Vec<serde_json::Value> {
+    let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
+    ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("the ledger reads")
+        .into_iter()
+        .filter(|chained| chained.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted)
+        .map(|chained| {
+            serde_json::from_str(&chained.recorded.event.payload).expect("payloads are JSON")
+        })
+        .collect()
+}
+
+#[test]
+fn a_run_missing_containment_without_a_decision_waits_for_a_person_and_lists_what_is_missing() {
+    let bench = Workbench::new("refused");
+    let state: PathBuf = a_state_with_confinement_turned_off(&bench);
+
+    let run: Output = kaisa_verified_with(&bench, &state, &[]);
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert_eq!(
+        run.status.code(),
+        Some(WAITING_FOR_YOU),
+        "weaker containment is never the silent default: a person must decide; {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        stdout.contains("waiting for you") && stdout.contains(EVERY_CAPABILITY),
+        "the person is told exactly what a Decision would have to accept: {stdout:?}"
+    );
+    assert!(
+        admitted_attempts(&state).is_empty(),
+        "no attempt was admitted, so no agent ran"
+    );
+}
+
+#[test]
+fn a_decision_accepting_what_is_missing_runs_reduced_and_records_why() {
+    let bench = Workbench::new("decided");
+    let state: PathBuf = a_state_with_confinement_turned_off(&bench);
+    let until_ms: u64 = now_ms() + DECISION_LIFETIME_MS;
+
+    let run: Output = kaisa_verified_with(
+        &bench,
+        &state,
+        &a_decision_accepting(EVERY_CAPABILITY, until_ms),
+    );
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+    let admitted: Vec<serde_json::Value> = admitted_attempts(&state);
+
+    assert!(
+        run.status.success()
+            && stdout.contains("reduced: the agent process ran without OS confinement"),
+        "the Decision admits the run and every attempt line says it was reduced: {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        !admitted.is_empty()
+            && admitted.iter().all(|payload| {
+                payload["containment"]["admission"] == "reduced"
+                    && payload["containment"]["basis"] == "decision"
+                    && payload["containment"]["expires_at_ms"] == until_ms
+                    && payload["containment"]["missing"].as_array().map(Vec::len)
+                        == Some(EVERY_CAPABILITY.split(',').count())
+            }),
+        "the ledger keeps what each attempt lacked, what admitted it and until when: {admitted:?}"
+    );
+}
+
+#[test]
+fn an_expired_decision_does_not_admit_a_reduced_run() {
+    let bench = Workbench::new("expired");
+    let state: PathBuf = a_state_with_confinement_turned_off(&bench);
+    let ended_ms: u64 = now_ms() - DECISION_LIFETIME_MS;
+
+    let run: Output = kaisa_verified_with(
+        &bench,
+        &state,
+        &a_decision_accepting(EVERY_CAPABILITY, ended_ms),
+    );
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert_eq!(
+        run.status.code(),
+        Some(WAITING_FOR_YOU),
+        "yesterday's permission is not today's: {stdout:?}"
+    );
+    assert!(
+        admitted_attempts(&state).is_empty(),
+        "no attempt was admitted on an expired Decision"
+    );
+}
+
+#[test]
+fn a_decision_covering_only_part_of_what_is_missing_does_not_admit_the_run() {
+    let bench = Workbench::new("partial-decision");
+    let state: PathBuf = a_state_with_confinement_turned_off(&bench);
+    let until_ms: u64 = now_ms() + DECISION_LIFETIME_MS;
+
+    let run: Output = kaisa_verified_with(&bench, &state, &a_decision_accepting("udp", until_ms));
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+
+    assert_eq!(
+        run.status.code(),
+        Some(WAITING_FOR_YOU),
+        "a Decision is scoped: accepting UDP does not accept unconfined writes: {stdout:?}"
+    );
+}
+
+#[test]
+fn an_unknown_capability_in_a_decision_is_a_usage_error() {
+    let bench = Workbench::new("unknown-capability");
+    let state: PathBuf = bench.base.join("state");
+
+    let run: Output = kaisa_verified_with(
+        &bench,
+        &state,
+        &a_decision_accepting("everything", now_ms() + DECISION_LIFETIME_MS),
+    );
+
+    assert_eq!(
+        run.status.code(),
+        Some(USAGE_ERROR),
+        "a Decision cannot accept a capability Kaisa does not know: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn a_codex_goal_records_the_default_policy_that_admitted_it_reduced() {
+    let bench = Workbench::new("codex-basis");
+    let state: PathBuf = bench.base.join("state");
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+
+    let run: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent",
+            "codex",
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--reviewer-arg",
+            "--fake-review-require",
+            "--reviewer-arg",
+            WRITTEN_BY_CODEX,
+            GOAL,
+        ])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+    let stdout: String = String::from_utf8_lossy(&run.stdout).into_owned();
+    let admitted: Vec<serde_json::Value> = admitted_attempts(&state);
+
+    assert!(
+        stdout.contains("reduced: the agent process ran without OS confinement"),
+        "the documented default flow keeps running and stays labelled reduced: {stdout:?} {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        admitted
+            .iter()
+            .any(|payload| payload["containment"]["admission"] == "reduced"
+                && payload["containment"]["basis"] == "observed-checked-afterwards"),
+        "the ledger names the default policy that admitted the observed attempt: {admitted:?}"
+    );
+}

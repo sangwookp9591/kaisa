@@ -148,6 +148,7 @@ fn a_team_run(bench: &Workbench, reviewer_requires: &str) -> VerifiedOutcome {
         first_pass: None,
         egress_hosts: &[],
         agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the team run completes")
 }
@@ -284,6 +285,7 @@ fn an_observed_change_outside_the_write_set_needs_a_person() {
         first_pass: None,
         egress_hosts: &[],
         agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the team run completes");
 
@@ -325,6 +327,7 @@ fn a_team_run_with_a_first_pass(
         }),
         egress_hosts: &[],
         agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the team run completes")
 }
@@ -412,6 +415,7 @@ fn a_team_run_gives_its_agents_the_egress_broker() {
         first_pass: None,
         egress_hosts: &egress_hosts,
         agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the team run completes");
 

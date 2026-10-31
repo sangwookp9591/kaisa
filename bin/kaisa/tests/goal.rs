@@ -103,6 +103,7 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         agent_writable: &[],
         local_model_port: None,
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
     let preserved_notes: String = git(
@@ -182,6 +183,7 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
         agent_writable: &[],
         local_model_port: None,
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -255,6 +257,7 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
         agent_writable: &[],
         local_model_port: None,
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
 
@@ -317,6 +320,7 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
         agent_writable: &[],
         local_model_port: None,
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("a crashing agent is an outcome, not an error");
     let attempt_directory: String = bench
@@ -400,6 +404,7 @@ fn a_second_session_needs_no_re_explanation() {
         agent_writable: &[],
         local_model_port: None,
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
     let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("reopens");
@@ -550,6 +555,7 @@ fn a_local_model_drives_a_confined_attempt_through_the_broker() {
         agent_writable: &[],
         local_model_port: Some(port),
         observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
     let preserved: String = git(
@@ -594,6 +600,7 @@ fn an_observed_agent_writes_directly_and_is_reported_as_observed() {
         agent_writable: &[],
         local_model_port: None,
         observed: true,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
     let files: String = git(

@@ -13,8 +13,9 @@ use std::time::Duration;
 use kaisa_agents::first_message;
 use kaisa_context::{ContextPack, PackInputs, ProjectProfile, derive_profile};
 use kaisa_domain::{
-    AttemptId, AttemptState, Cleanup, ContentDigest, Event, EventKind, Execution, ExitStatus,
-    MissionId, RepoPath, Role, RunId, TaskId, WriteSet,
+    Admission, AttemptId, AttemptState, Cleanup, ContainmentCapability, ContentDigest,
+    DefaultReducedPolicy, Event, EventKind, Execution, ExitStatus, MissionId, ReducedModeBasis,
+    RepoPath, Role, RunId, TaskId, WriteSet, admit_on, codes,
 };
 use kaisa_keeper::{ExitRecord, write_exit_record};
 use kaisa_ledger::EventStore;
@@ -25,9 +26,9 @@ use kaisa_workspace::{IgnoredPolicy, Worktree, create_worktree};
 use serde_json::json;
 
 use crate::ids::{fresh_suffix, now_ms};
-use crate::sandbox::AgentSandbox;
 #[cfg(unix)]
 use crate::sandbox::agent_sandbox;
+use crate::sandbox::{AgentSandbox, beyond_admitted, expected_missing};
 
 /// Payload schema version of the events this module writes.
 const PAYLOAD_VERSION: u16 = 1;
@@ -79,6 +80,10 @@ pub struct GoalRequest<'request> {
     /// into its worktree under its own sandbox, so Kaisa does not confine it and checks its
     /// changes against the write set afterwards instead of on each write.
     pub observed: bool,
+    /// What may admit the attempt if its sandbox cannot give full containment (D02): a
+    /// person's scoped, expiring Decision or a default policy fixed in code. An observed
+    /// attempt is always admitted on the observed default policy (T32c).
+    pub reduced_mode: &'request ReducedModeBasis,
 }
 
 /// The file in an attempt directory naming the agent process Kaisa started, so that after a
@@ -114,8 +119,13 @@ pub struct GoalOutcome {
     pub kept_back: Vec<String>,
     /// The digest of the context pack the agent started from.
     pub context_pack: String,
-    /// False if the agent's process ran without OS confinement (a reduced run).
+    /// False if the agent's process ran without full OS confinement (a reduced run): true only
+    /// when `missing` is empty.
     pub confined: bool,
+    /// What the agent's sandbox could not guarantee; empty for a fully contained run.
+    pub missing: Vec<ContainmentCapability>,
+    /// What admitted the run although `missing` is not empty.
+    pub admitted_on: ReducedModeBasis,
     /// True if the agent was observed rather than brokered.
     pub observed: bool,
 }
@@ -139,10 +149,19 @@ impl GoalOutcome {
                 self.kept_back.join(", ")
             ),
         };
-        let reduced: &str = if self.confined {
-            ""
+        let reduced: String = if self.confined {
+            String::new()
         } else {
-            "; reduced: the agent process ran without OS confinement"
+            let how: &str = if self.missing.len() == ContainmentCapability::ALL.len() {
+                "without OS confinement"
+            } else {
+                "without full OS confinement"
+            };
+            format!(
+                "; reduced: the agent process ran {how} (missing {}; admitted on {})",
+                codes(&self.missing),
+                self.admitted_on
+            )
         };
         let observed: &str = if self.observed {
             "; observed: the agent wrote under its own sandbox, so its changes were checked afterwards, not on each write"
@@ -177,6 +196,33 @@ impl fmt::Display for GoalError {
 }
 
 impl std::error::Error for GoalError {}
+
+/// The step named when an attempt is not admitted because its containment falls short.
+const ADMISSION_STEP: &str = "admitting the attempt";
+
+impl GoalError {
+    /// True when the attempt never started because it lacked containment that no Decision or
+    /// default policy accepts (D02): a person has to decide, so `kaisa` exits 3.
+    #[must_use]
+    pub fn not_admitted(&self) -> bool {
+        self.step == ADMISSION_STEP
+    }
+
+    fn refused(missing: &[ContainmentCapability], basis: &ReducedModeBasis) -> Self {
+        Self {
+            step: ADMISSION_STEP,
+            detail: format!(
+                "the agent would run without {}; {basis} does not accept that (needs: {})",
+                missing
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                codes(missing)
+            ),
+        }
+    }
+}
 
 pub(crate) fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError {
     move |error| GoalError {
@@ -241,6 +287,19 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         .map_err(at("preparing the state directory"))?;
     let mut ledger: EventStore = EventStore::open(&request.state_directory.join("kaisa.db"))
         .map_err(at("opening the ledger"))?;
+    // Admission (D02): what this attempt's sandbox cannot give must be accepted by a scoped,
+    // unexpired Decision or a default policy before anything starts.
+    let observed_policy =
+        ReducedModeBasis::DefaultPolicy(DefaultReducedPolicy::ObservedCheckedAfterwards);
+    let basis: &ReducedModeBasis = if request.observed {
+        &observed_policy
+    } else {
+        request.reduced_mode
+    };
+    let admission: Admission = admit_on(&expected_missing(confine_agent), basis, now_ms());
+    if let Admission::Refused { missing } = &admission {
+        return Err(GoalError::refused(missing, basis));
+    }
     let suffix: String = fresh_suffix();
     let id = |prefix: &str| format!("{prefix}_{suffix}");
     let mission = MissionId::try_new(&id(MissionId::PREFIX)).map_err(at("naming the mission"))?;
@@ -264,7 +323,15 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         &mut ledger,
         EventKind::AttemptAdmitted,
         attempt.as_str(),
-        json!({"task": task.as_str()}),
+        json!({
+            "task": task.as_str(),
+            "containment": {
+                "admission": admission.code(),
+                "missing": admission.missing().iter().map(|capability| capability.code()).collect::<Vec<_>>(),
+                "basis": matches!(admission, Admission::Reduced { .. }).then(|| basis.code()),
+                "expires_at_ms": matches!(admission, Admission::Reduced { .. }).then(|| basis.expires_at_ms()).flatten(),
+            },
+        }),
     )?;
 
     let profile: ProjectProfile =
@@ -358,10 +425,6 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .map_err(at("writing the MCP config"))?;
 
     let mut state: AttemptState = AttemptState::admitted();
-    state.start().map_err(at("starting the attempt"))?;
-    record_execution(&mut ledger, &attempt, Execution::Starting)?;
-    state.confirm_running().map_err(at("running the attempt"))?;
-    record_execution(&mut ledger, &attempt, Execution::Running)?;
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
     agent.working_directory = worktree.path().to_owned();
     let egress: Option<kaisa_egress::EgressBroker> = if request.egress_hosts.is_empty() {
@@ -421,6 +484,20 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         let _ = egress_port;
         AgentSandbox::Unconfined
     };
+    // The sandbox actually built may be weaker than the machine promised at admission; then
+    // the agent does not start.
+    let missing: Vec<ContainmentCapability> = sandbox.missing();
+    let unaccepted: Vec<ContainmentCapability> = beyond_admitted(&missing, admission.missing());
+    if !unaccepted.is_empty() {
+        sandbox.release();
+        #[cfg(any(unix, windows))]
+        finish_broker(broker)?;
+        return Err(GoalError::refused(&unaccepted, basis));
+    }
+    state.start().map_err(at("starting the attempt"))?;
+    record_execution(&mut ledger, &attempt, Execution::Starting)?;
+    state.confirm_running().map_err(at("running the attempt"))?;
+    record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
     let finished: CapturedRun = run_captured_reporting(
         &agent,
@@ -447,7 +524,6 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     }
     #[cfg(any(unix, windows))]
     finish_broker(broker)?;
-    let confined: bool = !matches!(sandbox, AgentSandbox::Unconfined);
     sandbox.release();
 
     let status: ExitStatus = match finished.exit {
@@ -489,7 +565,13 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         commit,
         kept_back,
         context_pack: digest.as_str().to_owned(),
-        confined,
+        confined: missing.is_empty(),
+        admitted_on: if missing.is_empty() {
+            ReducedModeBasis::None
+        } else {
+            basis.clone()
+        },
+        missing,
         observed: request.observed,
     })
 }
@@ -540,4 +622,50 @@ pub fn whole_repository(repository: &Path) -> std::io::Result<WriteSet> {
     }
     entries.sort();
     Ok(WriteSet::new(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use kaisa_domain::{
+        AttemptId, ContainmentCapability, ReducedModeBasis, ReducedModeDecision, landlock_missing,
+    };
+
+    use super::GoalOutcome;
+
+    /// A kernel whose Landlock handles writes but neither truncation nor TCP (ABI 2).
+    const LANDLOCK_ABI_TWO: i64 = 2;
+    /// When the person's Decision ends, in milliseconds.
+    const DECISION_ENDS_MS: u64 = 1_793_354_400_000;
+
+    /// An attempt that ran in a sandbox missing `missing`, admitted on a Decision.
+    fn an_attempt_missing(missing: Vec<ContainmentCapability>) -> GoalOutcome {
+        GoalOutcome {
+            attempt: AttemptId::try_new("att_landlock2").expect("a valid attempt id"),
+            exit: None,
+            branch: "kaisa/att_landlock2".to_owned(),
+            commit: None,
+            kept_back: Vec::new(),
+            context_pack: "c0ffee".to_owned(),
+            confined: missing.is_empty(),
+            admitted_on: ReducedModeBasis::Decision(ReducedModeDecision {
+                accepts_missing: missing.clone(),
+                expires_at_ms: DECISION_ENDS_MS,
+            }),
+            missing,
+            observed: false,
+        }
+    }
+
+    #[test]
+    fn an_attempt_on_an_old_landlock_abi_is_labelled_reduced_with_what_it_lacks() {
+        let outcome = an_attempt_missing(landlock_missing(Some(LANDLOCK_ABI_TWO), true));
+        let summary: String = outcome.summary();
+
+        assert!(
+            !outcome.confined
+                && summary.contains("reduced: the agent process ran without full OS confinement")
+                && summary.contains("write,tcp"),
+            "a partial Landlock sandbox is never shown as confined: {summary}"
+        );
+    }
 }

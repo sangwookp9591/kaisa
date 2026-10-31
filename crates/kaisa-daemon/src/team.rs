@@ -51,6 +51,8 @@ pub struct VerifiedRequest<'request> {
     /// Paths outside the worktree the agents must be able to change (for example their own
     /// session files).
     pub agent_writable: &'request [PathBuf],
+    /// What may admit an attempt whose containment falls short (D02).
+    pub reduced_mode: &'request kaisa_domain::ReducedModeBasis,
 }
 
 /// A first-pass reviewer and the loopback port of the local model it talks to.
@@ -153,6 +155,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             agent_writable: request.agent_writable,
             local_model_port: None,
             observed: request.observed,
+            reduced_mode: request.reduced_mode,
         })?;
         let commit: Option<String> = developed.commit.clone();
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
@@ -216,6 +219,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 agent_writable: &[],
                 local_model_port: first_pass.model_port,
                 observed: false,
+                reduced_mode: request.reduced_mode,
             })?;
             let glance: Option<ReviewVerdict> =
                 verdict_from(request.state_directory, &glanced, &candidate.tree);
@@ -247,6 +251,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             agent_writable: request.agent_writable,
             local_model_port: None,
             observed: false,
+            reduced_mode: request.reduced_mode,
         })?;
         let verdict: Option<ReviewVerdict> =
             verdict_from(request.state_directory, &reviewed, &candidate.tree);
