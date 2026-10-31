@@ -347,9 +347,12 @@ fn run_verified_goal_inner(
             )?;
         }
         if let Some(first_pass) = request.first_pass {
+            // AppContainer has no loopback, so only a first pass that must reach a local model
+            // server leaves confinement on Windows; any other first pass stays confined.
+            let needs_loopback: bool = cfg!(windows) && first_pass.model_port.is_some();
             let local_basis = match request.reduced_mode {
                 kaisa_domain::ReducedModeBasis::Decision(_) => request.reduced_mode.clone(),
-                _ if cfg!(windows) => kaisa_domain::ReducedModeBasis::DefaultPolicy(
+                _ if needs_loopback => kaisa_domain::ReducedModeBasis::DefaultPolicy(
                     kaisa_domain::DefaultReducedPolicy::WindowsLocalModel,
                 ),
                 _ => kaisa_domain::ReducedModeBasis::None,
@@ -363,7 +366,7 @@ fn run_verified_goal_inner(
                 role: Role::Reviewer,
                 launch: first_pass.launch,
                 kaisa_executable: request.kaisa_executable,
-                confine_agent: !cfg!(windows),
+                confine_agent: !needs_loopback,
                 egress_hosts: &[],
                 agent_writable: &[],
                 local_model_port: first_pass.model_port,
