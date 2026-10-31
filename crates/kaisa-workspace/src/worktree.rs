@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::git::{GitError, run_git};
+use crate::git::{EmptyHooksDirectory, GitError, run_git, run_git_for_preservation};
 use crate::inventory::{IgnoredPolicy, Inventory, plan_inventory};
 use crate::receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 use crate::status::{StatusParseError, parse_status};
@@ -148,8 +148,10 @@ pub fn open_worktree(repository: &Path, path: &Path) -> Result<Option<Worktree>,
 /// Returns [`WorktreeError::Git`] if git fails or [`WorktreeError::Status`] if its output
 /// cannot be parsed.
 pub fn inventory(worktree: &Worktree, policy: &IgnoredPolicy) -> Result<Inventory, WorktreeError> {
-    let output: Vec<u8> = run_git(
+    let hooks = EmptyHooksDirectory::create()?;
+    let output: Vec<u8> = run_git_for_preservation(
         worktree.path(),
+        &hooks,
         &[
             "status",
             "--porcelain=v2",
@@ -180,7 +182,12 @@ pub fn remove_worktree(
     let path_text: String = worktree.path().to_string_lossy().into_owned();
     // `--force` is required because untracked and ignored files are still present; the
     // coverage check above is what makes discarding them safe.
-    run_git(repository, &["worktree", "remove", "--force", &path_text])?;
+    let hooks = EmptyHooksDirectory::create()?;
+    run_git_for_preservation(
+        repository,
+        &hooks,
+        &["worktree", "remove", "--force", &path_text],
+    )?;
     Ok(())
 }
 
