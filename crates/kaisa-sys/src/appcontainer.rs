@@ -398,7 +398,7 @@ pub(crate) fn create_suspended_contained(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let mut wide_line: Vec<u16> = wide(OsStr::new(&line));
     let directory: Vec<u16> = wide(spec.working_directory.as_os_str());
-    let environment: Option<Vec<u16>> = environment_block(&spec.env);
+    let environment: Vec<u16> = environment_block(&spec.env);
     let mut handles: Vec<HANDLE> = vec![stdin, stdout, stderr];
     handles.sort_unstable();
     handles.dedup();
@@ -446,13 +446,7 @@ pub(crate) fn create_suspended_contained(
     #[allow(unsafe_code)]
     // SAFETY: an all-zero PROCESS_INFORMATION is the documented out-parameter state.
     let mut information: PROCESS_INFORMATION = unsafe { zeroed() };
-    let flags: u32 = EXTENDED_STARTUPINFO_PRESENT
-        | CREATE_SUSPENDED
-        | if environment.is_some() {
-            CREATE_UNICODE_ENVIRONMENT
-        } else {
-            0
-        };
+    let flags: u32 = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
     #[allow(unsafe_code)]
     // SAFETY: all strings are NUL-terminated and outlive the call; the command line is mutable;
     // the attribute list, the capabilities and the handle array it points at are live locals;
@@ -465,9 +459,7 @@ pub(crate) fn create_suspended_contained(
             null(),
             INHERIT_LISTED_HANDLES,
             flags,
-            environment
-                .as_ref()
-                .map_or(null(), |block| block.as_ptr().cast::<c_void>()),
+            environment.as_ptr().cast::<c_void>(),
             directory.as_ptr(),
             (&raw const startup).cast::<STARTUPINFOW>(),
             &raw mut information,
@@ -491,25 +483,33 @@ pub(crate) fn create_suspended_contained(
     ))
 }
 
-/// Kaisa's environment with `overrides` applied, as a UTF-16 environment block; `None` when
-/// there is nothing to override, so the child inherits the environment as is.
-fn environment_block(overrides: &[(String, String)]) -> Option<Vec<u16>> {
-    if overrides.is_empty() {
-        return None;
-    }
-    let mut variables: std::collections::BTreeMap<String, String> = std::env::vars()
-        .map(|(name, value)| (name.to_ascii_uppercase(), format!("{name}={value}")))
-        .collect();
+/// Kaisa's allow-listed base with explicit overrides, as a UTF-16 environment block.
+/// Always returns a block: a null pointer would inherit the entire parent environment.
+pub(crate) fn environment_block(overrides: &[(String, String)]) -> Vec<u16> {
+    let mut variables: std::collections::BTreeMap<String, std::ffi::OsString> =
+        crate::process::base_environment()
+            .into_iter()
+            .map(|(name, value)| {
+                let key = name.to_string_lossy().to_ascii_uppercase();
+                let mut entry = name;
+                entry.push("=");
+                entry.push(value);
+                (key, entry)
+            })
+            .collect();
     for (name, value) in overrides {
-        variables.insert(name.to_ascii_uppercase(), format!("{name}={value}"));
+        variables.insert(name.to_ascii_uppercase(), format!("{name}={value}").into());
     }
     let mut block: Vec<u16> = Vec::new();
     for entry in variables.values() {
-        block.extend(OsStr::new(entry).encode_wide());
+        block.extend(entry.encode_wide());
         block.push(0);
     }
     block.push(0);
-    Some(block)
+    if variables.is_empty() {
+        block.push(0);
+    }
+    block
 }
 
 /// The contained process inherits only the handles named in its handle list.
@@ -905,6 +905,57 @@ impl Drop for AttributeList {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_environment_block_without_overrides_still_replaces_inheritance() {
+        const DOUBLE_NUL: [u16; 2] = [0, 0];
+        let block = super::environment_block(&[]);
+        assert!(
+            block.ends_with(&DOUBLE_NUL),
+            "CreateProcessW needs an explicit double-NUL-terminated block even without overrides"
+        );
+        let expected = crate::process::base_environment()
+            .into_iter()
+            .map(|(name, value)| {
+                let mut entry = name;
+                entry.push("=");
+                entry.push(value);
+                entry.to_string_lossy().into_owned()
+            })
+            .collect::<Vec<_>>();
+        let text = String::from_utf16_lossy(&block);
+        assert!(
+            text.split('\0')
+                .filter(|entry| !entry.is_empty())
+                .all(|entry| expected.iter().any(|allowed| allowed == entry)),
+            "only the allow-listed base may be inherited by AppContainer or console processes"
+        );
+    }
+
+    #[test]
+    fn explicit_windows_environment_overrides_replace_case_insensitive_base_names() {
+        const CHILD_PATH: &str = r"C:\kaisa\child-bin";
+        const PROXY: &str = "http://127.0.0.1:41817";
+        let block = super::environment_block(&[
+            ("pAtH".to_owned(), CHILD_PATH.to_owned()),
+            ("HTTPS_PROXY".to_owned(), PROXY.to_owned()),
+        ]);
+        let text = String::from_utf16_lossy(&block);
+        let paths = text
+            .split('\0')
+            .filter(|entry| entry.to_ascii_uppercase().starts_with("PATH="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![format!("pAtH={CHILD_PATH}")],
+            "Windows overrides must replace Path/PATH instead of creating a second entry"
+        );
+        assert!(
+            text.split('\0')
+                .any(|entry| entry == format!("HTTPS_PROXY={PROXY}")),
+            "the egress broker's explicit proxy survives environment filtering"
+        );
+    }
+
     use std::path::PathBuf;
 
     use super::{AppContainerProfile, ContainerAccess};

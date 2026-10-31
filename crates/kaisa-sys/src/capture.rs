@@ -54,11 +54,21 @@ pub fn run_captured(
     deadline: Duration,
     cap: usize,
 ) -> io::Result<CapturedRun> {
-    run_captured_reporting(spec, confinement, input, deadline, cap, &mut |_| Ok(()))
+    run_captured_reporting(
+        spec,
+        confinement,
+        input,
+        deadline,
+        cap,
+        &mut false,
+        &mut |_| Ok(()),
+    )
 }
 
 /// [`run_captured`], telling `started` the process's identity as soon as it exists, before any
 /// input is sent, so a crash of the caller can later be recovered from (T16.6b).
+/// `created` is reset to false and set true as soon as the OS creates the process, even if
+/// ownership setup fails before `started` can run. Only false proves a non-start on error.
 ///
 /// # Errors
 ///
@@ -70,11 +80,13 @@ pub fn run_captured_reporting(
     input: &[u8],
     deadline: Duration,
     cap: usize,
+    created: &mut bool,
     started: &mut dyn FnMut(Option<crate::ProcessIdentity>) -> io::Result<()>,
 ) -> io::Result<CapturedRun> {
+    *created = false;
     let (reader, writer) = io::pipe()?;
     let (mut process, stdin): (OwnedProcess, Option<Box<dyn io::Write + Send>>) =
-        spawn_captured(spec, confinement, !input.is_empty(), writer)?;
+        spawn_captured(spec, confinement, !input.is_empty(), writer, created)?;
     let collector = std::thread::spawn(move || collect(reader, cap));
     let identity: Option<crate::ProcessIdentity> =
         crate::ProcessIdentity::of(process.id()).unwrap_or(None);
@@ -112,21 +124,23 @@ fn spawn_captured(
     confinement: &Confinement<'_>,
     piped: bool,
     output: io::PipeWriter,
+    created: &mut bool,
 ) -> io::Result<(OwnedProcess, Option<Box<dyn io::Write + Send>>)> {
     #[cfg(windows)]
     if let Confinement::AppContainer(profile) = confinement {
         use std::os::windows::io::AsRawHandle;
         // A pipe even without input: dropping its writer gives the process an immediate EOF.
         let (child_stdin, our_stdin) = io::pipe()?;
-        let created = crate::appcontainer::create_suspended_contained(
+        let process = crate::appcontainer::create_suspended_contained(
             profile,
             spec,
             child_stdin.as_raw_handle(),
             output.as_raw_handle(),
             output.as_raw_handle(),
         )?;
+        *created = true;
         drop((child_stdin, output));
-        let process: OwnedProcess = OwnedProcess::adopt_created(created)?;
+        let process: OwnedProcess = OwnedProcess::adopt_created(process)?;
         let stdin: Option<Box<dyn io::Write + Send>> =
             piped.then(|| Box::new(our_stdin) as Box<dyn io::Write + Send>);
         return Ok((process, stdin));
@@ -136,7 +150,7 @@ fn spawn_captured(
         .stdin(if piped { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::from(output));
-    let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
+    let mut process: OwnedProcess = OwnedProcess::spawn_owned_observing(command, created)?;
     let stdin: Option<Box<dyn io::Write + Send>> = process
         .take_stdin()
         .map(|stdin| Box::new(stdin) as Box<dyn io::Write + Send>);
@@ -193,7 +207,7 @@ fn confined_command(spec: &ProcessSpec, confinement: &Confinement<'_>) -> Comman
 mod tests {
     use std::time::Duration;
 
-    use super::{CapturedRun, Confinement, run_captured};
+    use super::{CapturedRun, Confinement, run_captured, run_captured_reporting};
     use crate::process::ProcessExit;
     use crate::process::test_support::{a_long_running_process, shell};
 
@@ -211,6 +225,150 @@ mod tests {
     const NO_INPUT: &[u8] = b"";
     /// A first message, as an agent receives its context pack.
     const FIRST_MESSAGE: &str = "pack-for-attempt-41a";
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_and_owned_children_receive_only_base_and_explicit_environment() {
+        const SUCCESS: ProcessExit = ProcessExit::Code(0);
+        const TEST: &str = "capture::tests::captured_and_owned_children_receive_only_base_and_explicit_environment";
+        const DUMMY_SECRET: &str = "KAISA_TEST_UNRELATED_SECRET";
+        const EXPLICIT: &str = "KAISA_TEST_EXPLICIT_VARIABLE";
+        const FIXTURE: &str = "KAISA_TEST_ENVIRONMENT_FIXTURE";
+        const MARKER: &str = "dummy-secret-marker";
+        const PROXIES: [&str; 8] = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        const USER_PROXY: &str = "user-proxy-marker";
+        const BROKER_PROXY: &str = "broker-proxy-marker";
+        if std::env::var(FIXTURE).is_err() {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(FIXTURE, "yes")
+                    .env(DUMMY_SECRET, MARKER)
+                    .envs(PROXIES.map(|name| (name, USER_PROXY)))
+                    .output()
+                    .expect("isolated parent starts");
+            assert!(
+                output.status.success(),
+                "environment regression in isolated parent: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert_eq!(
+            std::env::var(DUMMY_SECRET).as_deref(),
+            Ok(MARKER),
+            "the launcher's parent really contains the dummy secret"
+        );
+        let command = format!(
+            "test -z \"${{{DUMMY_SECRET}}}\" && test -n \"$PATH\" && test -n \"$HOME\" && test \"${{{EXPLICIT}}}\" = allowed"
+        );
+        let mut spec = shell(&command);
+        spec.env.push((EXPLICIT.to_owned(), "allowed".to_owned()));
+        for (confined, proxy_override) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut spec = spec.clone();
+            let expected_proxy = if proxy_override {
+                BROKER_PROXY
+            } else {
+                USER_PROXY
+            };
+            let proxy_checks = PROXIES
+                .iter()
+                .map(|name| format!(" && test \"${{{name}}}\" = {expected_proxy}"))
+                .collect::<String>();
+            let mut checked = shell(&format!("{command}{proxy_checks}"));
+            checked.env.clone_from(&spec.env);
+            spec = checked;
+            if proxy_override {
+                spec.env
+                    .extend(PROXIES.map(|name| (name.to_owned(), BROKER_PROXY.to_owned())));
+            }
+            #[cfg(target_os = "macos")]
+            let policy = crate::SeatbeltPolicy::default();
+            #[cfg(target_os = "macos")]
+            let confinement = if confined {
+                Confinement::Seatbelt(&policy)
+            } else {
+                Confinement::Unconfined
+            };
+            #[cfg(not(target_os = "macos"))]
+            let confinement = {
+                let _ = confined;
+                Confinement::Unconfined
+            };
+            let run = run_captured(&spec, &confinement, NO_INPUT, DEADLINE, SMALL_CAP)
+                .expect("check runs");
+            assert_eq!(
+                run.exit,
+                Some(SUCCESS),
+                "trusted checks and confined captured agents must exclude unrelated secrets"
+            );
+            #[cfg(target_os = "macos")]
+            let owned_spec = if confined {
+                crate::sandboxed_spec(&spec, &policy)
+            } else {
+                spec.clone()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let owned_spec = spec.clone();
+            let mut owned = crate::OwnedProcess::spawn(&owned_spec).expect("owned agent starts");
+            assert_eq!(
+                owned.wait().expect("agent exits"),
+                SUCCESS,
+                "owned agents, including Seatbelt-confined agents, use the environment allow-list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_executable_reports_a_proven_non_start() {
+        let mut missing = shell("echo unreachable");
+        missing.program =
+            std::env::temp_dir().join(format!("kaisa-nonexistent-agent-{}", std::process::id()));
+        let mut created = true;
+        let result = run_captured_reporting(
+            &missing,
+            &Confinement::Unconfined,
+            NO_INPUT,
+            DEADLINE,
+            SMALL_CAP,
+            &mut created,
+            &mut |_| panic!("a missing program cannot have an identity"),
+        );
+        assert!(
+            result.is_err() && !created,
+            "only a rejected OS creation proves that no process started: {result:?}"
+        );
+    }
+
+    #[test]
+    fn an_identity_recording_error_keeps_proof_that_a_process_was_created() {
+        let mut created = false;
+        let result = run_captured_reporting(
+            &a_long_running_process(),
+            &Confinement::Unconfined,
+            NO_INPUT,
+            DEADLINE,
+            SMALL_CAP,
+            &mut created,
+            &mut |_| Err(std::io::Error::other("identity record unavailable")),
+        );
+        assert!(
+            result.is_err() && created,
+            "a failure after creation must never authorize failed-start reclamation: {result:?}"
+        );
+    }
 
     #[test]
     fn an_exec_reports_its_exit_and_output() {

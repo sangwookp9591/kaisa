@@ -7,6 +7,7 @@
 //! reclaim the worktree.
 
 use std::fmt;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -93,7 +94,10 @@ pub const AGENT_IDENTITY_FILE: &str = "agent.identity";
 /// Durably writes the agent's identity before it is given any work. An agent whose identity
 /// cannot be told (an OS without support) is recorded as unknown, which recovery treats as
 /// lost track rather than as gone.
-fn record_identity(path: &Path, identity: Option<ProcessIdentity>) -> std::io::Result<()> {
+pub(crate) fn record_identity(
+    path: &Path,
+    identity: Option<ProcessIdentity>,
+) -> std::io::Result<()> {
     let line: String = identity.map_or_else(|| "unknown".to_owned(), |known| known.to_line());
     let mut file = std::fs::File::create(path)?;
     std::io::Write::write_all(&mut file, line.as_bytes())?;
@@ -101,7 +105,25 @@ fn record_identity(path: &Path, identity: Option<ProcessIdentity>) -> std::io::R
 }
 
 /// Variables that point an agent's HTTP clients at its egress broker.
-const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+const PROXY_VARIABLES: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+fn broker_proxy_environment(proxy: &str) -> Vec<(String, String)> {
+    PROXY_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), proxy.to_owned()))
+        .chain([
+            ("NO_PROXY".to_owned(), String::new()),
+            ("no_proxy".to_owned(), String::new()),
+        ])
+        .collect()
+}
 
 /// What came of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +233,8 @@ impl std::error::Error for GoalError {}
 
 /// The step named when an attempt is not admitted because its containment falls short.
 const ADMISSION_STEP: &str = "admitting the attempt";
+/// The step named when the OS rejects creation of the configured agent program.
+const START_AGENT_STEP: &str = "starting the agent";
 
 impl GoalError {
     /// True when the attempt never started because it lacked containment that no Decision or
@@ -218,6 +242,12 @@ impl GoalError {
     #[must_use]
     pub fn not_admitted(&self) -> bool {
         self.step == ADMISSION_STEP
+    }
+
+    /// True when the OS proved that no agent process was started.
+    #[must_use]
+    pub fn failed_to_start(&self) -> bool {
+        self.step == START_AGENT_STEP
     }
 
     fn refused(missing: &[ContainmentCapability], basis: &ReducedModeBasis) -> Self {
@@ -363,6 +393,8 @@ fn run_goal_inner(
     } else {
         request.reduced_mode
     };
+    let recorded_basis = basis.for_missing(&expected_missing(confine_agent));
+    let basis = &recorded_basis;
     let admission: Admission = admit_on(&expected_missing(confine_agent), basis, now_ms());
     if decision_budget(basis).is_none() {
         return Err(GoalError::refused(admission.missing(), basis));
@@ -376,6 +408,29 @@ fn run_goal_inner(
     let run = RunId::try_new(&id(RunId::PREFIX)).map_err(at("naming the run"))?;
     let task = TaskId::try_new(&id(TaskId::PREFIX)).map_err(at("naming the task"))?;
     let attempt = AttemptId::try_new(&id(AttemptId::PREFIX)).map_err(at("naming the attempt"))?;
+
+    let attempt_directory = request
+        .state_directory
+        .join("attempts")
+        .join(attempt.as_str());
+    std::fs::create_dir_all(&attempt_directory).map_err(at("preparing the attempt directory"))?;
+    // Lock before recording admission, not just before spawn: recovery must never reclaim
+    // a live invocation's in-progress preparation. Retain the handle through reclamation.
+    let owner_directory = crate::recover::owner_directory(request.state_directory, &attempt);
+    std::fs::create_dir_all(&owner_directory).map_err(at("preparing the owner directory"))?;
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(owner_directory.join(crate::recover::OWNER_LOCK_FILE))
+        .map_err(at("creating the attempt owner lock"))?;
+    owner.lock().map_err(at("locking the attempt owner"))?;
+    record_identity(
+        &owner_directory.join(crate::recover::OWNER_IDENTITY_FILE),
+        ProcessIdentity::of(std::process::id()).map_err(at("identifying the attempt owner"))?,
+    )
+    .map_err(at("recording the attempt owner"))?;
+    let _held_owner = owner;
 
     record(
         &mut ledger,
@@ -448,11 +503,6 @@ fn run_goal_inner(
     let worktree: Worktree =
         create_worktree(request.repository, request.base, &branch, &worktree_path)
             .map_err(at("creating the worktree"))?;
-    let attempt_directory: PathBuf = request
-        .state_directory
-        .join("attempts")
-        .join(attempt.as_str());
-    std::fs::create_dir_all(&attempt_directory).map_err(at("preparing the attempt directory"))?;
     BridgeConfig {
         worktree: worktree.path().to_owned(),
         write_set: request.write_set.clone(),
@@ -510,11 +560,7 @@ fn run_goal_inner(
         )
         .map_err(at("starting the egress broker"))?;
         let proxy: String = format!("http://{}", broker.address());
-        agent.env.extend(
-            PROXY_VARIABLES
-                .iter()
-                .map(|name| ((*name).to_owned(), proxy.clone())),
-        );
+        agent.env.extend(broker_proxy_environment(&proxy));
         Some(broker)
     };
     let egress_port: Option<u16> = egress
@@ -528,8 +574,16 @@ fn run_goal_inner(
     };
     #[cfg(unix)]
     let sandbox = if confine_agent {
-        agent_sandbox(&scratch, request.agent_writable, &broker.1, egress_port)
-            .map_err(at("building the agent's sandbox"))?
+        agent_sandbox(
+            request.state_directory,
+            worktree.path(),
+            &scratch,
+            request.agent_writable,
+            &broker.1,
+            egress_port,
+            kaisa_agents::needs_keychain_login(&agent.program),
+        )
+        .map_err(at("building the agent's sandbox"))?
     } else {
         AgentSandbox::Unconfined
     };
@@ -581,19 +635,71 @@ fn run_goal_inner(
         ));
     }
     state.start().map_err(at("starting the attempt"))?;
-    record_execution(&mut ledger, &attempt, Execution::Starting)?;
+    let login_keychain_access = cfg!(target_os = "macos")
+        && confine_agent
+        && kaisa_agents::needs_keychain_login(&agent.program);
+    record(
+        &mut ledger,
+        EventKind::AttemptStateChanged,
+        attempt.as_str(),
+        json!({"execution": Execution::Starting.code(),
+            "login_keychain_access": login_keychain_access,
+            "notice": login_keychain_access.then_some(
+                "This confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot.")}),
+    )?;
     state.confirm_running().map_err(at("running the attempt"))?;
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
-    let finished: CapturedRun = run_captured_reporting(
+    let mut process_started = false;
+    let captured = run_captured_reporting(
         &agent,
         &sandbox.confinement(),
         input.as_bytes(),
         deadline.expect("the spawn guard checked the Decision budget"),
         TRANSCRIPT_CAP,
+        &mut process_started,
         &mut |identity| record_identity(&identity_file, identity),
-    )
-    .map_err(at("running the agent"))?;
+    );
+    let finished: CapturedRun = match captured {
+        Ok(finished) => finished,
+        Err(error) => {
+            #[cfg(any(unix, windows))]
+            finish_broker(broker)?;
+            sandbox.release();
+            if process_started {
+                // An error after creation is not proof of a non-start. Keep the existing
+                // identity-based recovery path rather than inventing an exit.
+                return Err(at("running the agent")(error));
+            }
+            let status = ExitStatus::FailedToStart;
+            write_exit_record(
+                &attempt_directory,
+                &ExitRecord {
+                    attempt: attempt.clone(),
+                    incarnation: FIRST_INCARNATION,
+                    status,
+                    finished_at_ms: now_ms(),
+                },
+            )
+            .map_err(at("writing the failed-start record"))?;
+            state
+                .record_exit(status)
+                .map_err(at("recording the failed start"))?;
+            record_execution(&mut ledger, &attempt, Execution::Exited(status))?;
+            reclaim(
+                &mut state,
+                request.repository,
+                &worktree,
+                &IgnoredPolicy::with_build_output(&BUILD_OUTPUT),
+            )
+            .map_err(at("reclaiming the failed start"))?;
+            record_cleanup(&mut ledger, &attempt, state.cleanup())?;
+            return Err(GoalError {
+                step: START_AGENT_STEP,
+                detail: format!("{}: {error}", agent.program.display()),
+            });
+        }
+    };
     if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {
         record(
             &mut ledger,
@@ -736,6 +842,35 @@ mod tests {
     };
 
     use super::GoalOutcome;
+
+    #[test]
+    fn an_egress_broker_replaces_every_user_proxy_and_clears_bypass_lists() {
+        const BROKER_PROXY: &str = "http://127.0.0.1:43123";
+        let overrides = super::broker_proxy_environment(BROKER_PROXY);
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                overrides
+                    .iter()
+                    .any(|(key, value)| key == name && value == BROKER_PROXY),
+                "the broker must replace user proxy {name}"
+            );
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                overrides
+                    .iter()
+                    .any(|(key, value)| key == name && value.is_empty()),
+                "user bypass list {name} must not bypass the attempt broker"
+            );
+        }
+    }
 
     /// A kernel whose Landlock handles writes but neither truncation nor TCP (ABI 2).
     const LANDLOCK_ABI_TWO: i64 = 2;

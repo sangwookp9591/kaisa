@@ -41,10 +41,8 @@ pub struct Evidence {
     /// Check-definition files the candidate changed since its base; when any are named, the
     /// check may be testing rules the agent wrote, so a person must accept the result.
     pub definitions_changed: Vec<String>,
-    /// File-specific test weakening signals, preserved even when policy permits delivery.
+    /// File-specific test weakening signals. Any of them stops delivery for a person.
     pub weakened_tests: Vec<String>,
-    /// Whether weakening requires human confirmation under this run policy.
-    pub require_person_when_tests_weaken: bool,
 }
 
 impl Evidence {
@@ -123,7 +121,7 @@ pub fn run_trusted_checks(
                 .map(|key| (key.to_owned(), temporary.0.to_string_lossy().into_owned()))
                 .collect(),
         };
-        let sandbox = check_sandbox(checkout.path(), &temporary.0)
+        let sandbox = check_sandbox(state_directory, checkout.path(), &temporary.0)
             .map_err(at("building the check sandbox"))?;
         let run: CapturedRun = run_captured(
             &spec,
@@ -145,7 +143,6 @@ pub fn run_trusted_checks(
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
             weakened_tests: weakened_tests.clone(),
-            require_person_when_tests_weaken: true,
         });
         if source_changed {
             // Keep the failed evidence, but never let later checks run on changed sources.
@@ -270,16 +267,21 @@ impl CheckSandbox {
     }
 }
 
-fn check_sandbox(checkout: &Path, temporary: &Path) -> std::io::Result<CheckSandbox> {
+fn check_sandbox(state: &Path, checkout: &Path, temporary: &Path) -> std::io::Result<CheckSandbox> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = state;
     #[cfg(not(target_os = "linux"))]
     let writable: Vec<PathBuf> = vec![checkout.canonicalize()?, temporary.canonicalize()?];
     #[cfg(target_os = "macos")]
     {
-        Ok(CheckSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+        let mut policy = kaisa_sys::SeatbeltPolicy {
+            readable: writable.clone(),
             writable,
             git_control_root: Some(checkout.canonicalize()?),
             ..kaisa_sys::SeatbeltPolicy::default()
-        }))
+        };
+        policy.protect_state(state)?;
+        Ok(CheckSandbox::Seatbelt(policy))
     }
     #[cfg(target_os = "linux")]
     {
@@ -329,6 +331,97 @@ fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Ve
 #[cfg(all(test, unix))]
 mod tests {
     use super::linux_check_writable;
+
+    /// Commands whose logical path resolution walks the protected state ancestors.
+    #[cfg(target_os = "macos")]
+    fn commands_walking_state_ancestors(
+        directory: &std::path::Path,
+    ) -> Vec<kaisa_sys::ProcessSpec> {
+        std::fs::create_dir_all(directory.join("sub")).expect("nested checkout directory");
+        let mut commands = vec![kaisa_sys::ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "cd sub && pwd".into()],
+            working_directory: directory.to_owned(),
+            env: Vec::new(),
+        }];
+        // Node is optional on developer hosts; the shell regression always runs.
+        if let Some(node) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join("node"))
+                .find(|path| path.is_file())
+        }) {
+            commands.push(kaisa_sys::ProcessSpec {
+                program: node,
+                args: vec!["-e".into(), "require('fs').realpathSync('.')".into()],
+                working_directory: directory.to_owned(),
+                env: Vec::new(),
+            });
+        }
+        commands
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_trusted_check_cannot_read_state_secrets_but_can_read_its_checkout() {
+        let state = std::env::temp_dir().join(format!("kaisa-check-state-{}", std::process::id()));
+        let checkout = state.join("checks/own");
+        let temporary = state.join("attempts/own/check-temp");
+        std::fs::create_dir_all(&checkout).expect("check checkout");
+        std::fs::create_dir_all(&temporary).expect("check temporary directory");
+        let secret = state.join("kaisa.db");
+        let source = checkout.join("source.rs");
+        for file in [&secret, &source] {
+            std::fs::write(file, "fixture").expect("planted fixture");
+        }
+        let sandbox = super::check_sandbox(&state, &checkout, &temporary).expect("check sandbox");
+        let read = |path: &std::path::Path| {
+            let spec = kaisa_sys::ProcessSpec {
+                program: "/bin/cat".into(),
+                args: vec![path.to_string_lossy().into_owned()],
+                working_directory: checkout.clone(),
+                env: Vec::new(),
+            };
+            kaisa_sys::run_captured(
+                &spec,
+                &sandbox.confinement(),
+                b"",
+                super::CHECK_DEADLINE,
+                super::CHECK_OUTPUT_CAP,
+            )
+            .expect("check process exits")
+            .exit
+            .expect("cat exits before deadline")
+        };
+        const SUCCESS: kaisa_sys::ProcessExit = kaisa_sys::ProcessExit::Code(0);
+        assert_ne!(
+            read(&secret),
+            SUCCESS,
+            "checks must not expose daemon storage"
+        );
+        assert_eq!(
+            read(&source),
+            SUCCESS,
+            "checks still need their candidate source"
+        );
+        for command in commands_walking_state_ancestors(&checkout) {
+            let result = kaisa_sys::run_captured(
+                &command,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("path-walking command exits");
+            assert_eq!(
+                result.exit,
+                Some(SUCCESS),
+                "ancestor metadata must permit {:?}: {}",
+                command.args,
+                String::from_utf8_lossy(&result.output)
+            );
+        }
+        std::fs::remove_dir_all(state).expect("remove isolated check state");
+    }
 
     #[test]
     fn linux_check_grants_exclude_root_git_controls_and_symlinks_but_allow_build_directories() {

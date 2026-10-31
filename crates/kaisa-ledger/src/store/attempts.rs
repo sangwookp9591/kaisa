@@ -6,7 +6,7 @@ use kaisa_domain::{AttemptId, Cleanup, ContentDigest, EventKind, Execution, Sequ
 use rusqlite::{OptionalExtension, params};
 
 use super::error::StoreError;
-use super::event_store::EventStore;
+use super::event_store::{EventStore, read_from_connection};
 
 /// Payload key of the task an admitted attempt belongs to.
 const TASK_KEY: &str = "task";
@@ -40,8 +40,8 @@ impl EventStore {
     /// Returns [`StoreError::CorruptPayload`] if an attempt event cannot be read, or another
     /// [`StoreError`] if reading or writing fails.
     pub fn rebuild_attempts(&mut self) -> Result<(), StoreError> {
-        let events = self.read_from(Sequence::FIRST)?;
         let transaction = self.connection.transaction()?;
+        let events = read_from_connection(&transaction, Sequence::FIRST)?;
         transaction.execute("DELETE FROM attempts", [])?;
         for chained in events {
             let recorded = chained.recorded;
@@ -98,6 +98,84 @@ impl EventStore {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Every attempt, folded from the event log in memory in the order its state last changed.
+    /// Unlike [`EventStore::all_attempts`] this writes nothing, so a read-only ledger can use it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::CorruptPayload`] if an attempt event cannot be read, or another
+    /// [`StoreError`] if reading fails.
+    pub fn attempts_from_log(&self) -> Result<Vec<AttemptRow>, StoreError> {
+        let mut rows: Vec<(i64, AttemptRow)> = Vec::new();
+        for chained in self.read_from(Sequence::FIRST)? {
+            let recorded = chained.recorded;
+            let sequence: i64 = super::rows::stored_sequence(recorded.sequence);
+            let event = recorded.event;
+            let corrupt = || StoreError::CorruptPayload {
+                stored_sequence: sequence,
+            };
+            let position = rows
+                .iter()
+                .position(|(_, row)| row.attempt.as_str() == event.subject);
+            match event.kind {
+                EventKind::AttemptAdmitted => {
+                    let task: String =
+                        payload_field(&event.payload, TASK_KEY).ok_or_else(corrupt)?;
+                    if position.is_some() {
+                        return Err(corrupt());
+                    }
+                    rows.push((
+                        sequence,
+                        AttemptRow {
+                            attempt: AttemptId::try_new(&event.subject).map_err(|_| corrupt())?,
+                            task: TaskId::try_new(&task).map_err(|_| corrupt())?,
+                            execution: Execution::Admitted,
+                            cleanup: Cleanup::Held,
+                            context_pack: None,
+                        },
+                    ));
+                }
+                EventKind::AttemptStateChanged => {
+                    let execution = payload_field(&event.payload, EXECUTION_KEY);
+                    let cleanup = payload_field(&event.payload, CLEANUP_KEY);
+                    if execution.is_none() && cleanup.is_none() {
+                        return Err(corrupt());
+                    }
+                    let parsed_execution = execution
+                        .map(|code| Execution::from_code(&code).ok_or_else(corrupt))
+                        .transpose()?;
+                    let parsed_cleanup = match (&parsed_execution, cleanup) {
+                        (None, Some(code)) => Some(Cleanup::from_code(&code).ok_or_else(corrupt)?),
+                        _ => None,
+                    };
+                    if let Some(index) = position {
+                        let (last, row) = &mut rows[index];
+                        *last = sequence;
+                        if let Some(execution) = parsed_execution {
+                            row.execution = execution;
+                        }
+                        if let Some(cleanup) = parsed_cleanup {
+                            row.cleanup = cleanup;
+                        }
+                    }
+                }
+                EventKind::ContextPackRecorded => {
+                    let digest: String =
+                        payload_field(&event.payload, DIGEST_KEY).ok_or_else(corrupt)?;
+                    let digest = ContentDigest::try_new(&digest).map_err(|_| corrupt())?;
+                    if let Some(index) = position {
+                        let (last, row) = &mut rows[index];
+                        *last = sequence;
+                        row.context_pack = Some(digest);
+                    }
+                }
+                _ => {}
+            }
+        }
+        rows.sort_by_key(|(last, _)| *last);
+        Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
     /// The projected state of `attempt`, if it was ever admitted.

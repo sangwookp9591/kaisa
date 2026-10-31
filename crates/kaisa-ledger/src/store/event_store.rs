@@ -1,9 +1,10 @@
 //! The ledger's single writer.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use kaisa_domain::{Event, RecordedEvent, Sequence};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params};
 
 use super::error::StoreError;
 use super::rows::{StoredRow, decode_row, last_link, stored_sequence};
@@ -41,8 +42,15 @@ const SCHEMA: &str = "
     );
 ";
 
-/// The ledger's event log. Holding an `EventStore` means holding the only write connection;
-/// every mutating method takes `&mut self`.
+/// How long a CLI owner waits for another short ledger write or initial schema setup.
+const WRITE_PATIENCE: Duration = Duration::from_secs(30);
+/// How long a read-only open waits for a writer holding the WAL briefly.
+const READ_PATIENCE: Duration = Duration::from_secs(5);
+/// WAL mode negotiation can return BUSY without invoking SQLite's busy handler.
+const CONFIGURE_RETRY: Duration = Duration::from_millis(10);
+
+/// The ledger's event log. Mutating methods serialize their transactions with other
+/// connections before reading anything they will use in a write.
 #[derive(Debug)]
 pub struct EventStore {
     pub(super) connection: Connection,
@@ -57,10 +65,72 @@ impl EventStore {
     ///
     /// Returns [`StoreError::Sqlite`] if the file cannot be opened or configured.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let connection: Connection = Connection::open(path)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        connection.execute_batch(SCHEMA)?;
+        let mut connection: Connection = Connection::open(path)?;
+        // Install this before any pragma or DDL: concurrent first opens also contend.
+        connection.busy_timeout(WRITE_PATIENCE)?;
+        let deadline = Instant::now() + WRITE_PATIENCE;
+        loop {
+            match configure(&connection) {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if matches!(
+                        error.code,
+                        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                    ) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(CONFIGURE_RETRY);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        connection.set_transaction_behavior(TransactionBehavior::Immediate);
+        Ok(Self { connection })
+    }
+
+    /// Opens an existing ledger for reading only, leaving the state directory's file set and
+    /// the database bytes unchanged. A missing file is an error rather than a new empty ledger.
+    ///
+    /// - With no `-wal` sidecar next to the file no writer is live and everything is in the main
+    ///   file, so it is opened `immutable=1`: SQLite then creates no `-wal` or `-shm`, and the
+    ///   directory may be read-only.
+    /// - With a `-wal` sidecar a writer may be live and its newest commits are only in that
+    ///   file, so an immutable open would show a stale view. A plain read-only open is used; it
+    ///   creates nothing new. If that fails (for example a read-only directory with no `-shm`),
+    ///   the open falls back to `immutable=1`, which then shows the main file without the
+    ///   commits still waiting in the WAL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the file does not exist or cannot be opened.
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let flags: rusqlite::OpenFlags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push("-wal");
+        let live_writer_may_exist: bool = Path::new(&sidecar).exists();
+        if live_writer_may_exist {
+            if let Ok(connection) = Connection::open_with_flags(path, flags)
+                // A reader can briefly meet SQLITE_BUSY while a writer checkpoints or recovers
+                // the WAL; wait for it instead of failing the read.
+                && connection.busy_timeout(READ_PATIENCE).is_ok()
+                && connection
+                    .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .is_ok()
+            {
+                return Ok(Self { connection });
+            }
+        } else if !path.exists() {
+            // Report a missing file as the plain open does, instead of a URI error.
+            return Ok(Self {
+                connection: Connection::open_with_flags(path, flags)?,
+            });
+        }
+        let connection: Connection = Connection::open_with_flags(
+            immutable_uri(path),
+            flags | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
         Ok(Self { connection })
     }
 
@@ -72,7 +142,9 @@ impl EventStore {
     /// Returns [`StoreError::Sqlite`] if the transaction fails, or [`StoreError::Corrupt`] if
     /// the last stored row cannot be decoded.
     pub fn append(&mut self, event: Event) -> Result<ChainedEvent, StoreError> {
-        let transaction: Transaction<'_> = self.connection.transaction()?;
+        let transaction: Transaction<'_> = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let chained: ChainedEvent = append_in(&transaction, event)?;
         transaction.commit()?;
         Ok(chained)
@@ -85,21 +157,7 @@ impl EventStore {
     /// Returns [`StoreError::Sqlite`] if the query fails, or [`StoreError::Corrupt`] if a row
     /// cannot be decoded.
     pub fn read_from(&self, from: Sequence) -> Result<Vec<ChainedEvent>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT sequence, kind, subject, payload_version, payload, hash
-             FROM events WHERE sequence >= ?1 ORDER BY sequence",
-        )?;
-        let rows = statement.query_map(params![stored_sequence(from)], |row| {
-            Ok(StoredRow {
-                sequence: row.get(0)?,
-                kind: row.get(1)?,
-                subject: row.get(2)?,
-                payload_version: row.get(3)?,
-                payload: row.get(4)?,
-                hash: row.get(5)?,
-            })
-        })?;
-        rows.map(|row| decode_row(row?)).collect()
+        read_from_connection(&self.connection, from)
     }
 
     /// Re-reads the whole log and checks that it forms an unbroken hash chain from genesis.
@@ -147,6 +205,34 @@ impl EventStore {
     }
 }
 
+fn configure(connection: &Connection) -> rusqlite::Result<()> {
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    connection.execute_batch(SCHEMA)
+}
+
+/// Reads within the caller's transaction so a projection cannot publish a stale snapshot.
+pub(super) fn read_from_connection(
+    connection: &Connection,
+    from: Sequence,
+) -> Result<Vec<ChainedEvent>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, kind, subject, payload_version, payload, hash
+             FROM events WHERE sequence >= ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![stored_sequence(from)], |row| {
+        Ok(StoredRow {
+            sequence: row.get(0)?,
+            kind: row.get(1)?,
+            subject: row.get(2)?,
+            payload_version: row.get(3)?,
+            payload: row.get(4)?,
+            hash: row.get(5)?,
+        })
+    })?;
+    rows.map(|row| decode_row(row?)).collect()
+}
+
 /// Appends `event` inside an open transaction, so callers can commit it together with other
 /// writes (the outbox records an intent and its event atomically).
 pub(super) fn append_in(
@@ -172,4 +258,25 @@ pub(super) fn append_in(
         ],
     )?;
     Ok(ChainedEvent { recorded, hash })
+}
+
+/// The SQLite URI that opens `path` with `immutable=1`: unreserved characters and `/` stay,
+/// everything else is percent-encoded, and a Windows drive path gets its leading `/`.
+fn immutable_uri(path: &Path) -> String {
+    let text: String = path.to_string_lossy().replace('\\', "/");
+    let text: String = if text.as_bytes().get(1) == Some(&b':') {
+        format!("/{text}")
+    } else {
+        text
+    };
+    let mut uri: String = String::from("file:");
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }

@@ -18,16 +18,20 @@ pub enum ContainmentCapability {
     TcpEgress,
     /// Outgoing UDP limited to the egress broker.
     UdpEgress,
-    /// Every descendant process contained and endable together.
+    /// Kaisa storage and other attempts' credentials are unreadable.
+    StateReadIsolation,
+    /// Every descendant process contained and endable together, including reparented daemons.
+    /// A Unix process group plus PPID scans provides only a reduced guarantee.
     DescendantContainment,
 }
 
 impl ContainmentCapability {
     /// Every capability: what a run without any OS sandbox is missing.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::WriteConfinement,
         Self::TcpEgress,
         Self::UdpEgress,
+        Self::StateReadIsolation,
         Self::DescendantContainment,
     ];
 
@@ -38,6 +42,7 @@ impl ContainmentCapability {
             Self::WriteConfinement => "write",
             Self::TcpEgress => "tcp",
             Self::UdpEgress => "udp",
+            Self::StateReadIsolation => "state-read",
             Self::DescendantContainment => "descendants",
         }
     }
@@ -57,6 +62,7 @@ impl fmt::Display for ContainmentCapability {
             Self::WriteConfinement => "write confinement (write)",
             Self::TcpEgress => "TCP egress through the broker (tcp)",
             Self::UdpEgress => "UDP egress through the broker (udp)",
+            Self::StateReadIsolation => "Kaisa state read isolation (state-read)",
             Self::DescendantContainment => "descendant containment (descendants)",
         })
     }
@@ -72,7 +78,12 @@ pub fn landlock_missing(abi: Option<i64>, udp_filtered: bool) -> Vec<Containment
     let Some(abi) = abi else {
         return ContainmentCapability::ALL.to_vec();
     };
-    let mut missing: Vec<ContainmentCapability> = Vec::new();
+    // The current ruleset handles writes and network, leaving file reads open, and Landlock
+    // provides no process lifetime/cgroup boundary.
+    let mut missing: Vec<ContainmentCapability> = vec![
+        ContainmentCapability::StateReadIsolation,
+        ContainmentCapability::DescendantContainment,
+    ];
     if abi < LANDLOCK_TRUNCATE_ABI {
         missing.push(ContainmentCapability::WriteConfinement);
     }
@@ -89,6 +100,31 @@ pub fn landlock_missing(abi: Option<i64>, udp_filtered: bool) -> Vec<Containment
 pub const LANDLOCK_TRUNCATE_ABI: i64 = 3;
 /// The first Landlock ABI that handles TCP connections.
 pub const LANDLOCK_NETWORK_ABI: i64 = 4;
+
+/// Known OS limits admitted automatically, while still labelled reduced in the run and ledger.
+/// Unix parent-PID walks cannot discover daemons already reparented to init/launchd. Windows
+/// Job Objects deny breakaway and do not have this limit. Linux Landlock also leaves Kaisa state
+/// readable. Other missing capabilities still
+/// require a scoped Decision or an applicable documented default policy.
+#[must_use]
+pub fn platform_limits() -> &'static [ContainmentCapability] {
+    #[cfg(target_os = "linux")]
+    {
+        // Landlock leaves file reads open (`landlock_missing`).
+        &[
+            ContainmentCapability::StateReadIsolation,
+            ContainmentCapability::DescendantContainment,
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        &[ContainmentCapability::DescendantContainment]
+    }
+    #[cfg(not(unix))]
+    {
+        &[]
+    }
+}
 
 /// A human's scoped permission to run without some capabilities until a deadline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,8 +219,10 @@ impl fmt::Display for DefaultReducedPolicy {
 /// What may admit a run that is missing capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReducedModeBasis {
-    /// Nothing: only a fully contained run starts.
+    /// No caller permission: only full containment or documented platform limits may start.
     None,
+    /// Only the documented limits returned by [`platform_limits`], with no expiry.
+    PlatformLimit,
     /// A person's scoped, expiring Decision.
     Decision(ReducedModeDecision),
     /// A documented default policy, fixed in code.
@@ -192,11 +230,28 @@ pub enum ReducedModeBasis {
 }
 
 impl ReducedModeBasis {
-    /// The stable code the ledger records: `none`, `decision`, or the default policy's code.
+    /// The basis recorded for this missing set. A caller without a Decision can rely only
+    /// on the fixed platform limits; record that policy instead of claiming full containment.
+    #[must_use]
+    pub fn for_missing(&self, missing: &[ContainmentCapability]) -> Self {
+        if *self == Self::None
+            && !missing.is_empty()
+            && missing
+                .iter()
+                .all(|capability| platform_limits().contains(capability))
+        {
+            Self::PlatformLimit
+        } else {
+            self.clone()
+        }
+    }
+
+    /// The stable ledger code: `none`, `decision`, `platform-limit`, or a default policy code.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::None => "none",
+            Self::PlatformLimit => "platform-limit",
             Self::Decision(_) => "decision",
             Self::DefaultPolicy(policy) => policy.code(),
         }
@@ -207,7 +262,7 @@ impl ReducedModeBasis {
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
             Self::Decision(decision) => Some(decision.expires_at_ms),
-            Self::None | Self::DefaultPolicy(_) => None,
+            Self::None | Self::PlatformLimit | Self::DefaultPolicy(_) => None,
         }
     }
 }
@@ -216,6 +271,7 @@ impl fmt::Display for ReducedModeBasis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("no Decision"),
+            Self::PlatformLimit => f.write_str("documented platform limits (platform-limit)"),
             Self::Decision(decision) => write!(
                 f,
                 "your Decision accepting {} until {} ms",
@@ -289,11 +345,11 @@ pub fn admit(
     let mut missing: Vec<ContainmentCapability> = missing.to_vec();
     missing.sort();
     missing.dedup();
-    let accepted: bool = decision.is_some_and(|decision| {
-        now_ms < decision.expires_at_ms
-            && missing
-                .iter()
-                .all(|capability| decision.accepts_missing.contains(capability))
+    let accepted: bool = missing.iter().all(|capability| {
+        platform_limits().contains(capability)
+            || decision.is_some_and(|decision| {
+                now_ms < decision.expires_at_ms && decision.accepts_missing.contains(capability)
+            })
     });
     if accepted {
         Admission::Reduced { missing }
@@ -302,8 +358,8 @@ pub fn admit(
     }
 }
 
-/// Decides admission on `basis`: a person's Decision is checked for scope and expiry; a default
-/// policy fixed in code accepts what it documents (every capability, without expiry).
+/// Decides admission on `basis`: a Decision is checked for scope and expiry, known platform
+/// limits are labelled reduced, and a default agent policy accepts what it documents.
 #[must_use]
 pub fn admit_on(
     missing: &[ContainmentCapability],
@@ -311,7 +367,7 @@ pub fn admit_on(
     now_ms: u64,
 ) -> Admission {
     match basis {
-        ReducedModeBasis::None => admit(missing, None, now_ms),
+        ReducedModeBasis::None | ReducedModeBasis::PlatformLimit => admit(missing, None, now_ms),
         ReducedModeBasis::Decision(decision) => admit(missing, Some(decision), now_ms),
         ReducedModeBasis::DefaultPolicy(_) => admit(
             missing,
@@ -430,7 +486,11 @@ mod tests {
 
         assert_eq!(
             missing,
-            vec![ContainmentCapability::TcpEgress],
+            vec![
+                ContainmentCapability::StateReadIsolation,
+                ContainmentCapability::DescendantContainment,
+                ContainmentCapability::TcpEgress
+            ],
             "ABI 3 confines every write but leaves TCP open"
         );
     }
@@ -441,8 +501,21 @@ mod tests {
 
         assert_eq!(
             missing,
-            vec![ContainmentCapability::UdpEgress],
+            vec![
+                ContainmentCapability::StateReadIsolation,
+                ContainmentCapability::DescendantContainment,
+                ContainmentCapability::UdpEgress
+            ],
             "Landlock never covers UDP; only the seccomp filter does"
+        );
+    }
+
+    #[test]
+    fn a_landlock_sandbox_always_reports_that_kaisa_state_remains_readable() {
+        assert!(
+            landlock_missing(Some(LANDLOCK_NETWORK_ABI), true)
+                .contains(&ContainmentCapability::StateReadIsolation),
+            "write and network rules do not restrict reads of state or other attempt tokens"
         );
     }
 
@@ -452,6 +525,70 @@ mod tests {
             landlock_missing(None, true),
             ContainmentCapability::ALL.to_vec(),
             "no Landlock means the agent runs as if unconfined"
+        );
+    }
+
+    #[test]
+    fn a_landlock_sandbox_reports_descendants_even_with_network_and_write_rules() {
+        assert!(
+            landlock_missing(Some(LANDLOCK_NETWORK_ABI), true)
+                .contains(&ContainmentCapability::DescendantContainment),
+            "Landlock does not provide a cgroup boundary or account for reparented daemons"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_known_platform_limit_is_admitted_as_reduced_without_a_decision() {
+        let missing = super::platform_limits();
+        let basis = ReducedModeBasis::None.for_missing(missing);
+        assert_eq!(
+            admit_on(missing, &basis, NINE_O_CLOCK_MS),
+            Admission::Reduced {
+                missing: missing.to_vec()
+            },
+            "known OS limits remain visible while ordinary confined runs can start"
+        );
+        assert_eq!(
+            basis.code(),
+            "platform-limit",
+            "the ledger must identify the documented policy behind automatic reduced admission"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extra_missing_capability_cannot_hide_behind_the_platform_limit_policy() {
+        let mut missing = super::platform_limits().to_vec();
+        missing.push(ContainmentCapability::WriteConfinement);
+        assert!(
+            matches!(
+                admit_on(&missing, &ReducedModeBasis::PlatformLimit, NINE_O_CLOCK_MS),
+                Admission::Refused { .. }
+            ),
+            "only the fixed platform limits are automatically accepted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_decision_only_needs_to_accept_gaps_beyond_the_known_platform_limits() {
+        let mut missing = super::platform_limits().to_vec();
+        missing.push(ContainmentCapability::UdpEgress);
+        let decision = a_decision_accepting_the_udp_gap_until(NINE_O_CLOCK_MS + HOUR_MS);
+        assert!(
+            matches!(
+                admit(&missing, Some(&decision), NINE_O_CLOCK_MS),
+                Admission::Reduced { .. }
+            ),
+            "platform limits and a scoped live Decision together cover this run"
+        );
+        assert!(
+            matches!(
+                admit(&missing, Some(&decision), NINE_O_CLOCK_MS + HOUR_MS),
+                Admission::Refused { .. }
+            ),
+            "expiry must still refuse the extra gap"
         );
     }
 

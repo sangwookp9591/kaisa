@@ -41,7 +41,7 @@ fn codex_args() -> Vec<String> {
 
 /// How to run anyway when containment falls short: shown with every refusal.
 const ACCEPT_HINT: &str = "to run anyway, accept what is missing until a deadline: \
---accept-reduced <write,tcp,udp,descendants> --accept-until <unix time in ms>";
+--accept-reduced <write,tcp,udp,state-read,descendants> --accept-until <unix time in ms>";
 
 /// A person's `--accept-reduced <codes> --accept-until <ms>`, as typed.
 #[derive(Default)]
@@ -114,9 +114,33 @@ pub(crate) struct GoalCommand {
     accept: AcceptReduced,
 }
 
+/// Why the words after `kaisa` are not a goal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GoalParseError {
+    /// Only options, no goal words.
+    NoGoal,
+    /// An option Kaisa does not have.
+    UnknownFlag(String),
+}
+
+/// True for a single word shaped like an option (`--n`, `-x`), not for a quoted sentence or a
+/// negative number.
+fn looks_like_a_flag(word: &str) -> bool {
+    let after_dash = word.strip_prefix("--").or_else(|| word.strip_prefix('-'));
+    after_dash.is_some_and(|rest| {
+        rest.chars().next().is_some_and(char::is_alphabetic) && !word.contains(char::is_whitespace)
+    })
+}
+
 impl GoalCommand {
-    /// Parses the arguments; `None` if there is no goal.
-    pub(crate) fn parse(args: &[String]) -> Option<Self> {
+    /// Parses the arguments.
+    ///
+    /// # Errors
+    ///
+    /// [`GoalParseError::NoGoal`] if there is no goal, and [`GoalParseError::UnknownFlag`] if a
+    /// word that looks like a flag is not one Kaisa knows: it must not silently become goal text
+    /// that a paid agent then acts on. `--` ends the flags, so a goal can still begin with one.
+    pub(crate) fn parse(args: &[String]) -> Result<Self, GoalParseError> {
         let mut agent = AgentChoice {
             program: None,
             args: Vec::new(),
@@ -131,6 +155,10 @@ impl GoalCommand {
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
+                "--" => {
+                    goal.extend(words.by_ref().map(String::as_str));
+                    break;
+                }
                 "--agent" => match words.next().map(String::as_str) {
                     Some("codex") => agent.codex = true,
                     Some("claude") => {}
@@ -150,10 +178,16 @@ impl GoalCommand {
                         check.push(arg.clone());
                     }
                 }
+                other if looks_like_a_flag(other) => {
+                    return Err(GoalParseError::UnknownFlag(other.to_owned()));
+                }
                 other => goal.push(other),
             }
         }
-        (!goal.is_empty()).then(|| Self {
+        if goal.is_empty() {
+            return Err(GoalParseError::NoGoal);
+        }
+        Ok(Self {
             goal: goal.join(" "),
             agent,
             reviewer_args,
@@ -188,7 +222,7 @@ impl GoalCommand {
                 .unwrap_or_else(|| PathBuf::from("codex")),
             args: codex_args(),
             working_directory: std::env::temp_dir(),
-            env: Vec::new(),
+            env: kaisa_agents::codex_environment(),
         }
     }
 
@@ -218,7 +252,7 @@ impl GoalCommand {
                     mcp_config,
                 }),
                 working_directory: std::env::temp_dir(),
-                env: Vec::new(),
+                env: kaisa_agents::claude_environment(),
             },
         }
     }
@@ -330,6 +364,11 @@ impl GoalCommand {
             .map(|trial| trial.egress_hosts.iter().map(String::as_str).collect())
             .unwrap_or_default();
         if let Some(trial) = &trial {
+            #[cfg(target_os = "macos")]
+            writeln!(
+                out,
+                "trial: this confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot."
+            )?;
             writeln!(
                 out,
                 "trial (T16.0): Claude Code runs confined; it may reach {} and change {}",
@@ -408,6 +447,9 @@ impl GoalCommand {
             writeln!(err, "kaisa: run this inside a git repository")?;
             return Ok(crate::EXIT_USAGE);
         };
+        if let Some(line) = parent_repository_notice(&repository) {
+            writeln!(out, "{line}")?;
+        }
         let state = match kaisa_sys::state_location(|name| std::env::var_os(name)) {
             Ok(location) => location.directory,
             Err(error) => {
@@ -469,7 +511,11 @@ fn report_error(
         return Ok(crate::EXIT_WAITING_FOR_HUMAN);
     }
     writeln!(err, "kaisa: {error}")?;
-    Ok(crate::EXIT_FAILURE)
+    Ok(if error.failed_to_start() {
+        crate::EXIT_RUN_FAILED
+    } else {
+        crate::EXIT_FAILURE
+    })
 }
 
 /// CI contract (user-flows F26): 0 when the agent finished and its work is preserved, 4 when
@@ -480,6 +526,18 @@ fn exit_status(outcome: &GoalOutcome) -> u8 {
     } else {
         crate::EXIT_RUN_FAILED
     }
+}
+
+/// One line naming the repository when Kaisa was started below its root, so a run in a
+/// subdirectory never silently works on the whole parent repository.
+fn parent_repository_notice(repository: &Path) -> Option<String> {
+    let current = std::env::current_dir().ok()?;
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    (!same(&current, repository))
+        .then(|| format!("using the git repository at {}", repository.display()))
 }
 
 fn repository_root() -> Option<PathBuf> {
@@ -497,7 +555,56 @@ fn repository_root() -> Option<PathBuf> {
 mod tests {
     use kaisa_domain::{DefaultReducedPolicy, ReducedModeBasis};
 
-    use super::codex_args;
+    use super::{GoalParseError, codex_args};
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_goal_of_several_unquoted_words_and_a_quoted_sentence_both_parse() {
+        let unquoted = super::GoalCommand::parse(&words(&["fix", "the", "login", "bug"]));
+        let quoted = super::GoalCommand::parse(&words(&["fix the login bug"]));
+
+        assert_eq!(
+            unquoted.expect("a goal").goal,
+            "fix the login bug",
+            "unquoted words are joined into the goal"
+        );
+        assert_eq!(
+            quoted.expect("a goal").goal,
+            "fix the login bug",
+            "a quoted sentence is the goal as typed"
+        );
+    }
+
+    #[test]
+    fn a_quoted_goal_that_starts_with_dashes_is_text_and_a_double_dash_ends_the_options() {
+        let quoted = super::GoalCommand::parse(&words(&["--fix typo in README"]));
+        let after_separator = super::GoalCommand::parse(&words(&["--", "--verbose", "output"]));
+
+        assert_eq!(
+            quoted.expect("a goal").goal,
+            "--fix typo in README",
+            "a word with a space is a sentence, not an option"
+        );
+        assert_eq!(
+            after_separator.expect("a goal").goal,
+            "--verbose output",
+            "everything after `--` is goal text"
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_is_refused_by_name() {
+        let parsed = super::GoalCommand::parse(&words(&["--n", "3", "fix"]));
+
+        assert_eq!(
+            parsed.err(),
+            Some(GoalParseError::UnknownFlag("--n".to_owned())),
+            "the refusal names the option the user typed"
+        );
+    }
 
     #[test]
     fn the_confine_claude_switch_is_parsed() {

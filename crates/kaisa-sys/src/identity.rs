@@ -72,22 +72,30 @@ fn start_of(pid: u32) -> io::Result<Option<u64>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    linux_start_from_stat(&stat)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_start_from_stat(stat: &str) -> io::Result<Option<u64>> {
     // The command name (field 2) may contain spaces and parentheses; fields resume after the
     // last `)`. Field 3 is then the first, so field 22 is the twentieth.
     let after_name: &str = stat
         .rsplit_once(')')
         .map(|(_, rest)| rest)
         .ok_or_else(|| io::Error::other("unexpected /proc stat format"))?;
-    after_name
-        .split_whitespace()
-        .nth(START_TIME_AFTER_NAME)
+    let mut fields = after_name.split_whitespace();
+    if fields.next() == Some("Z") {
+        return Ok(None);
+    }
+    fields
+        .nth(START_TIME_AFTER_NAME - 1)
         .and_then(|field| field.parse().ok())
         .map(Some)
         .ok_or_else(|| io::Error::other("no start time in /proc stat"))
 }
 
 /// Index of the start-time field among the fields after the command name.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const START_TIME_AFTER_NAME: usize = 19;
 
 /// Microseconds since the epoch at which `pid` started (`proc_pidinfo`, BSD info).
@@ -128,21 +136,120 @@ fn start_of(pid: u32) -> io::Result<Option<u64>> {
 #[cfg(target_os = "macos")]
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
+/// Windows creation time identifies a process even if its pid has since been reused.
+#[cfg(windows)]
+fn start_of(pid: u32) -> io::Result<Option<u64>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
+    };
+
+    #[allow(unsafe_code)]
+    // SAFETY: opening a non-inheritable query handle by pid has no memory preconditions.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        // Access denied is not proof of death. Only an invalid pid is treated as absent.
+        return if error.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: OpenProcess returned a valid handle owned only here, closed by OwnedHandle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    #[allow(unsafe_code)]
+    // SAFETY: this live process handle has SYNCHRONIZE access; zero only polls its state.
+    match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => return Ok(None),
+        WAIT_TIMEOUT => {}
+        _ => return Err(io::Error::last_os_error()),
+    }
+    let empty = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (empty, empty, empty, empty);
+    #[allow(unsafe_code)]
+    // SAFETY: the query handle is live and all four output pointers are distinct FILETIMEs.
+    let read = unsafe {
+        GetProcessTimes(
+            handle.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(
+        (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+    ))
+}
+
 /// Not implemented on this OS yet: every process looks gone, so recovery treats it as lost
-/// track and asks the user rather than guessing (T16.6b, Windows with the keeper).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// track and asks the user rather than guessing (T16.6b).
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn start_of(_pid: u32) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod tests {
     use super::ProcessIdentity;
 
     /// Long enough that the agent is still running when the test ends it.
+    #[cfg(unix)]
     const AGENT_LIFETIME_SECONDS: &str = "30";
     /// A pid far above any the test runner will hand out.
     const UNUSED_PID: u32 = 999_999;
+
+    fn owner_stat(state: &str) -> String {
+        let mut fields = vec!["0"; super::START_TIME_AFTER_NAME + 1];
+        fields[0] = state;
+        fields[super::START_TIME_AFTER_NAME] = "12345";
+        format!("42 (owner with ) parentheses) {}", fields.join(" "))
+    }
+
+    #[test]
+    fn a_linux_zombie_owner_is_gone_even_before_its_parent_reaps_it() {
+        let zombie = owner_stat("Z");
+        assert_eq!(
+            super::linux_start_from_stat(&zombie).expect("valid stat"),
+            None,
+            "a zombie cannot own or resume Kaisa recovery"
+        );
+    }
+
+    #[test]
+    fn a_linux_sleeping_owner_keeps_its_start_identity() {
+        let sleeping = owner_stat("S");
+        let start = sleeping
+            .split_whitespace()
+            .last()
+            .expect("start field")
+            .parse()
+            .expect("clock ticks");
+        assert_eq!(
+            super::linux_start_from_stat(&sleeping).expect("valid stat"),
+            Some(start),
+            "an idle live owner must still protect its attempt"
+        );
+    }
 
     #[test]
     fn a_running_process_is_recognised_by_its_identity() {
@@ -191,6 +298,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ending_a_recorded_agent_ends_it_and_nothing_else() {
         let mut agent = crate::OwnedProcess::spawn(&crate::ProcessSpec {

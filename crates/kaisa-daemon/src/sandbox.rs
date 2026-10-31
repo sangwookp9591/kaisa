@@ -105,13 +105,13 @@ impl AgentSandbox {
         }
     }
 
-    /// What this sandbox cannot guarantee: everything when unconfined, and on Linux whatever
-    /// the kernel's Landlock ABI and the datagram filter leave open (D02).
+    /// What this sandbox cannot guarantee. Unix PPID scans cannot discover descendants
+    /// already reparented outside the tree, so descendant containment is always reduced.
     pub(crate) fn missing(&self) -> Vec<ContainmentCapability> {
         match self {
             Self::Unconfined => ContainmentCapability::ALL.to_vec(),
             #[cfg(target_os = "macos")]
-            Self::Seatbelt(_) => Vec::new(),
+            Self::Seatbelt(_) => vec![ContainmentCapability::DescendantContainment],
             #[cfg(target_os = "linux")]
             Self::Landlock(ruleset) => {
                 kaisa_domain::landlock_missing(Some(ruleset.abi), ruleset.udp_confined())
@@ -134,10 +134,13 @@ impl AgentSandbox {
 /// has no network: every change it makes goes through the broker.
 #[cfg(unix)]
 pub(crate) fn agent_sandbox(
+    state_directory: &Path,
+    worktree: &Path,
     scratch: &Path,
     agent_writable: &[PathBuf],
     broker_socket: &Path,
     egress_port: Option<u16>,
+    needs_keychain_login: bool,
 ) -> std::io::Result<AgentSandbox> {
     let mut writable: Vec<PathBuf> = vec![scratch.canonicalize()?];
     // A path the agent may create (a session file) need not exist yet.
@@ -153,16 +156,40 @@ pub(crate) fn agent_sandbox(
             (Some(directory), Some(name)) => directory.canonicalize()?.join(name),
             _ => broker_socket.to_owned(),
         };
-        Ok(AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+        let attempt = scratch.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scratch has no attempt directory",
+            )
+        })?;
+        let mut readable = vec![worktree.canonicalize()?, scratch.canonicalize()?];
+        for file in [
+            "mcp.json",
+            kaisa_mcp::BRIDGE_CONFIG_FILE,
+            kaisa_mcp::TOKEN_FILE,
+            kaisa_mcp::BROKER_ENDPOINT_FILE,
+        ] {
+            readable.push(attempt.join(file));
+        }
+        let mut policy = kaisa_sys::SeatbeltPolicy {
+            readable,
             writable,
+            needs_keychain_login,
             broker_socket: Some(socket),
             broker_port: egress_port,
             ..kaisa_sys::SeatbeltPolicy::default()
-        }))
+        };
+        policy.protect_state(state_directory)?;
+        Ok(AgentSandbox::Seatbelt(policy))
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = broker_socket;
+        let _ = (
+            state_directory,
+            worktree,
+            broker_socket,
+            needs_keychain_login,
+        );
         let existing: Vec<PathBuf> = writable.into_iter().filter(|path| path.exists()).collect();
         Ok(match kaisa_sys::write_ruleset(&existing, egress_port)? {
             Some(ruleset) => AgentSandbox::Landlock(ruleset),
@@ -171,7 +198,14 @@ pub(crate) fn agent_sandbox(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (writable, broker_socket, egress_port);
+        let _ = (
+            state_directory,
+            worktree,
+            writable,
+            broker_socket,
+            egress_port,
+            needs_keychain_login,
+        );
         Ok(AgentSandbox::Unconfined)
     }
 }
@@ -187,7 +221,11 @@ pub(crate) fn expected_missing(confine: bool) -> Vec<ContainmentCapability> {
     {
         kaisa_domain::landlock_missing(kaisa_sys::landlock_abi(), kaisa_sys::udp_filter_supported())
     }
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
+    {
+        vec![ContainmentCapability::DescendantContainment]
+    }
+    #[cfg(windows)]
     {
         Vec::new()
     }
@@ -216,6 +254,177 @@ mod tests {
 
     use super::{AgentSandbox, beyond_admitted, expected_missing};
 
+    /// Commands whose logical path resolution walks the protected state ancestors.
+    #[cfg(target_os = "macos")]
+    fn commands_walking_state_ancestors(
+        directory: &std::path::Path,
+    ) -> Vec<kaisa_sys::ProcessSpec> {
+        std::fs::create_dir_all(directory.join("sub")).expect("nested checkout directory");
+        let mut commands = vec![kaisa_sys::ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "cd sub && pwd".into()],
+            working_directory: directory.to_owned(),
+            env: Vec::new(),
+        }];
+        // Node is optional on developer hosts; the shell regression always runs.
+        if let Some(node) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join("node"))
+                .find(|path| path.is_file())
+        }) {
+            commands.push(kaisa_sys::ProcessSpec {
+                program: node,
+                args: vec!["-e".into(), "require('fs').realpathSync('.')".into()],
+                working_directory: directory.to_owned(),
+                env: Vec::new(),
+            });
+        }
+        commands
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_agent_reads_its_bridge_and_worktree_but_not_daemon_or_other_attempt_secrets() {
+        const SUCCESS: kaisa_sys::ProcessExit = kaisa_sys::ProcessExit::Code(0);
+        use kaisa_sys::{ProcessSpec, run_captured};
+        let root =
+            std::env::temp_dir().join(format!("kaisa-agent-read-isolation-{}", std::process::id()));
+        let state = root.join("state");
+        let attempt = state.join("attempts/own");
+        let other = state.join("attempts/other");
+        let scratch = attempt.join("scratch");
+        let worktree = state.join("worktrees/own");
+        for directory in [&scratch, &worktree, &other] {
+            std::fs::create_dir_all(directory).expect("isolated state fixture");
+        }
+        let allowed = [
+            attempt.join("bridge.token"),
+            attempt.join("bridge.json"),
+            attempt.join("mcp.json"),
+            attempt.join("broker.endpoint"),
+            worktree.join("source.rs"),
+        ];
+        let denied = [
+            state.join("kaisa.db"),
+            other.join("bridge.token"),
+            attempt.join("private.log"),
+        ];
+        for file in allowed.iter().chain(&denied) {
+            std::fs::write(file, "fixture contents").expect("planted fixture");
+        }
+        let sandbox = super::agent_sandbox(
+            &state,
+            &worktree,
+            &scratch,
+            &[],
+            &attempt.join("broker.sock"),
+            None,
+            false,
+        )
+        .expect("agent sandbox");
+        let read = |path: &std::path::Path| {
+            let spec = ProcessSpec {
+                program: "/bin/cat".into(),
+                args: vec![path.to_string_lossy().into_owned()],
+                working_directory: worktree.clone(),
+                env: Vec::new(),
+            };
+            run_captured(
+                &spec,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("confined cat exits")
+            .exit
+            .expect("cat exits before deadline")
+        };
+        for secret in &denied {
+            assert_ne!(
+                read(secret),
+                SUCCESS,
+                "agent constructor must hide {secret:?}"
+            );
+        }
+        for file in allowed
+            .iter()
+            .chain([&std::path::PathBuf::from("/etc/hosts")])
+        {
+            assert_eq!(
+                read(file),
+                SUCCESS,
+                "the relay and agent still need {file:?}"
+            );
+        }
+        let claude_sandbox = super::agent_sandbox(
+            &state,
+            &worktree,
+            &scratch,
+            &[],
+            &attempt.join("broker.sock"),
+            None,
+            true,
+        )
+        .expect("Claude sandbox");
+        let super::AgentSandbox::Seatbelt(claude_policy) = &claude_sandbox else {
+            panic!("macOS uses Seatbelt");
+        };
+        assert!(
+            claude_policy.needs_keychain_login,
+            "only the adapter-declared Claude agent receives login keychain access"
+        );
+        let profile = kaisa_sys::seatbelt_profile(claude_policy);
+        assert!(
+            !profile.contains("(deny mach-lookup") && !profile.contains("Library/Keychains"),
+            "Claude login must retain keychain services and file reads"
+        );
+        let secret_read = ProcessSpec {
+            program: "/bin/cat".into(),
+            args: vec![denied[0].to_string_lossy().into_owned()],
+            working_directory: worktree.clone(),
+            env: Vec::new(),
+        };
+        let result = run_captured(
+            &secret_read,
+            &claude_sandbox.confinement(),
+            b"",
+            std::time::Duration::from_secs(10),
+            4096,
+        )
+        .expect("confined secret read");
+        assert_ne!(
+            result.exit,
+            Some(SUCCESS),
+            "Claude login access must not reopen Kaisa state"
+        );
+        let alias = worktree.join("stolen-token");
+        std::os::unix::fs::symlink(&denied[1], &alias).expect("hostile symlink");
+        assert_ne!(
+            read(&alias),
+            SUCCESS,
+            "a worktree symlink must not reopen state"
+        );
+        for command in commands_walking_state_ancestors(&worktree) {
+            let result = kaisa_sys::run_captured(
+                &command,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("path-walking command exits");
+            assert_eq!(
+                result.exit,
+                Some(SUCCESS),
+                "ancestor metadata must permit {:?}: {}",
+                command.args,
+                String::from_utf8_lossy(&result.output)
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove isolated state");
+    }
+
     #[test]
     fn an_unconfined_sandbox_is_missing_every_capability() {
         assert_eq!(
@@ -231,6 +440,31 @@ mod tests {
             expected_missing(false),
             ContainmentCapability::ALL.to_vec(),
             "admission sees the whole gap before the agent starts"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_seatbelt_sandbox_reports_the_same_descendant_limit_before_and_after_construction() {
+        let actual = AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy::default()).missing();
+        assert_eq!(
+            actual,
+            vec![ContainmentCapability::DescendantContainment],
+            "PPID scans cannot promise cleanup of already reparented daemons"
+        );
+        assert_eq!(
+            expected_missing(true),
+            actual,
+            "admission must disclose exactly the capabilities the sandbox lacks"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_objects_do_not_report_the_unix_descendant_limit() {
+        assert!(
+            !expected_missing(true).contains(&ContainmentCapability::DescendantContainment),
+            "Job Object breakaway is denied, unlike Unix process groups"
         );
     }
 

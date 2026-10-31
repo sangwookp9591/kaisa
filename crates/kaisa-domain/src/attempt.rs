@@ -28,6 +28,8 @@ pub enum Execution {
 /// How a process ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
+    /// The OS rejected process creation; no agent ran and no process exit code exists.
+    FailedToStart,
     /// The process returned an exit code.
     Code(i32),
     /// The process was ended by a signal (Unix) or terminated externally (Windows).
@@ -49,6 +51,8 @@ impl ExitStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FailureReason {
+    /// No agent process could be created.
+    FailedToStart,
     /// The agent process exited unsuccessfully.
     Agent,
     /// The process was terminated before it finished.
@@ -245,6 +249,7 @@ impl AttemptState {
             ExitStatus::Code(_) if status.is_success() => Outcome::Completed,
             ExitStatus::Code(_) => Outcome::Failed(FailureReason::Agent),
             ExitStatus::Terminated => Outcome::Failed(FailureReason::Terminated),
+            ExitStatus::FailedToStart => Outcome::Failed(FailureReason::FailedToStart),
         };
         Ok(())
     }

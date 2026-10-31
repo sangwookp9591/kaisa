@@ -7,6 +7,66 @@ use serde_json::{Value, json};
 
 use crate::transcript::{event_type, events};
 
+/// Claude Code's authentication, configuration and TLS inputs. Keep provider keys out of
+/// the shared child environment: Codex, local models and trusted checks do not need these.
+/// Names follow Claude Code's environment configuration, including optional cloud backends.
+const ENVIRONMENT: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_GIT_BASH_PATH",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CA_BUNDLE",
+    "AWS_SDK_LOAD_CONFIG",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "CLAUDE_CODE_USE_VERTEX",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLOUD_ML_REGION",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// Explicit parent variables required by Claude Code; passed through [`kaisa_sys::ProcessSpec::env`].
+#[must_use]
+pub fn claude_environment() -> Vec<(String, String)> {
+    environment_with(|name| std::env::var(name).ok())
+}
+
+fn environment_with(mut lookup: impl FnMut(&str) -> Option<String>) -> Vec<(String, String)> {
+    ENVIRONMENT
+        .iter()
+        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
+        .collect()
+}
+
 /// What the router chose for one Claude attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeLaunch<'launch> {
@@ -101,6 +161,68 @@ mod tests {
     use super::{ClaudeLaunch, claude_brokered_argv, first_message};
 
     const LOGIN_FIX_SPEC: &str = "Make the login test wait for the token refresh.";
+
+    #[test]
+    fn the_claude_environment_includes_its_credentials_and_excludes_other_provider_keys() {
+        let parent = [
+            ("ANTHROPIC_API_KEY", "dummy-claude-key"),
+            ("CLAUDE_CONFIG_DIR", "isolated-claude-home"),
+            ("OPENAI_API_KEY", "dummy-openai-key"),
+            ("UNRELATED_SECRET", "dummy-secret"),
+        ];
+        let environment = super::environment_with(|name| {
+            parent
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        });
+        const DECLARED_INPUTS: usize = 2;
+        let expected = parent[..DECLARED_INPUTS]
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            environment, expected,
+            "only the selected adapter's declared inputs may cross the launch boundary"
+        );
+    }
+
+    #[test]
+    fn optional_claude_backends_receive_their_declared_authentication_inputs() {
+        let expected = [
+            "CLAUDE_CODE_GIT_BASH_PATH",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "ANTHROPIC_FOUNDRY_API_KEY",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "CLAUDE_CODE_CLIENT_CERT",
+            "CLAUDE_CODE_CLIENT_KEY",
+            "GOOGLE_CLOUD_PROJECT",
+            "CLOUDSDK_CONFIG",
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_ROLE_SESSION_NAME",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            "AWS_CA_BUNDLE",
+            "AWS_SDK_LOAD_CONFIG",
+        ];
+        let actual = super::environment_with(|name| {
+            expected
+                .contains(&name)
+                .then(|| "dummy-backend-input".to_owned())
+        });
+        for name in expected {
+            assert!(
+                actual.iter().any(|(key, _)| key == name),
+                "Claude backend input {name} must reach the selected adapter"
+            );
+        }
+    }
 
     fn a_sonnet_launch() -> ClaudeLaunch<'static> {
         ClaudeLaunch {

@@ -18,8 +18,8 @@ const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
 keys: revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
-      require_person_when_check_definitions_change (true|false),
-      require_person_when_tests_weaken (true|false),
+      require_person_when_check_definitions_change (true only; always enforced),
+      require_person_when_tests_weaken (true only; always enforced),
       min_grade_for_security_review (T0..T3; requires T3)";
 
 fn grade_from(code: &str) -> Option<Grade> {
@@ -172,12 +172,31 @@ fn run_in_state(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> io::Result<u8> {
+    // Damaged or no-longer-admitted policy files are the person's to repair: say what is wrong
+    // here, where the file is, and how, rather than leaving the binary to exit silently.
+    let loaded = match args {
+        [command, ..] if command == "show" || command == "set" => match load(state) {
+            Ok(policy) => Some(policy),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                writeln!(
+                    err,
+                    "kaisa: {}: {error}\nrepair: edit that file so the named rule is true (or \
+                     delete it to return to the defaults), then run the command again",
+                    state.join(POLICY_FILE).display()
+                )?;
+                return Ok(crate::EXIT_FAILURE);
+            }
+            Err(error) => return Err(error),
+        },
+        _ => None,
+    };
     match args {
         [command] if command == "show" => {
-            out.write_all(load(state)?.canonical_text().as_bytes())?;
+            let policy = loaded.unwrap_or_else(Policy::personal_default);
+            out.write_all(policy.canonical_text().as_bytes())?;
         }
         [command, key, value] if command == "set" => {
-            let mut policy = load(state)?;
+            let mut policy = loaded.unwrap_or_else(Policy::personal_default);
             if let Err(problem) = change(&mut policy, key, value) {
                 writeln!(err, "kaisa policy set: {problem}\n{USAGE}")?;
                 return Ok(crate::EXIT_USAGE);
@@ -272,8 +291,8 @@ mod tests {
         );
         for (key, value) in [
             ("allowed_egress_hosts", "example.com,api.openai.com"),
-            ("require_person_when_check_definitions_change", "false"),
-            ("require_person_when_tests_weaken", "false"),
+            ("require_person_when_check_definitions_change", "true"),
+            ("require_person_when_tests_weaken", "true"),
             ("min_grade_for_security_review", "T3"),
         ] {
             let (status, _, _) = state.command(&["set", key, value]);
@@ -284,8 +303,6 @@ mod tests {
             );
         }
         expected.allowed_egress_hosts = vec!["example.com".into(), "api.openai.com".into()];
-        expected.require_person_when_check_definitions_change = false;
-        expected.require_person_when_tests_weaken = false;
         assert_eq!(
             load(&state.0).expect("all personal choices are saved"),
             expected,
@@ -313,7 +330,9 @@ mod tests {
             ("confine_agents", "yes"),
             ("allowed_egress_hosts", "api.openai.com,"),
             ("require_person_when_check_definitions_change", "no"),
+            ("require_person_when_check_definitions_change", "false"),
             ("require_person_when_tests_weaken", "no"),
+            ("require_person_when_tests_weaken", "false"),
             ("min_grade_for_security_review", "T0"),
             ("min_grade_for_security_review", "T1"),
             ("min_grade_for_security_review", "T2"),
@@ -385,6 +404,80 @@ mod tests {
                 std::io::ErrorKind::InvalidData,
                 "malformed and invalid policies are reported as damaged data"
             );
+        }
+    }
+
+    #[test]
+    fn turning_off_the_person_gate_is_refused_with_a_message_naming_the_key() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let (status, _, diagnostic) = state.command(&["set", key, "false"]);
+            assert_eq!(status, crate::EXIT_USAGE, "{key}=false is refused");
+            assert!(
+                diagnostic.contains(key) && diagnostic.contains("always stops for a person"),
+                "the refusal says the gate cannot be lifted: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_policy_file_that_switched_the_person_gate_off_is_refused_not_obeyed() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let mut policy = serde_json::json!({
+                "revision_limit": 2, "allowed_egress_hosts": [], "confine_agents": true,
+                "min_grade_for_security_review": "T3",
+                "require_person_when_check_definitions_change": true,
+                "require_person_when_tests_weaken": true,
+            });
+            policy[key] = serde_json::json!(false);
+            std::fs::write(state.0.join(POLICY_FILE), policy.to_string())
+                .expect("the scenario installs an older policy");
+            let error = load(&state.0).expect_err("a policy that lifts the gate is not admitted");
+            assert!(
+                error.to_string().contains(key),
+                "the error names {key}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_policy_command_explains_an_older_file_that_switched_the_gate_off() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let mut policy = serde_json::json!({
+                "revision_limit": 2, "allowed_egress_hosts": [], "confine_agents": true,
+                "min_grade_for_security_review": "T3",
+                "require_person_when_check_definitions_change": true,
+                "require_person_when_tests_weaken": true,
+            });
+            policy[key] = serde_json::json!(false);
+            std::fs::write(state.0.join(POLICY_FILE), policy.to_string())
+                .expect("the scenario installs an older policy");
+            for words in [vec!["show"], vec!["set", "revision_limit", "3"]] {
+                let (status, out, diagnostic) = state.command(&words);
+                assert_eq!(
+                    status,
+                    crate::EXIT_FAILURE,
+                    "{words:?} refuses the old file"
+                );
+                assert!(out.is_empty(), "nothing is printed as a policy: {out:?}");
+                assert!(
+                    diagnostic.contains(key)
+                        && diagnostic.contains(POLICY_FILE)
+                        && diagnostic.contains("repair:"),
+                    "{words:?} names {key}, the file and the repair: {diagnostic}"
+                );
+            }
         }
     }
 

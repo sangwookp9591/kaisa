@@ -303,6 +303,12 @@ fn watch_shows_each_attempts_state_from_the_ledger() {
         watched.status.success() && line.contains("exited") && line.contains("reclaimed"),
         "the finished attempt is listed as exited and reclaimed: {view:?}"
     );
+    let header = view.lines().next().expect("watch header");
+    assert_eq!(
+        header.find("EXECUTION"),
+        line.find("exited"),
+        "long attempt and task IDs must not move states out of their header columns: {view:?}"
+    );
 }
 
 /// Runs `kaisa agent <args>` against `state`.
@@ -883,6 +889,11 @@ fn a_trial_run_is_labelled() {
         stdout.contains("trial (T16.0)") && stdout.contains("api.anthropic.com"),
         "the person is told this is a trial and what Claude Code may reach: {stdout:?}"
     );
+    #[cfg(target_os = "macos")]
+    assert!(
+        stdout.contains("confined Claude agent can reach the login keychain"),
+        "the macOS trial must disclose its agent-only keychain exception: {stdout:?}"
+    );
 }
 
 /// Exit status of a run that waits for a person (CI contract code 3).
@@ -892,7 +903,7 @@ const USAGE_ERROR: i32 = 64;
 /// How long a person's Decision lasts in these tests: one hour, in milliseconds.
 const DECISION_LIFETIME_MS: u64 = 60 * 60 * 1000;
 /// Every capability a run without an OS sandbox is missing, as a person types them.
-const EVERY_CAPABILITY: &str = "write,tcp,udp,descendants";
+const EVERY_CAPABILITY: &str = "write,tcp,udp,state-read,descendants";
 
 /// Milliseconds since the Unix epoch, the ledger's clock.
 fn now_ms() -> u64 {
@@ -1361,8 +1372,11 @@ fn a_claude_reduced_developer_keeps_the_local_first_pass_confined() {
     const FIRST_PASS_INDEX: usize = 1;
     let first_pass = &outcome.attempts[FIRST_PASS_INDEX];
     assert!(
-        first_pass.confined && first_pass.admitted_on == kaisa_domain::ReducedModeBasis::None,
-        "the first pass must use its own loopback-only sandbox and need no Claude permission"
+        first_pass.missing == kaisa_domain::platform_limits()
+            && first_pass.admitted_on
+                == kaisa_domain::ReducedModeBasis::None
+                    .for_missing(kaisa_domain::platform_limits()),
+        "the first pass must disclose only platform limits under its own loopback-only sandbox, without Claude permission"
     );
 }
 
@@ -1541,5 +1555,252 @@ printf '%s\n' '{requests}' | "$bridge" mcp --attempt "$(dirname "$config")"
         String::from_utf8_lossy(&attributes.stdout),
         ATTRIBUTES,
         "both OS-confined exec and broker fs_write must leave root attributes unchanged"
+    );
+}
+
+/// A run of the scripted agent that writes `src/notes.md` in `directory`.
+fn a_scripted_run_in(directory: &Path, state: &Path) -> Output {
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            "src/notes.md",
+            GOAL,
+        ])
+        .current_dir(directory)
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa runs")
+}
+
+/// Exit status of a command that is documented but not built yet.
+const EXIT_NOT_IMPLEMENTED: i32 = 2;
+/// Exit status of a command line the CLI cannot understand.
+const EXIT_USAGE: i32 = 64;
+
+/// The scripted agent, for tests whose guard must hold even if it regresses: a launch then
+/// starts this program, never a real provider.
+fn the_scripted_agent() -> String {
+    PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `kaisa watch` against `state`.
+fn the_user_watches(state: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa watch runs")
+}
+
+/// The names in `directory`, sorted: what a user would see with `ls -a`.
+fn file_names_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .expect("the state directory is readable")
+        .map(|entry| {
+            entry
+                .expect("a readable entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A state directory left by one finished scripted run: the ledger is closed and checkpointed.
+fn a_state_after_one_finished_run(bench: &Workbench) -> PathBuf {
+    let state: PathBuf = bench.base.join("state");
+    a_scripted_run_in(&bench.base.join("repo"), &state);
+    state
+}
+
+#[test]
+fn watching_a_closed_ledger_leaves_the_state_directory_and_database_unchanged() {
+    let bench = Workbench::new("watch-readonly");
+    let state: PathBuf = a_state_after_one_finished_run(&bench);
+    let database: PathBuf = state.join("kaisa.db");
+    let files_before: Vec<String> = file_names_in(&state);
+    let bytes_before: Vec<u8> = std::fs::read(&database).expect("the run created the ledger");
+
+    let watched: Output = the_user_watches(&state);
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("exited"),
+        "watch still shows the attempts: {:?}",
+        String::from_utf8_lossy(&watched.stdout)
+    );
+    assert_eq!(
+        file_names_in(&state),
+        files_before,
+        "watch creates no -wal or -shm sidecar: read-only commands write no state (NFR-03)"
+    );
+    assert_eq!(
+        std::fs::read(&database).expect("the ledger is still there"),
+        bytes_before,
+        "watch only reads: kaisa.db is byte for byte what the run left"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn watching_from_a_read_only_state_directory_still_shows_the_attempts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const READ_ONLY_DIRECTORY: u32 = 0o500;
+    const WRITABLE_DIRECTORY: u32 = 0o700;
+    let bench = Workbench::new("watch-readonly-dir");
+    let state: PathBuf = a_state_after_one_finished_run(&bench);
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(READ_ONLY_DIRECTORY))
+        .expect("the directory can be made read-only");
+
+    let watched: Output = the_user_watches(&state);
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(WRITABLE_DIRECTORY))
+        .expect("the directory can be made writable again for cleanup");
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("exited"),
+        "watch works where it cannot write: {:?} {:?}",
+        String::from_utf8_lossy(&watched.stdout),
+        String::from_utf8_lossy(&watched.stderr)
+    );
+}
+
+#[test]
+fn watch_in_an_empty_state_directory_creates_no_ledger() {
+    let bench = Workbench::new("watch-empty");
+    let state: PathBuf = bench.base.join("state");
+    std::fs::create_dir_all(&state).expect("writable temp dir");
+
+    let watched: Output = the_user_watches(&state);
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("nothing"),
+        "an empty state reads as no attempts yet"
+    );
+    assert!(
+        !state.join("kaisa.db").exists(),
+        "watching must not create kaisa.db"
+    );
+}
+
+/// A command line the user might type, and the status it must get before any agent runs.
+struct RefusedCommand {
+    scenario: &'static str,
+    words: &'static [&'static str],
+    status: i32,
+}
+
+const REFUSED_COMMANDS: [RefusedCommand; 9] = [
+    RefusedCommand {
+        scenario: "the planner handoff the docs name",
+        words: &["handoff", "41"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "garbage collection",
+        words: &["gc", "--dry-run"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "retaining an attempt",
+        words: &["retain", "41"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "the advanced run command",
+        words: &["run", "--issue", "123"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "verifying the audit chain",
+        words: &["audit", "verify"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "handing an attempt back",
+        words: &["handback", "44.3"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "a fleet option kaisa does not have",
+        words: &["--agents", "a,b", "fix"],
+        status: EXIT_USAGE,
+    },
+    RefusedCommand {
+        scenario: "a machine-output option kaisa does not have",
+        words: &["--json", "fix"],
+        status: EXIT_USAGE,
+    },
+    RefusedCommand {
+        scenario: "a budget option kaisa does not have",
+        words: &["--budget", "5", "fix"],
+        status: EXIT_USAGE,
+    },
+];
+
+#[test]
+fn words_the_docs_name_as_commands_and_unknown_options_never_start_a_run() {
+    let bench = Workbench::new("no-paid-run");
+    let state: PathBuf = bench.base.join("state");
+    let fake_agent: String = the_scripted_agent();
+
+    for refused in REFUSED_COMMANDS {
+        // The scripted agent is named so that a regression launches it, never a real provider.
+        let ran: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+            .args(refused.words)
+            .args(["--agent-program", &fake_agent])
+            .current_dir(bench.base.join("repo"))
+            .env("KAISA_STATE_DIR", &state)
+            .output()
+            .expect("kaisa runs");
+
+        assert_eq!(
+            ran.status.code(),
+            Some(refused.status),
+            "{}: `kaisa {:?}` is refused before any agent runs",
+            refused.scenario,
+            refused.words
+        );
+    }
+    assert!(
+        !state.join("kaisa.db").exists(),
+        "no run was admitted, so no ledger was created"
+    );
+}
+
+#[test]
+fn a_run_below_the_repository_root_names_the_repository_it_uses() {
+    let bench = Workbench::new("subdirectory");
+    let repository: PathBuf = bench.base.join("repo");
+    let state: PathBuf = bench.base.join("state");
+
+    let from_subdirectory: Output = a_scripted_run_in(&repository.join("src"), &state);
+    let from_root: Output = a_scripted_run_in(&repository, &state);
+    let notice = |output: &Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.contains("using the git repository at"))
+            .map(str::to_owned)
+    };
+
+    let named = notice(&from_subdirectory).expect("the subdirectory run names the repository");
+    assert!(
+        named.ends_with("repo"),
+        "the line names the repository root: {named:?}"
+    );
+    assert_eq!(
+        notice(&from_root),
+        None,
+        "a run at the root has nothing to announce"
     );
 }

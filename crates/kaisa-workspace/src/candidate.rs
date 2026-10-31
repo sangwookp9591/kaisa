@@ -56,6 +56,34 @@ const CHECK_DEFINITION_FILES: [&str; 17] = [
     "tsconfig.json",
 ];
 
+/// CI configuration file names, matched anywhere in the tree: a pipeline decides what counts as
+/// a passing build as much as a test script does.
+const CI_CONFIG_FILES: [&str; 5] = [
+    ".gitlab-ci.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    ".travis.yml",
+    "Jenkinsfile",
+];
+
+/// Whether `path` (repository-relative, `/`-separated) defines what the project's checks run:
+/// a build or test configuration file by name, or a CI pipeline by name or directory.
+fn is_check_definition(path: &str) -> bool {
+    let file: &str = path.rsplit('/').next().unwrap_or(path);
+    if CHECK_DEFINITION_FILES.contains(&file) {
+        return true;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let directories = &parts[..parts.len() - 1];
+    // `config.yml` only names a pipeline inside `.circleci/`; elsewhere it is ordinary data.
+    CI_CONFIG_FILES.contains(&file)
+        || (file == "config.yml" && directories.last() == Some(&".circleci"))
+        || directories
+            .windows(2)
+            .any(|pair| pair == [".github", "workflows"])
+        || directories.contains(&".buildkite")
+}
+
 /// The check-definition files that differ between `base` and `candidate`, in git's order.
 ///
 /// # Errors
@@ -66,25 +94,33 @@ pub fn changed_check_definitions(
     base: &str,
     candidate: &Candidate,
 ) -> Result<Vec<String>, GitError> {
-    let names: String = git_text(
+    // NUL-delimited: without -z Git quotes non-ASCII and control-character paths
+    // (`".github/workflows/\352..."`), which would no longer match a directory name.
+    let names: Vec<u8> = run_git(
         repository,
         &[
             "diff",
             "--name-only",
             "--no-renames",
+            "-z",
             base,
             &candidate.commit,
             "--",
         ],
     )?;
-    Ok(names
-        .lines()
-        .filter(|path| {
-            let file: &str = path.rsplit('/').next().unwrap_or(path);
-            CHECK_DEFINITION_FILES.contains(&file)
-        })
-        .map(str::to_owned)
+    Ok(split_nul_paths(&names)
+        .into_iter()
+        .filter(|path| is_check_definition(path))
         .collect())
+}
+
+/// Splits Git's `-z` output into exact paths, in Git's order.
+fn split_nul_paths(output: &[u8]) -> Vec<String> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
 }
 
 /// Deterministic, conservative signals that a candidate weakened its tests.
@@ -116,11 +152,20 @@ pub fn weakened_tests(
     }
     let paths: Vec<_> = changed_paths(repository, &base_tree, candidate)?
         .into_iter()
-        .filter(|path| supported_source(path) || is_test_file(path))
+        .filter(|path| supported_source(path) || is_test_file(path) || is_test_script_file(path))
         .collect();
     let sources = committed_sources(repository, &base_tree, &candidate.tree, &paths)?;
     let mut findings = Vec::new();
     for (path, pair) in paths.iter().zip(sources.as_chunks::<2>().0) {
+        if is_test_script_file(path) {
+            compare_test_script(
+                path,
+                pair[0].as_deref().unwrap_or_default(),
+                pair[1].as_deref().unwrap_or_default(),
+                &mut findings,
+            );
+            continue;
+        }
         if pair[0].is_some() && pair[1].is_none() && is_test_file(path) {
             findings.push(format!("{path}: test file deleted (1 -> 0)"));
         }
@@ -133,6 +178,81 @@ pub fn weakened_tests(
     }
     cache.insert(key, findings.clone());
     Ok(findings)
+}
+
+/// Files whose test commands are scanned for a pass-regardless signal.
+fn is_test_script_file(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    matches!(file, "package.json" | "Makefile" | "justfile" | "tox.ini")
+}
+
+/// Suffixes that make a test command succeed whatever its tests did, or whatever it found.
+const PASS_REGARDLESS: [&str; 6] = [
+    "--passWithNoTests",
+    "--pass-with-no-tests",
+    "--exit-zero",
+    "|| true",
+    "|| exit 0",
+    "||true",
+];
+
+/// Occurrences of `signal` in the commands of `script` that run tests. Entries are lines and,
+/// within a minified JSON object, quote-comma separated members. A line also counts when it is
+/// an indented recipe line under a test target or section (Makefile `test:`, justfile `test:`,
+/// tox `[testenv]` `commands`), so `test:\n\tjest || true` is recognised while an unrelated
+/// command that ends in `|| true` elsewhere is not mistaken for a weakened test.
+fn pass_regardless_count(script: &str, signal: &str) -> usize {
+    let script = script.to_ascii_lowercase();
+    let signal = signal.to_ascii_lowercase();
+    // `section` is the latest `[ini section]` or `target:` header; `commands` is true after a
+    // tox `commands =` key, whose continuation lines are indented.
+    let (mut section_tests, mut target_tests) = (false, false);
+    let mut total = 0;
+    for line in script.lines() {
+        let trimmed = line.trim();
+        let indented = line.starts_with(['\t', ' ']);
+        if !indented && !trimmed.is_empty() {
+            let names_tests = |text: &str| text.contains("test") || text.contains("mocha");
+            if trimmed.starts_with('[') {
+                // `[testenv]` is tox's default environment, which runs the tests; in
+                // `[testenv:lint]` only the part after the colon says what it runs.
+                let bare_testenv = trimmed == "[testenv]";
+                let named = trimmed.strip_prefix("[testenv:").unwrap_or(trimmed);
+                section_tests = bare_testenv || names_tests(named);
+                target_tests = false;
+            } else if trimmed.starts_with("commands") {
+                target_tests = section_tests;
+            } else {
+                // `test:` / `test-all: deps` (Makefile, justfile): the name before the colon.
+                let name = trimmed.split(':').next().unwrap_or_default();
+                target_tests = trimmed.contains(':') && names_tests(name);
+            }
+        }
+        for entry in line.split("\",") {
+            if target_tests || entry.contains("test") || entry.contains("mocha") {
+                total += entry.matches(&signal).count();
+            }
+        }
+    }
+    total
+}
+
+/// Reports each pass-regardless signal that `after` has more of than `before`, so that a
+/// candidate which lets an empty or failing test run succeed is named rather than reported
+/// only as a generic changed file.
+fn compare_test_script(path: &str, before: &str, after: &str, findings: &mut Vec<String>) {
+    for signal in PASS_REGARDLESS {
+        let (old, new) = (
+            pass_regardless_count(before, signal),
+            pass_regardless_count(after, signal),
+        );
+        if new > old {
+            findings.push(format!(
+                "{path}: `{signal}` added to a test command ({old} -> {new}); \
+                 the tests can no longer fail the build"
+            ));
+        }
+    }
 }
 
 fn is_test_file(path: &str) -> bool {
@@ -895,6 +1015,182 @@ mod tests {
             changed,
             vec!["package.json".to_owned()],
             "a changed test script is named; ordinary source changes are not"
+        );
+    }
+
+    fn check_definitions_changed_by(path: &str) -> Vec<String> {
+        let repository: TemporaryRepository = a_repository_with_one_commit_on_main();
+        let base: String =
+            super::git_text(repository.path(), &["rev-parse", "HEAD"]).expect("the base exists");
+        repository.commit_file(path, "changed: true\n", "edit");
+        let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
+        changed_check_definitions(repository.path(), &base, &candidate).expect("compared")
+    }
+
+    #[test]
+    fn a_candidate_that_only_edits_ci_configuration_is_named_as_changing_check_definitions() {
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/nested/release.yaml",
+            ".gitlab-ci.yml",
+            ".circleci/config.yml",
+            "azure-pipelines.yml",
+            "Jenkinsfile",
+            "services/api/Jenkinsfile",
+            ".buildkite/pipeline.yml",
+            ".buildkite/steps/test.sh",
+            "bitbucket-pipelines.yml",
+            ".travis.yml",
+        ] {
+            assert_eq!(
+                check_definitions_changed_by(path),
+                vec![path.to_owned()],
+                "{path} decides what a passing build is"
+            );
+        }
+    }
+
+    #[test]
+    fn files_that_only_look_like_ci_configuration_are_not_check_definitions() {
+        for path in [
+            "docs/workflows/ci.yml",
+            ".github/ISSUE_TEMPLATE/bug.yml",
+            "config.yml",
+            "app/config.yml",
+            "notes/Jenkinsfile.md",
+        ] {
+            assert!(
+                check_definitions_changed_by(path).is_empty(),
+                "{path} does not define the project's checks"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ci_file_whose_name_git_would_quote_is_still_a_check_definition() {
+        for path in [
+            ".github/workflows/검사.yml",
+            ".github/workflows/caf\u{e9}.yml",
+            ".github/workflows/tab\there.yml",
+            ".buildkite/\"quoted\".yml",
+        ] {
+            #[cfg(not(unix))]
+            if path.contains(['\t', '"']) {
+                continue;
+            }
+            assert_eq!(
+                check_definitions_changed_by(path),
+                vec![path.to_owned()],
+                "{path:?} is a CI definition under Git's default path quoting"
+            );
+        }
+    }
+
+    #[test]
+    fn nul_delimited_paths_keep_their_exact_bytes() {
+        assert_eq!(
+            super::split_nul_paths("a b.yml\0 lead\nnl.yml\0검사.yml\0".as_bytes()),
+            vec!["a b.yml", " lead\nnl.yml", "검사.yml"],
+            "no trimming, quoting or newline splitting"
+        );
+    }
+
+    #[test]
+    fn a_swallowed_failure_in_a_multiline_test_recipe_is_a_weakened_signal() {
+        for (path, before, after) in [
+            ("Makefile", "test:\n\tjest\n", "test:\n\tjest || true\n"),
+            ("justfile", "test:\n    jest\n", "test:\n    jest || true\n"),
+            (
+                "tox.ini",
+                "[testenv]\ncommands =\n    pytest\n",
+                "[testenv]\ncommands =\n    pytest || true\n",
+            ),
+            (
+                "Makefile",
+                "check: build\n\tcargo x\n",
+                "check: build\n\tcargo x\n.PHONY: all\ntest-unit:\n\tgo run ./... --exit-zero\n",
+            ),
+        ] {
+            let findings = weakening_for(path, before, Some(after));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.starts_with(&format!("{path}:"))),
+                "{path} recipe now swallows test failures: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_swallowed_failure_in_a_non_test_recipe_is_not_a_weakened_signal() {
+        for (path, before, after) in [
+            (
+                "Makefile",
+                "clean:\n\trm -rf dist\n",
+                "clean:\n\trm -rf dist || true\n",
+            ),
+            (
+                "tox.ini",
+                "[testenv:lint]\ncommands =\n    flake8\n",
+                "[testenv:lint]\ncommands =\n    flake8 || true\n",
+            ),
+        ] {
+            assert!(
+                weakening_for(path, before, Some(after)).is_empty(),
+                "{path}: only recipes that run tests can weaken them"
+            );
+        }
+    }
+
+    fn script_weakening(before: &str, after: &str) -> Vec<String> {
+        weakening_for("package.json", before, Some(after))
+    }
+
+    #[test]
+    fn adding_pass_with_no_tests_or_a_swallowed_exit_to_a_test_script_is_a_weakened_signal() {
+        let before = r#"{"scripts":{"test":"jest"}}"#;
+        for (after, signal) in [
+            (
+                r#"{"scripts":{"test":"jest --passWithNoTests"}}"#,
+                "--passWithNoTests",
+            ),
+            (
+                r#"{"scripts":{"test":"vitest run --pass-with-no-tests"}}"#,
+                "--pass-with-no-tests",
+            ),
+            (r#"{"scripts":{"test":"jest || true"}}"#, "|| true"),
+            (
+                r#"{"scripts":{"test":"pytest --exit-zero"}}"#,
+                "--exit-zero",
+            ),
+        ] {
+            let findings = script_weakening(before, after);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.starts_with("package.json:") && finding.contains(signal)),
+                "{after} makes the tests unable to fail the build: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_test_script_that_keeps_failing_builds_or_swallows_an_unrelated_command_is_not_weakening() {
+        assert!(
+            script_weakening(
+                r#"{"scripts":{"test":"jest","clean":"rm -rf dist"}}"#,
+                r#"{"scripts":{"test":"jest --coverage","clean":"rm -rf dist || true"}}"#,
+            )
+            .is_empty(),
+            "only commands that run tests can weaken them"
+        );
+        assert!(
+            script_weakening(
+                r#"{"scripts":{"test":"jest --passWithNoTests"}}"#,
+                r#"{"scripts":{"test":"jest --passWithNoTests","lint":"eslint ."}}"#,
+            )
+            .is_empty(),
+            "a signal that was already there is not new"
         );
     }
 

@@ -172,6 +172,16 @@ fn flag_present(args: &[String], name: &str) -> bool {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A read-only hostile holder: models an orphaned agent taking an advisory lock.
+    if let Some(path) = flag(&args, "--fake-hold-lock") {
+        let lock = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        lock.lock().map_err(|error| error.to_string())?;
+        let ready = flag(&args, "--lock-ready").ok_or("missing --lock-ready")?;
+        std::fs::write(ready, "holding").map_err(|error| error.to_string())?;
+        std::thread::sleep(HANG);
+        return Ok(());
+    }
+
     // Started with Codex's own arguments (`exec --json ...`), it acts as Codex would: it reads
     // the plain pack and writes `CODEX_WRITES` into its working directory.
     if args.first().map(String::as_str) == Some("exec") {

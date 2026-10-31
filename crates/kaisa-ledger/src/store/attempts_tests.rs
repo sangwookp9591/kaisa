@@ -155,3 +155,37 @@ fn a_reclaimed_attempt_is_not_unfinished() {
         "a finished, reclaimed attempt needs no recovery, got {unfinished:?}"
     );
 }
+
+#[test]
+fn a_read_only_open_beside_a_live_writer_sees_its_commits_and_creates_no_file() {
+    let scratch: ScratchLedger = a_ledger_path_that_does_not_exist_yet();
+    let mut writer: EventStore = EventStore::open(&scratch.path()).expect("the writer opens");
+    the_scheduler_admits_attempt_41a(&mut writer);
+    let directory = scratch
+        .path()
+        .parent()
+        .expect("a ledger has a directory")
+        .to_owned();
+    let files_while_writer_lives: Vec<_> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+
+    let reader: EventStore = EventStore::open_read_only(&scratch.path()).expect("the reader opens");
+    let attempts: Vec<AttemptRow> = reader.attempts_from_log().expect("folds");
+
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the live writer's commit sits in the WAL and a plain read-only open still sees it"
+    );
+    let files_after_read: Vec<_> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        files_after_read.len(),
+        files_while_writer_lives.len(),
+        "reading beside a writer adds no file to the state directory"
+    );
+}

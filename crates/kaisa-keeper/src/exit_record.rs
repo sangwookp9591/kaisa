@@ -13,6 +13,8 @@ const HEADER: &str = "kaisa-exit-record v1";
 const END_MARKER: &str = "end";
 /// Text of [`ExitStatus::Terminated`] in the file.
 const TERMINATED: &str = "terminated";
+/// A proven non-start, distinct from a process exit code or external termination.
+const FAILED_TO_START: &str = "failed-to-start";
 /// Prefix of an exit code in the file, as in `code:0`.
 const CODE_PREFIX: &str = "code:";
 
@@ -60,6 +62,7 @@ impl ExitRecord {
         let status: String = match self.status {
             ExitStatus::Code(code) => format!("{CODE_PREFIX}{code}"),
             ExitStatus::Terminated => TERMINATED.to_owned(),
+            ExitStatus::FailedToStart => FAILED_TO_START.to_owned(),
         };
         format!(
             "{HEADER}\nattempt={}\nincarnation={}\nstatus={status}\nfinished_at_ms={}\n{END_MARKER}\n",
@@ -115,6 +118,9 @@ fn parse_status(text: &str) -> Result<ExitStatus, RecordError> {
     if text == TERMINATED {
         return Ok(ExitStatus::Terminated);
     }
+    if text == FAILED_TO_START {
+        return Ok(ExitStatus::FailedToStart);
+    }
     text.strip_prefix(CODE_PREFIX)
         .and_then(|code| code.parse().ok())
         .map(ExitStatus::Code)
@@ -160,6 +166,16 @@ mod tests {
             ExitRecord::decode(&failed.encode()),
             Ok(failed),
             "what the keeper writes the daemon must read back unchanged"
+        );
+    }
+
+    #[test]
+    fn a_proven_non_start_round_trips_without_inventing_a_process_exit_code() {
+        let not_started = attempt_41a_exited_with(ExitStatus::FailedToStart);
+        assert_eq!(
+            ExitRecord::decode(&not_started.encode()),
+            Ok(not_started),
+            "recovery must retain proof that process creation failed"
         );
     }
 

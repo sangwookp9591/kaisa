@@ -106,6 +106,43 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
+    #[cfg(unix)]
+    {
+        let ledger =
+            kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("ledger opens");
+        let events = ledger
+            .read_from(kaisa_domain::Sequence::FIRST)
+            .expect("admission can be read");
+        let event = events
+            .iter()
+            .find(|event| event.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted)
+            .expect("admission was recorded");
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.recorded.event.payload).expect("admission is JSON");
+        let containment = &payload["containment"];
+        assert_eq!(
+            containment["admission"], "reduced",
+            "a Unix sandbox must not promise complete cleanup of reparented descendants"
+        );
+        assert_eq!(
+            containment["basis"], "platform-limit",
+            "the ledger identifies the documented automatic reduced policy"
+        );
+        assert!(
+            containment["missing"]
+                .as_array()
+                .expect("capability list")
+                .iter()
+                .any(|code| code == "descendants"),
+            "the specific descendant limit is visible in the admission record"
+        );
+        assert!(
+            !outcome.confined
+                && outcome.summary().contains("platform-limit")
+                && outcome.summary().contains("descendants"),
+            "the user-facing result discloses the same reduced guarantee as the ledger"
+        );
+    }
     let preserved_notes: String = git(
         &bench.repository(),
         &["show", &format!("{}:{NOTES}", outcome.branch)],
@@ -144,6 +181,79 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         !recorded_identity.is_empty(),
         "the agent's identity was recorded so a crash of Kaisa can be recovered from"
     );
+}
+
+/// A fake CLI renamed to select the Claude adapter; no real provider process is started.
+#[cfg(target_os = "macos")]
+fn a_scripted_claude_adapter(bench: &Workbench) -> PathBuf {
+    let program = bench.base.join("claude");
+    std::fs::copy(the_fake_agent(), &program).expect("copy only the fake agent, never real Claude");
+    program
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_claude_adapter_records_its_login_keychain_exception_in_the_ledger() {
+    const SUCCESS: ProcessExit = ProcessExit::Code(0);
+    let bench = Workbench::new("claude-keychain-notice");
+    let program = a_scripted_claude_adapter(&bench);
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: program.clone(),
+        args: vec![
+            "--mcp-config".into(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".into(),
+            NOTES.into(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+    let outcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        base: "HEAD",
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        role: kaisa_domain::Role::Developer,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+        local_model_port: None,
+        observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    })
+    .expect("the scripted Claude adapter runs confined");
+    assert_eq!(
+        outcome.exit,
+        Some(SUCCESS),
+        "the fake adapter must complete"
+    );
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("ledger");
+    let events = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("ledger events");
+    let notices: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|event| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.recorded.event.payload).expect("JSON event");
+            (payload.get("login_keychain_access") == Some(&serde_json::Value::Bool(true)))
+                .then_some(payload)
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|payload| payload["notice"]
+            .as_str()
+            .is_some_and(|text| text.contains("login keychain"))),
+        "the ledger must disclose the confined agent's keychain exception"
+    );
+    ledger
+        .rebuild_attempts()
+        .expect("the notice must preserve the state event schema");
 }
 
 /// Where the probe tries to write around the broker, relative to the agent's worktree.
@@ -200,7 +310,10 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
     )
     .unwrap_or_default();
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        !outcome
+            .missing
+            .contains(&kaisa_domain::ContainmentCapability::WriteConfinement)
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the probe's own write was refused, so the agent went on through the broker: \
          {outcome:?}; agent said {transcript:?}"
     );
@@ -262,7 +375,10 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
     .expect("the goal runs");
 
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        !outcome
+            .missing
+            .contains(&kaisa_domain::ContainmentCapability::TcpEgress)
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the agent reached its egress broker, was refused an unlisted host, and could not \
          connect around it: {outcome:?}"
     );
@@ -667,6 +783,16 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
     let state: PathBuf = bench.state();
     std::fs::create_dir_all(state.join("worktrees")).expect("writable");
     let attempt = "att_interrupted";
+    let attempt_directory = state.join("attempts").join(attempt);
+    std::fs::create_dir_all(&attempt_directory).expect("attempt directory prepared");
+    #[cfg(windows)]
+    let owner_directory = state.join("owners").join(attempt);
+    #[cfg(not(windows))]
+    let owner_directory = attempt_directory;
+    std::fs::create_dir_all(&owner_directory).expect("owner directory prepared");
+    let owner = std::fs::File::create(owner_directory.join("owner.lock"))
+        .expect("the attempt has an owner lock before admission");
+    owner.lock().expect("the fixture owns its attempt");
     let mut ledger =
         kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
     ledger
@@ -686,6 +812,7 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
         &state.join("worktrees").join(attempt),
     )
     .expect("the worktree is created");
+    drop(owner); // As when the OS releases a killed owner's handle.
 
     let recovered =
         kaisa_daemon::recover_abandoned(&bench.repository(), &state).expect("recovery runs");
@@ -800,7 +927,11 @@ fn a_local_model_drives_a_confined_attempt_through_the_broker() {
     );
 
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        outcome.missing == kaisa_domain::platform_limits()
+            && outcome.admitted_on
+                == kaisa_domain::ReducedModeBasis::None
+                    .for_missing(kaisa_domain::platform_limits())
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the local model finished inside the sandbox: {outcome:?}"
     );
     assert_eq!(

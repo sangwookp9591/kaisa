@@ -13,11 +13,11 @@ mod transcript;
 mod usage;
 
 pub use claude::{
-    ClaudeLaunch, claude_brokered_argv, claude_final_answer, claude_permission_denials,
-    first_message,
+    ClaudeLaunch, claude_brokered_argv, claude_environment, claude_final_answer,
+    claude_permission_denials, first_message,
 };
 pub use codex::{
-    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_final_answer,
+    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_environment, codex_final_answer,
     codex_observed_argv, codex_trust_mode,
 };
 pub use local_loop::{
@@ -27,3 +27,29 @@ pub use local_loop::{
 pub use openai_local::{ChatMessage, LocalEndpoint, LocalModelError, MAX_RESPONSE_SIZE, chat};
 pub use transcript::final_answer;
 pub use usage::{Usage, parse_usage};
+
+/// Whether the adapter requires the login keychain for its subscription credential.
+/// Local models and other CLI adapters do not receive this exception.
+#[must_use]
+pub fn needs_keychain_login(program: &std::path::Path) -> bool {
+    program.file_stem().is_some_and(|name| name == "claude")
+}
+
+#[cfg(test)]
+mod capability_tests {
+    #[test]
+    fn only_the_claude_adapter_requests_login_keychain_access() {
+        for (program, expected) in [
+            ("/usr/local/bin/claude", true),
+            ("codex", false),
+            ("kaisa-fake-agent", false),
+            ("kaisa", false),
+        ] {
+            assert_eq!(
+                super::needs_keychain_login(std::path::Path::new(program)),
+                expected,
+                "the adapter capability must be explicit for {program}"
+            );
+        }
+    }
+}

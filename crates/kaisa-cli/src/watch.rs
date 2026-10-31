@@ -19,8 +19,9 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         writeln!(out, "nothing has run yet")?;
         return Ok(crate::EXIT_SUCCESS);
     }
-    let read = EventStore::open(&database).and_then(|mut ledger| {
-        let rows: Vec<AttemptRow> = ledger.all_attempts()?;
+    let read = EventStore::open_read_only(&database).and_then(|ledger| {
+        // Watching only reads: the attempts are folded in memory, never written back (NFR-03).
+        let rows: Vec<AttemptRow> = ledger.attempts_from_log()?;
         let usage: Vec<Option<kaisa_ledger::AttemptUsage>> = rows
             .iter()
             .map(|row| ledger.usage_for(&row.attempt))
@@ -34,9 +35,21 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
             return Ok(crate::EXIT_FAILURE);
         }
     };
+    let attempt_width = rows
+        .iter()
+        .map(|row| row.attempt.as_str().len())
+        .max()
+        .unwrap_or_default()
+        .max("ATTEMPT".len());
+    let task_width = rows
+        .iter()
+        .map(|row| row.task.as_str().len())
+        .max()
+        .unwrap_or_default()
+        .max("TASK".len());
     writeln!(
         out,
-        "{:<24} {:<24} {:<16} {:<12} {:<14} COST",
+        "{:<attempt_width$} {:<task_width$} {:<16} {:<12} {:<14} COST",
         "ATTEMPT", "TASK", "EXECUTION", "CLEANUP", "TOKENS"
     )?;
     let total: f64 = usage
@@ -64,7 +77,7 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         };
         writeln!(
             out,
-            "{:<24} {:<24} {:<16} {:<12} {:<14} {}",
+            "{:<attempt_width$} {:<task_width$} {:<16} {:<12} {:<14} {}",
             row.attempt.as_str(),
             row.task.as_str(),
             row.execution.code(),
