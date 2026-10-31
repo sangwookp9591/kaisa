@@ -396,9 +396,13 @@ fn run_goal_inner(
 
     let profile: ProjectProfile =
         derive_profile(request.repository).map_err(at("deriving the project profile"))?;
-    let recalled: Vec<(ContentDigest, String)> =
-        crate::recall::relevant_lessons(&ledger, request.goal, request.write_set)
-            .map_err(at("recalling lessons"))?;
+    let recalled: Vec<(ContentDigest, String)> = crate::recall::relevant_lessons(
+        &ledger,
+        crate::learn::repository_identity(request.repository).as_deref(),
+        request.goal,
+        request.write_set,
+    )
+    .map_err(at("recalling lessons"))?;
     let lesson_texts: Vec<String> = recalled.iter().map(|(_, text)| text.clone()).collect();
     let pack: ContextPack = ContextPack::assemble(PackInputs {
         spec: request.goal,
