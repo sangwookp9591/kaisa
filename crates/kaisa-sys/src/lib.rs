@@ -12,6 +12,8 @@ mod conpty;
 mod console_process;
 #[cfg(windows)]
 mod control_pipe;
+#[cfg(any(unix, windows))]
+mod hard_links;
 mod identity;
 #[cfg(windows)]
 mod job;
@@ -39,6 +41,8 @@ pub use appcontainer::{AppContainerProfile, CapabilitySid, ContainerAccess};
 pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
+#[cfg(any(unix, windows))]
+pub use hard_links::hard_link_count;
 pub use identity::ProcessIdentity;
 #[cfg(target_os = "linux")]
 pub use landlock::{LandlockRuleset, landlock_abi, udp_filter_supported, write_ruleset};

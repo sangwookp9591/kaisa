@@ -115,14 +115,22 @@ impl AppContainerProfile {
     ///
     /// Returns an error if the text is not an AppContainer SID or Windows rejects it.
     pub fn from_sid_string(text: &str) -> io::Result<Self> {
-        if !text.starts_with("S-1-15-2-")
-            || !text
-                .chars()
-                .all(|character| character.is_ascii_digit() || matches!(character, 'S' | '-'))
-        {
+        // Attempt profile SIDs have seven u32 RIDs after the AppContainer prefix.
+        // Well-known package groups (notably -1 and -2) are never attempt identities.
+        let rids = text
+            .strip_prefix("S-1-15-2-")
+            .map(|suffix| suffix.split('-').collect::<Vec<_>>());
+        if !rids.is_some_and(|rids| {
+            rids.len() == 7
+                && rids.iter().all(|rid| {
+                    !rid.is_empty()
+                        && rid.bytes().all(|byte| byte.is_ascii_digit())
+                        && rid.parse::<u32>().is_ok()
+                })
+        }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "not an AppContainer SID",
+                "not an attempt AppContainer SID (expected seven u32 RIDs)",
             ));
         }
         let text = wide(OsStr::new(text));
@@ -892,6 +900,44 @@ mod tests {
     fn a_profile(test: &str) -> AppContainerProfile {
         AppContainerProfile::ensure(&format!("kaisa.spike.{test}.{}", std::process::id()))
             .expect("a non-admin user can create an AppContainer profile")
+    }
+
+    fn invalid_attempt_sids() -> Vec<&'static str> {
+        vec![
+            "S-1-15-2-1",
+            "S-1-15-2-2",
+            "S-1-15-3-1-2-3-4-5-6-7",
+            "S-1-15-2-1-2-3-4-5-6",
+            "S-1-15-2-1-2-3-4-5-6-7-8",
+            "S-1-15-2-1-2-3-4-5-6-4294967296",
+            "S-1-15-2-1-2-3-4-5-6-S",
+            "S-1-15-2-1-2-3-4-5-6-",
+            "S-1-15-2-1-2-3-4-5-6-+7",
+        ]
+    }
+
+    #[test]
+    fn non_attempt_sids_are_rejected_before_opening_an_identity() {
+        for sid in invalid_attempt_sids() {
+            let result = AppContainerProfile::from_sid_string(sid);
+            assert!(
+                matches!(result, Err(ref error) if error.kind() == std::io::ErrorKind::InvalidInput),
+                "only seven-RID attempt SIDs are admitted: {sid}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attempt_profile_sid_reopens_the_same_identity() {
+        let profile = a_profile("sid-roundtrip");
+        let sid = profile.sid_string().expect("profile SID");
+        let reopened = AppContainerProfile::from_sid_string(&sid).expect("attempt SID accepted");
+        assert_eq!(
+            reopened.sid_string().expect("reopened SID"),
+            sid,
+            "reopening preserves the attempt identity"
+        );
+        let _ = profile.delete();
     }
 
     #[test]
