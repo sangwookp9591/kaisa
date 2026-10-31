@@ -18,6 +18,8 @@ kaisa-sys.workspace = true
 kaisa-mcp.workspace = true
 
 serde_json.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
 
 [lints]
 workspace = true

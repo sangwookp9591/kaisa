@@ -67,7 +67,13 @@ the review may even approve it, and Kaisa still refuses to deliver: the candidat
   </tr>
 </table>
 
-<p align="center"><sub>Animated versions: <a href="docs/assets/screens/verified-run.gif">verified run</a> · <a href="docs/assets/screens/weakened-tests.gif">weakened tests</a> · <a href="docs/assets/screens/cli-guard.gif">CLI guard</a>. Costs shown are what the Claude Code CLI reported for these runs.</sub></p>
+**A terminal home.** `kaisa tui` keeps Needs you above the goal and attempt tree, with recorded gate
+reasons, checks, review findings and the verified branch to merge in a detail pane. This recording
+uses only scripted fake agents; unavailable provider usage and cost are shown as `n/a`.
+
+<p align="center"><img src="docs/assets/screens/tui.png" alt="kaisa tui with a Needs you lane, developer and reviewer attempts, a revision, and recorded verification evidence in the detail pane" width="100%"></p>
+
+<p align="center"><sub>Animated versions: <a href="docs/assets/screens/verified-run.gif">verified run</a> · <a href="docs/assets/screens/weakened-tests.gif">weakened tests</a> · <a href="docs/assets/screens/cli-guard.gif">CLI guard</a> · <a href="docs/assets/screens/tui.gif">terminal home (fake agents)</a>. Costs in the real-agent recordings are what the Claude Code CLI reported.</sub></p>
 
 ---
 
@@ -174,11 +180,17 @@ delivered result stays on its `kaisa/att_…` branch; the last line of the outpu
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
 kaisa --agent codex "fix the flaky test"  # Codex develops (observed), Claude Code reviews
 kaisa watch                               # attempts, state, tokens and cost
+kaisa tui                                 # live terminal home; --plain prints one accessible frame
 kaisa agent add local --endpoint http://127.0.0.1:11434/v1 --model qwen=T0
 kaisa agent list                          # personal agents and model servers
 kaisa policy show                         # your personal policy
 kaisa policy set revision_limit 3         # change it (validated before it is saved)
 ```
+
+`kaisa tui` refreshes the ledger once a second. Use `n` for Needs you, `f` for failed, `/` to
+search, Enter for details, `g` to submit a new background goal, and `?` for all keys. `--plain`
+(and output without a TTY) prints the same information once and exits. `KAISA_LANG=ko` selects
+Korean TUI labels; recorded goal text and engine codes stay as written.
 
 A goal ends with one of these results, which scripts and CI can rely on:
 

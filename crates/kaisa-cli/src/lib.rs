@@ -1,6 +1,6 @@
 //! Kaisa command-line front end.
 //!
-//! Design: `docs/user-flows.md` §7. A goal, `watch`, `agent` and `policy` work; every other
+//! Design: `docs/user-flows.md` §7. A goal, `watch`, `tui`, `agent` and `policy` work; every other
 //! command reports that it is not implemented yet instead of pretending to work.
 
 use std::io;
@@ -11,6 +11,7 @@ mod delivery;
 mod goal;
 mod local_agent;
 mod policy;
+mod tui;
 mod verified;
 mod watch;
 
@@ -39,7 +40,7 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 /// them as literal `kaisa <verb>`, in the command tables of user-flows §7 and architecture §4
 /// (`handoff`, `handback`, `wrap`, `console`, `memory` appear only there), and in process-model
 /// rows.
-const PLANNED_COMMANDS: [&str; 28] = [
+const PLANNED_COMMANDS: [&str; 27] = [
     "review",
     "ask",
     "attach",
@@ -62,7 +63,6 @@ const PLANNED_COMMANDS: [&str; 28] = [
     "hook",
     "wrap",
     "uninstall",
-    "tui",
     "retain",
     "handoff",
     "handback",
@@ -80,6 +80,7 @@ Usage:
   kaisa \"<goal>\"           a developer agent works on the goal, your checks and a reviewer judge
                            the result, and only a verified candidate is delivered
   kaisa watch              attempts, their state, tokens and cost, from the ledger
+  kaisa tui [--plain]      terminal home: needs you, goals, attempts and evidence
   kaisa review             approve results       (planned)
 
 More commands:
@@ -117,6 +118,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             Ok(EXIT_SUCCESS)
         }
         Some("watch") => watch::run(out, err),
+        Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
@@ -228,7 +230,7 @@ mod tests {
     fn the_help_lists_the_commands_that_work_without_calling_them_planned() {
         let transcript: Transcript = user_types(&["--help"]);
 
-        for working in ["kaisa watch", "kaisa agent", "kaisa policy"] {
+        for working in ["kaisa watch", "kaisa tui", "kaisa agent", "kaisa policy"] {
             let line: &str = transcript
                 .stdout
                 .lines()
@@ -262,7 +264,7 @@ mod tests {
     /// Every verb the docs name as a command: the planned ones answer "not implemented", the
     /// others work today. Collected from literal `kaisa <verb>` text and from the command tables
     /// in docs/user-flows.md §7 and docs/architecture.md §4.
-    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 28] = [
+    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 27] = [
         "review",
         "ask",
         "attach",
@@ -285,7 +287,6 @@ mod tests {
         "hook",
         "wrap",
         "uninstall",
-        "tui",
         "retain",
         "handoff",
         "handback",
