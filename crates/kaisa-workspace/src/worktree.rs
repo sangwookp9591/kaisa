@@ -13,9 +13,23 @@ use crate::status::{StatusParseError, parse_status};
 pub struct Worktree {
     path: PathBuf,
     branch: String,
+    gitdir: PathBuf,
 }
 
 impl Worktree {
+    pub(crate) fn preservation_policy(&self) -> Result<EmptyHooksDirectory, GitError> {
+        let actual = recorded_pointer(&self.path)?;
+        if actual != self.gitdir {
+            return Err(GitError::Failed {
+                args: vec!["verify-worktree".into()],
+                stderr: "refusing preservation: worktree .git pointer changed".into(),
+            });
+        }
+        let mut policy = EmptyHooksDirectory::create()?;
+        policy.bind(&self.gitdir);
+        Ok(policy)
+    }
+
     /// The worktree's directory.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -101,6 +115,7 @@ pub fn create_worktree(
     Ok(Worktree {
         path: path.to_owned(),
         branch: branch.to_owned(),
+        gitdir: recorded_pointer(path)?,
     })
 }
 
@@ -133,6 +148,7 @@ pub fn open_worktree(repository: &Path, path: &Path) -> Result<Option<Worktree>,
             return Ok(Some(Worktree {
                 path: path.to_owned(),
                 branch,
+                gitdir: registered_gitdir(repository, &wanted)?,
             }));
         }
     }
@@ -148,7 +164,7 @@ pub fn open_worktree(repository: &Path, path: &Path) -> Result<Option<Worktree>,
 /// Returns [`WorktreeError::Git`] if git fails or [`WorktreeError::Status`] if its output
 /// cannot be parsed.
 pub fn inventory(worktree: &Worktree, policy: &IgnoredPolicy) -> Result<Inventory, WorktreeError> {
-    let hooks = EmptyHooksDirectory::create()?;
+    let hooks = worktree.preservation_policy()?;
     let output: Vec<u8> = run_git_for_preservation(
         worktree.path(),
         &hooks,
@@ -182,13 +198,50 @@ pub fn remove_worktree(
     let path_text: String = worktree.path().to_string_lossy().into_owned();
     // `--force` is required because untracked and ignored files are still present; the
     // coverage check above is what makes discarding them safe.
-    let hooks = EmptyHooksDirectory::create()?;
+    let mut hooks = EmptyHooksDirectory::create()?;
+    let main_gitdir = crate::git::git_text(repository, &["rev-parse", "--absolute-git-dir"])?;
+    hooks.bind(Path::new(&main_gitdir));
     run_git_for_preservation(
         repository,
         &hooks,
         &["worktree", "remove", "--force", &path_text],
     )?;
     Ok(())
+}
+
+fn recorded_pointer(path: &Path) -> Result<PathBuf, GitError> {
+    let pointer = std::fs::read_to_string(path.join(".git")).map_err(GitError::Spawn)?;
+    let target = pointer
+        .trim()
+        .strip_prefix("gitdir: ")
+        .ok_or_else(|| GitError::Failed {
+            args: vec!["verify-worktree".into()],
+            stderr: "invalid worktree .git pointer".into(),
+        })?;
+    path.join(target).canonicalize().map_err(GitError::Spawn)
+}
+
+fn registered_gitdir(repository: &Path, wanted: &Path) -> Result<PathBuf, GitError> {
+    let common = crate::git::git_text(
+        repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    for entry in std::fs::read_dir(Path::new(&common).join("worktrees")).map_err(GitError::Spawn)? {
+        let entry = entry.map_err(GitError::Spawn)?;
+        if let Ok(backlink) = std::fs::read_to_string(entry.path().join("gitdir"))
+            && Path::new(backlink.trim())
+                .parent()
+                .and_then(|p| p.canonicalize().ok())
+                .as_deref()
+                == Some(wanted)
+        {
+            return entry.path().canonicalize().map_err(GitError::Spawn);
+        }
+    }
+    Err(GitError::Failed {
+        args: vec!["verify-worktree".into()],
+        stderr: "worktree has no registered gitdir".into(),
+    })
 }
 
 /// True when `refs/heads/<branch>` exists in `repository`.

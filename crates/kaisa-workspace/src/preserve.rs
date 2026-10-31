@@ -2,9 +2,9 @@
 //!
 //! Clean changes become a WIP commit on the attempt branch, so nothing an agent did is lost when
 //! its worktree is reclaimed. The commit uses Kaisa's own identity and skips repository hooks:
-//! preservation must not run code from the repository it is preserving.
+//! preservation permits user-configured filters but attributes alone cannot install programs.
 
-use crate::git::{EmptyHooksDirectory, GitError, run_git_for_preservation, stage_paths};
+use crate::git::{GitError, run_git_for_preservation, stage_paths};
 use crate::inventory::Inventory;
 use crate::receipt::PreservationReceipt;
 use crate::secrets::{SecretKind, scan_bytes};
@@ -41,7 +41,7 @@ pub fn preserve_as_commit(
     worktree: &Worktree,
     inventory: &Inventory,
 ) -> Result<Preservation, WorktreeError> {
-    let hooks = EmptyHooksDirectory::create()?;
+    let hooks = worktree.preservation_policy()?;
     let mut paths: Vec<String> = Vec::new();
     let mut covered: Vec<String> = Vec::new();
     let mut flagged: Vec<(String, Vec<SecretKind>)> = Vec::new();
@@ -65,9 +65,25 @@ pub fn preserve_as_commit(
             covered.push(entry.path.clone());
         }
     }
-    // Rebuild the index from scanned paths only, including when the agent staged
-    // an unrepresentable filename or a nested repository. Never touch working copies.
-    run_git_for_preservation(worktree.path(), &hooks, &["reset", "--quiet", "HEAD"])?;
+    // Restore only flagged entries, keeping staged rename/deletion intent. Read raw
+    // index names so lossy inventory paths can never leave staged secrets behind.
+    let indexed = run_git_for_preservation(worktree.path(), &hooks, &["ls-files", "-z"])?;
+    let mut excluded = Vec::new();
+    for raw in indexed
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let name = String::from_utf8_lossy(raw);
+        if name.contains('\u{fffd}')
+            || flagged.iter().any(|(path, _)| {
+                name == *path || name.starts_with(&format!("{}/", path.trim_end_matches('/')))
+            })
+        {
+            excluded.extend_from_slice(raw);
+            excluded.push(0);
+        }
+    }
+    crate::git::restore_flagged(worktree.path(), &hooks, &excluded)?;
     if paths.is_empty() {
         return Ok(Preservation {
             receipt: PreservationReceipt::default(),
@@ -75,13 +91,52 @@ pub fn preserve_as_commit(
         });
     }
     // `--force` because ignored files that the policy treats as user data must be kept too.
-    stage_paths(worktree.path(), &hooks, &paths)?;
+    let stageable: Vec<String> = paths
+        .iter()
+        .filter(|path| {
+            let absolute = worktree.path().join(path);
+            absolute.symlink_metadata().is_ok()
+                || indexed.split(|b| *b == 0).any(|raw| raw == path.as_bytes())
+        })
+        .cloned()
+        .collect();
+    if !stageable.is_empty() {
+        stage_paths(worktree.path(), &hooks, &stageable)?;
+    }
     let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
     let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
     commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
     run_git_for_preservation(worktree.path(), &hooks, &commit)?;
     let head: Vec<u8> = run_git_for_preservation(worktree.path(), &hooks, &["rev-parse", "HEAD"])?;
     let head: String = String::from_utf8_lossy(&head).trim().to_owned();
+    let tree = run_git_for_preservation(worktree.path(), &hooks, &["ls-tree", "-r", "-z", &head])?;
+    let entries: Vec<(&[u8], &str)> = tree
+        .split(|b| *b == 0)
+        .filter_map(|record| {
+            let (meta, path) = record.split_at(record.iter().position(|b| *b == b'\t')?);
+            Some((meta, std::str::from_utf8(&path[1..]).ok()?))
+        })
+        .collect();
+    let committed: Vec<&str> = entries
+        .iter()
+        .filter(|(meta, _)| !meta.starts_with(b"160000 "))
+        .map(|(_, path)| *path)
+        .collect();
+    covered.retain(|path| {
+        let absolute = worktree.path().join(path);
+        if !absolute.exists() && !absolute.is_symlink() {
+            return !entries.iter().any(|(_, present)| *present == path); // deletion is represented by absence
+        }
+        if absolute.is_dir() {
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            return committed.iter().any(|child| child.starts_with(&prefix))
+                && paths
+                    .iter()
+                    .filter(|child| child.starts_with(&format!("{}/", path.trim_end_matches('/'))))
+                    .all(|child| committed.contains(&child.as_str()));
+        }
+        committed.contains(&path.as_str())
+    });
     Ok(Preservation {
         receipt: PreservationReceipt::committed(
             &head,
@@ -136,6 +191,9 @@ fn secrets_in(worktree: &Worktree, path: &str) -> Option<Vec<SecretKind>> {
         return Some(vec![SecretKind::Unscannable]);
     }
     let file = worktree.path().join(path);
+    if crate::secrets::denied_filename(path) {
+        return Some(vec![SecretKind::PrivateKey]);
+    }
     if file.is_dir() && file.join(".git").symlink_metadata().is_ok() {
         return Some(vec![SecretKind::Unscannable]);
     }
@@ -469,18 +527,61 @@ mod tests {
         let result = preserve_as_commit(&worktree, &before);
         assert!(
             !monitor_marker.exists(),
-            "inventory and preservation must never execute fsmonitor"
+            "direct fsmonitor configuration must remain disabled"
         );
         assert!(
             !signer_marker.exists(),
-            "preservation must never execute a signing program"
+            "direct signing configuration must remain disabled"
         );
-        result.expect("preservation must succeed with hostile executable settings");
+        result.expect("preserve with direct executable settings");
+        let included = repository.sibling("included-executables.config");
+        for (key, value) in [
+            ("core.fsmonitor", monitor.as_str()),
+            ("gpg.program", signer.as_str()),
+            ("commit.gpgsign", "true"),
+        ] {
+            git_text(
+                repository.path(),
+                &[
+                    "config",
+                    "--file",
+                    included.to_str().expect("UTF-8 fixture"),
+                    key,
+                    value,
+                ],
+            )
+            .expect("configure included executable");
+        }
+        git_text(
+            repository.path(),
+            &[
+                "config",
+                "include.path",
+                included.to_str().expect("UTF-8 fixture"),
+            ],
+        )
+        .expect("include executable configuration");
+        the_agent_writes(
+            &worktree,
+            NEW_SOURCE_FILE,
+            "another change worth preserving",
+        );
+        let before = what_needs_preserving(&worktree);
+        let result = preserve_as_commit(&worktree, &before);
+        assert!(
+            !monitor_marker.exists(),
+            "included fsmonitor configuration must remain disabled"
+        );
+        assert!(
+            !signer_marker.exists(),
+            "included signing configuration must remain disabled"
+        );
+        result.expect("preserve with included executable settings");
     }
 
     #[cfg(unix)]
     #[test]
-    fn preservation_with_an_attribute_filter_never_executes_its_programs() {
+    fn a_user_configured_attribute_filter_is_allowed_to_execute() {
         for driver in ["clean", "process"] {
             let repository = a_repository_with_one_commit_on_main();
             let worktree = a_worktree_for_attempt_41a(&repository);
@@ -504,19 +605,17 @@ mod tests {
             .expect("require filter");
             let result = preserve_as_commit(&worktree, &what_needs_preserving(&worktree));
             assert!(
-                !marker.exists(),
-                "worktree attributes must never execute a configured {driver} filter"
+                marker.exists(),
+                "a filter defined in user-owned config may execute its {driver} program"
             );
-            result.expect("disabled filters must allow raw file preservation");
-            assert_eq!(
-                git_text(
-                    worktree.path(),
-                    &["show", &format!("HEAD:{NEW_SOURCE_FILE}")]
-                )
-                .expect("read committed blob"),
-                "source worth preserving",
-                "disabling filters must preserve the original bytes"
-            );
+            if driver == "clean" {
+                result.expect("configured clean filter runs successfully");
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a process filter that violates the Git protocol must refuse preservation"
+                );
+            }
         }
     }
 
@@ -728,5 +827,380 @@ mod tests {
             committed_files(&worktree).contains(NEW_SOURCE_FILE),
             "unrepresentable data must not prevent clean work preservation"
         );
+    }
+    #[test]
+    fn a_staged_rename_and_deletion_keep_the_old_paths_out_of_the_commit() {
+        let repository = a_repository_with_one_commit_on_main();
+        repository.commit_file("obsolete.txt", "old data", "add obsolete file");
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        git_text(worktree.path(), &["mv", "README.md", "renamed.md"]).expect("stage rename");
+        git_text(worktree.path(), &["rm", "obsolete.txt"]).expect("stage deletion");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let before = what_needs_preserving(&worktree);
+        let preservation = preserve_as_commit(&worktree, &before).expect("preserve index intent");
+        let tree = committed_files(&worktree);
+        assert!(
+            !tree
+                .lines()
+                .any(|path| path == "README.md" || path == "obsolete.txt"),
+            "rename sources and staged deletions must stay absent"
+        );
+        assert!(
+            tree.lines().any(|path| path == "renamed.md"),
+            "rename destination must survive"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_ok(),
+            "verified rename and deletion should permit reclamation"
+        );
+    }
+
+    #[test]
+    fn a_repointed_git_file_refuses_inventory_and_preservation_even_after_recovery() {
+        let repository = a_repository_with_one_commit_on_main();
+        let other = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "irreplaceable work");
+        let before = what_needs_preserving(&worktree);
+        std::fs::write(
+            worktree.path().join(".git"),
+            format!("gitdir: {}\n", other.path().join(".git").display()),
+        )
+        .expect("simulate pointer replacement");
+        let recovered = crate::worktree::open_worktree(repository.path(), worktree.path())
+            .expect("recover from repository records")
+            .expect("registered worktree exists");
+        for candidate in [&worktree, &recovered] {
+            let failure = preserve_as_commit(candidate, &before)
+                .expect_err("changed pointer must refuse preservation");
+            assert!(
+                failure.to_string().contains("pointer changed"),
+                "refusal must explain the tampered Git pointer"
+            );
+            assert!(
+                inventory(candidate, &no_build_output()).is_err(),
+                "inventory must also reject the attacker pointer"
+            );
+        }
+        assert!(
+            worktree.path().join(NEW_SOURCE_FILE).exists(),
+            "refusal must retain work for recovery"
+        );
+    }
+
+    #[test]
+    fn an_empty_gitlink_directory_never_receives_blob_coverage() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let head =
+            git_text(worktree.path(), &["rev-parse", "HEAD"]).expect("initial commit exists");
+        git_text(
+            worktree.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},sub"),
+            ],
+        )
+        .expect("stage gitlink");
+        std::fs::create_dir(worktree.path().join("sub"))
+            .expect("unpopulated submodule directory exists");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let entries = ["sub", NEW_SOURCE_FILE].map(|path| crate::status::StatusEntry {
+            path: path.into(),
+            kind: crate::status::EntryKind::Tracked,
+        });
+        let before = crate::inventory::plan_inventory(&entries, &no_build_output());
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("clean source commits alongside gitlink");
+        assert!(
+            !preservation.receipt.covers("sub"),
+            "a gitlink has no preserved file contents and must not get directory coverage"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "unverified gitlink must block reclamation"
+        );
+    }
+
+    fn leftover_credentials() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            (
+                "aws.env",
+                format!("AWS_SECRET_ACCESS_KEY={}\n", "aB1/".repeat(10)).into_bytes(),
+            ),
+            (
+                "stripe-secret.txt",
+                format!("sk_live_{}", "a".repeat(24)).into_bytes(),
+            ),
+            (
+                "stripe-restricted.txt",
+                format!("rk_live_{}", "a".repeat(24)).into_bytes(),
+            ),
+            ("keystore.p12", vec![0, 0xff, 0]),
+            ("keys.pfx", vec![0, 0xff, 0]),
+            ("keys.jks", vec![0, 0xff, 0]),
+            ("app.keystore", vec![0, 0xff, 0]),
+            ("id_rsa", b"opaque SSH key".to_vec()),
+            ("id_ed25519", b"opaque SSH key".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn standalone_aws_stripe_and_named_keystores_are_flagged_even_when_staged() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let credentials = leftover_credentials();
+        for (name, bytes) in &credentials {
+            std::fs::write(worktree.path().join(name), bytes).expect("write credential fixture");
+        }
+        git_text(worktree.path(), &["add", "--all"]).expect("agent pre-stages credentials");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let before = what_needs_preserving(&worktree);
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("clean source still commits");
+        let tree = committed_files(&worktree);
+        for (name, _) in credentials {
+            assert!(
+                preservation.flagged.iter().any(|(path, _)| path == name),
+                "credential {name} must be flagged"
+            );
+            assert!(
+                !tree.lines().any(|path| path == name),
+                "credential {name} must not enter history even when staged"
+            );
+            assert!(
+                !preservation.receipt.covers(name),
+                "credential {name} must block reclamation"
+            );
+        }
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "leftover credentials must prevent worktree deletion"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_owned_includes_and_worktree_configuration_keep_their_filters() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let (program, marker) = a_marker_program(&repository, "included-filter");
+        let included = repository.sibling("hostile.config");
+        git_text(
+            repository.path(),
+            &[
+                "config",
+                "--file",
+                included.to_str().expect("UTF-8 fixture"),
+                "filter.included.clean",
+                &program,
+            ],
+        )
+        .expect("write included executable setting");
+        git_text(
+            repository.path(),
+            &[
+                "config",
+                "include.path",
+                included.to_str().expect("UTF-8 fixture"),
+            ],
+        )
+        .expect("include local config");
+        git_text(
+            repository.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        )
+        .expect("enable worktree config");
+        git_text(
+            worktree.path(),
+            &["config", "--worktree", "filter.worktree.clean", &program],
+        )
+        .expect("configure worktree executable");
+        the_agent_writes(
+            &worktree,
+            ".gitattributes",
+            "*.rs filter=included\n*.txt filter=worktree\n",
+        );
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        the_agent_writes(&worktree, "note.txt", "worktree-config filter input");
+        let before = what_needs_preserving(&worktree);
+        let result = preserve_as_commit(&worktree, &before);
+        assert!(
+            marker.exists(),
+            "user-owned includes and worktree config may define executable filters"
+        );
+        result.expect("trusted filter definitions are retained");
+        let policy = worktree
+            .preservation_policy()
+            .expect("bind trusted Git metadata");
+        let config =
+            crate::git::run_git_for_preservation(worktree.path(), &policy, &["config", "--list"])
+                .expect("read effective config");
+        assert!(
+            String::from_utf8_lossy(&config).contains("filter.included")
+                && String::from_utf8_lossy(&config).contains("filter.worktree"),
+            "user-owned includes and per-worktree configuration must remain readable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_excludes_autocrlf_and_filters_survive_in_an_isolated_process() {
+        let repository = a_repository_with_one_commit_on_main();
+        let global = repository.sibling("global.config");
+        let system = repository.sibling("system.config");
+        let excludes = repository.sibling("global.ignore");
+        std::fs::write(&excludes, "target/\n").expect("write global build ignore");
+        let (filter, marker) = a_marker_program(&repository, "trusted-filter");
+        let lfs_pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 12\n";
+        std::fs::write(&filter, format!("#!/bin/sh\nprintf ran > '{}'\ncat >/dev/null\ncat <<'POINTER'\n{lfs_pointer}POINTER\n", marker.display())).expect("install a user-owned LFS-like clean filter");
+        for (key, value) in [
+            ("core.excludesFile", excludes.to_str().expect("UTF-8 path")),
+            ("core.autocrlf", "true"),
+            ("filter.trusted.clean", &filter),
+            ("core.eol", "lf"),
+        ] {
+            git_text(
+                repository.path(),
+                &[
+                    "config",
+                    "--file",
+                    global.to_str().expect("UTF-8 path"),
+                    key,
+                    value,
+                ],
+            )
+            .expect("write trusted global setting");
+        }
+        std::fs::write(&system, "[core]\n longpaths = true\n")
+            .expect("write trusted system setting");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("test binary exists"))
+                .args([
+                    "--exact",
+                    "preserve::tests::trusted_global_configuration_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("GIT_CONFIG_GLOBAL", global)
+                .env("GIT_CONFIG_SYSTEM", system)
+                .env_remove("GIT_CONFIG_NOSYSTEM")
+                .output()
+                .expect("run isolated Git environment");
+        assert!(
+            output.status.success(),
+            "global/system configuration regression failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "a user-installed global filter must be allowed to execute"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "only run by the parent test with isolated global/system Git settings"]
+    fn trusted_global_configuration_child() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, "target/debug/build-output", "disposable output");
+        the_agent_writes(&worktree, "lines.txt", "line one\r\nline two\r\n");
+        the_agent_writes(&worktree, ".gitattributes", "*.bin filter=trusted\n");
+        the_agent_writes(&worktree, "payload.bin", "filter input");
+        let before = inventory(&worktree, &IgnoredPolicy::with_build_output(&["target"]))
+            .expect("inventory uses global excludes");
+        assert!(
+            before
+                .disposable
+                .iter()
+                .any(|entry| entry.path.starts_with("target/")),
+            "global excludes must classify build output as disposable"
+        );
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("preserve with global settings");
+        let bytes = crate::git::run_git(worktree.path(), &["show", "HEAD:lines.txt"])
+            .expect("read normalized blob");
+        assert_eq!(
+            bytes, b"line one\nline two\n",
+            "global autocrlf must normalize CRLF"
+        );
+        assert!(
+            !committed_files(&worktree).contains("target/"),
+            "global ignored build output must stay out of the commit"
+        );
+        let policy = worktree.preservation_policy().expect("trusted policy");
+        let longpaths = crate::git::run_git_for_preservation(
+            worktree.path(),
+            &policy,
+            &["config", "--get", "core.longpaths"],
+        )
+        .expect("system setting survives");
+        assert_eq!(
+            longpaths, b"true\n",
+            "system configuration must remain enabled"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_ok(),
+            "trusted settings must preserve normal reclamation"
+        );
+    }
+    #[test]
+    fn attributes_without_a_user_defined_filter_preserve_the_original_bytes() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(
+            &worktree,
+            ".gitattributes",
+            "*.rs filter=not-installed-by-user\n",
+        );
+        let source = "source must survive an undefined filter\n";
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, source);
+        let before = what_needs_preserving(&worktree);
+        let preservation = preserve_as_commit(&worktree, &before)
+            .expect("attributes cannot install an executable filter");
+        let blob = crate::git::run_git(
+            worktree.path(),
+            &["show", &format!("HEAD:{NEW_SOURCE_FILE}")],
+        )
+        .expect("read original blob");
+        assert_eq!(
+            blob,
+            source.as_bytes(),
+            "an agent-owned attribute cannot define a new filter command"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_ok(),
+            "undefined filters must not lose otherwise clean work"
+        );
+    }
+    #[test]
+    fn a_deletion_without_new_files_is_committed_whether_staged_or_unstaged() {
+        for staged in [false, true] {
+            let repository = a_repository_with_one_commit_on_main();
+            let worktree = a_worktree_for_attempt_41a(&repository);
+            if staged {
+                git_text(worktree.path(), &["rm", "README.md"]).expect("stage deletion");
+            } else {
+                std::fs::remove_file(worktree.path().join("README.md"))
+                    .expect("delete tracked file");
+            }
+            let before = what_needs_preserving(&worktree);
+            let preservation =
+                preserve_as_commit(&worktree, &before).expect("deletions alone require a commit");
+            assert!(
+                !committed_files(&worktree)
+                    .lines()
+                    .any(|path| path == "README.md"),
+                "deleted path must remain absent, staged={staged}"
+            );
+            assert!(
+                check_deletion(&before, &preservation.receipt).is_ok(),
+                "committed deletion must be covered, staged={staged}"
+            );
+        }
     }
 }
