@@ -245,6 +245,7 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   - When a decision is needed: **"Waiting for you → open review 42"** as a clickable link.
 - **Allowed from here:** status, results, answers to agent questions and cancel.
 - **Not allowed:** approve or publish. The agent replies "This needs you" and gives the link.
+- **Today (M1):** `claude mcp add kaisa -- kaisa mcp serve` registers a stdio MCP server with three tools. `kaisa_start_goal {goal, agent?, repository?}` starts `kaisa "<goal>"` as a detached background process (it survives the session; several can run at once) and returns a handle; `kaisa_status {handle?}` reports running, verified (branch), waiting for you (reason, with "This needs you" and how to continue in a terminal) or not delivered (reason), with tokens and cost from the ledger once the run ends; `kaisa_result {handle}` returns the final lines and the exact `git merge --ff-only …` command, which it never runs. `/kaisa <goal>` is a project slash command (`.claude/commands/kaisa.md`, planned for `kaisa init`). One candidate only (no `--n`), no run numbers or status line, no clickable review link (`kaisa review` is planned: the agent points to a terminal), no cancel and no answering agent questions, and no Codex-side integration. Approve and publish do not exist as tools.
 
 #### F06 Several candidates, compare and pick
 - **Trigger:** `kaisa "…" --n 3 --agents claude,codex`.

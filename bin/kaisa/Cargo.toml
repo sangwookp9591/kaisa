@@ -16,6 +16,8 @@ path = "src/main.rs"
 kaisa-cli.workspace = true
 
 [dev-dependencies]
+# The integration tests drive the scripted fake agent through the MCP server's test hook.
+kaisa-cli = { workspace = true, features = ["test-hooks"] }
 kaisa-ledger.workspace = true
 kaisa-context.workspace = true
 kaisa-workspace.workspace = true

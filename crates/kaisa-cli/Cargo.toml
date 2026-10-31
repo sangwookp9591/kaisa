@@ -19,5 +19,11 @@ kaisa-mcp.workspace = true
 
 serde_json.workspace = true
 
+[features]
+# Test fixtures that must never exist in a shipped binary (for example the MCP server's
+# goal-argument hook). Off by default; only `bin/kaisa`'s dev-dependency turns it on, and with
+# resolver 3 dev-dependency features apply only to builds of test targets.
+test-hooks = []
+
 [lints]
 workspace = true
