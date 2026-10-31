@@ -8,7 +8,10 @@ use std::io::Write;
 
 mod agent;
 mod delivery;
+mod doctor;
 mod goal;
+mod home;
+mod init;
 mod local_agent;
 mod policy;
 mod verified;
@@ -39,7 +42,7 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 /// them as literal `kaisa <verb>`, in the command tables of user-flows §7 and architecture §4
 /// (`handoff`, `handback`, `wrap`, `console`, `memory` appear only there), and in process-model
 /// rows.
-const PLANNED_COMMANDS: [&str; 28] = [
+const PLANNED_COMMANDS: [&str; 26] = [
     "review",
     "ask",
     "attach",
@@ -49,8 +52,6 @@ const PLANNED_COMMANDS: [&str; 28] = [
     "cancel",
     "undo",
     "restore",
-    "init",
-    "doctor",
     "status",
     "console",
     "memory",
@@ -83,6 +84,9 @@ Usage:
   kaisa review             approve results       (planned)
 
 More commands:
+  kaisa                    Home: setup and recent work
+  kaisa doctor             read-only setup diagnosis
+  kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
   kaisa policy show|set    view or change your personal policy
 
@@ -92,7 +96,7 @@ Goal options:
                            your own trusted check instead of the project's tests
   --confine-claude         try a confined Claude Code run (T16.0 trial)
 
-Exit codes: 0 verified, 3 waiting for you, 4 not delivered, 64 usage error.
+Exit codes: 0 success/verified, 1 setup failure, 3 waiting for you, 4 not delivered, 64 usage error.
 
 Options:
   -h, --help               show this help
@@ -108,7 +112,10 @@ Options:
 /// Returns an error only if writing to `out` or `err` fails.
 pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
     match args.first().map(String::as_str) {
-        None | Some("-h" | "--help" | "help") => {
+        None => home::run(out, err),
+        Some("doctor") => doctor::run(&args[1..], out, err),
+        Some("init") => init::run(&args[1..], out, err),
+        Some("-h" | "--help" | "help") => {
             out.write_all(HELP.as_bytes())?;
             Ok(EXIT_SUCCESS)
         }
@@ -209,12 +216,12 @@ mod tests {
     }
 
     #[test]
-    fn running_kaisa_without_arguments_shows_help_with_the_three_verbs() {
-        let transcript: Transcript = user_types(&[]);
+    fn explicit_help_shows_the_three_daily_verbs() {
+        let transcript: Transcript = user_types(&["--help"]);
 
         assert_eq!(
             transcript.status, EXIT_SUCCESS,
-            "bare `kaisa` must not fail"
+            "explicit help must not fail"
         );
         for verb in ["kaisa \"<goal>\"", "kaisa watch", "kaisa review"] {
             assert!(
@@ -262,7 +269,7 @@ mod tests {
     /// Every verb the docs name as a command: the planned ones answer "not implemented", the
     /// others work today. Collected from literal `kaisa <verb>` text and from the command tables
     /// in docs/user-flows.md §7 and docs/architecture.md §4.
-    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 28] = [
+    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 26] = [
         "review",
         "ask",
         "attach",
@@ -272,8 +279,6 @@ mod tests {
         "cancel",
         "undo",
         "restore",
-        "init",
-        "doctor",
         "status",
         "console",
         "memory",

@@ -125,16 +125,45 @@ default toolchain, and an older one stops with a `rust-version` error.
 ```bash
 claude                                  # once: log in to Claude Code (and `codex login` for Codex)
 cd ~/code/my-project                    # any git repository with at least one commit
+kaisa                                  # read-only welcome, setup diagnosis, and next step
+kaisa doctor                           # detailed read-only diagnosis
+kaisa init                             # preview detected checks (optional)
+kaisa init --yes                       # save the preview as kaisa.toml
 kaisa "fix the flaky date test"         # develop → check → review → verified, or it tells you why not
 kaisa watch                             # what ran, its state, tokens and cost
 git merge --ff-only kaisa/att_…         # bring a verified result in (the last output line says exactly how)
 ```
 
-Kaisa finds the test command itself from the repository root: `cargo test --workspace` for
+With no `kaisa.toml`, Kaisa finds the test command itself from the repository root: `cargo test --workspace` for
 `Cargo.toml`, the `test` script of `package.json` (npm, pnpm, yarn or bun, from the lockfile),
 `python -m pytest` when `pyproject.toml` mentions pytest, and `go test ./...` for `go.mod`. A goal in
 a repository where none is found is not delivered (exit `4`, "no trusted check produced evidence"):
 Kaisa never calls unchecked work verified.
+
+`kaisa init` previews detected build/test/lint commands and risky repository settings. It asks
+before writing on a terminal; without a terminal it only previews unless you pass `--yes`.
+Existing `kaisa.toml` files are kept unchanged. Goals read its `[profile]` commands from the working
+tree; changing that file in a candidate stops delivery for a person. A simple override is:
+
+```toml
+[profile]
+test = ["cargo", "test", "--workspace"]
+```
+
+Init writes each command as `[[profile.test]]`, `[[profile.build]]` or `[[profile.lint]]` with an
+`argv` array and an optional repository-relative `directory`, preserving monorepo checks. It does
+not run the commands or mark them confirmed. Agent integration is supplied separately.
+
+Home shows recent ledger goals and attempts after a run, including goals waiting for a person.
+Home and doctor do not create state or write repository files. Doctor invokes only `claude --version`
+and `codex --version`; Git status disables external filters, fsmonitor and submodule inspection
+(filtered files can conservatively appear dirty). Login is **not checked** (no credentials, config, keychain or network access),
+and it prints the login commands. Claude Code is required for the default developer/reviewer flow;
+Codex is optional. Doctor reports the same predicted sandbox gaps as admission, including platform
+limits and the reduced/observed defaults. It checks state-directory permissions without a probe
+file (Windows opens the existing directory with child-creation access); actual sandbox creation and state
+writes are validated when a goal starts. Doctor exits `1` for a missing required item and `0` when
+required checks pass; unknown login and optional Codex remain labelled warnings.
 
 Kaisa keeps its state (ledger, attempt worktrees, policy, agents) outside your repository:
 
@@ -171,6 +200,9 @@ run (stops for a person), a goal that deletes a test (stops for a person) and `-
 delivered result stays on its `kaisa/att_…` branch; the last line of the output says how to bring it in.
 
 ```bash
+kaisa                                    # Home: setup or recent work
+kaisa doctor                             # diagnose agents, repo, checks, risks, protection and state
+kaisa init --yes                          # optional: save detected project checks
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
 kaisa --agent codex "fix the flaky test"  # Codex develops (observed), Claude Code reviews
 kaisa watch                               # attempts, state, tokens and cost

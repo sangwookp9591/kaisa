@@ -177,6 +177,16 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   - **Repository problems:** see F31.
   - **Policy unreachable.** Kaisa uses the cached pack and labels it as cached. With no cache, it falls back to the built-in strict defaults, labelled "strict defaults".
 
+**Today (M1):** Bare `kaisa` is a read-only Home. Before a ledger exists it shows a welcome,
+setup diagnosis, the truthful default (Claude Code develops/reviews; Codex can develop), sandboxed
+checks and a sample goal. Afterwards it shows recent goals/attempts and latest `NeedsPerson` gates.
+`kaisa doctor` checks CLI versions only, git root/branch/cleanliness/commit, detected or configured
+checks, every risky-settings finding, predicted sandbox admission/platform limits and state-directory
+permissions without creating files. Login is explicitly not checked: no credential/config/keychain
+reads or network; login commands are printed. Missing required items exit `1`; optional Codex and
+unknown login warn. Sandbox creation is checked again at run time; Windows checks writability by opening the existing directory with child-creation access, without
+creating a child. No policy-pack fetching, saved onboarding decisions or interactive Home keys.
+
 #### F03 Set up a project (`kaisa init`)
 - **User sees:** a preview, then a confirmation.
   ```
@@ -208,6 +218,15 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Variants:**
   - **Monorepo:** pick the packages, and each gets its own checks.
   - **No tests:** "Kaisa can't verify without checks." [P] Propose checks (an agent drafts them, and you approve) · [S] Skip — results are then *unverified*: they cannot be approved normally, only through a recorded override, and they are labelled so everywhere.
+
+**Today (M1):** `kaisa init` detects checks, scans settings risks and previews `kaisa.toml`.
+A terminal requires Enter to apply (Q cancels); without a terminal it previews and exits `0`, unless
+`--yes` is supplied. Existing profile files are preserved, so rerunning is idempotent. `[profile]`
+commands are argv arrays, or lists of command tables with `argv` and optional relative `directory`;
+goals use the working-tree test definition, and a candidate changing `kaisa.toml` requires a person.
+Commands remain detected until actually run. Agent integration has a preview/apply extension seam;
+this flow does not yet add agent files. Integration replacements back up originals and JSON merges
+preserve unrelated keys. No automatic settings fixes, command execution, monorepo picker or editor.
 
 ### B. Doing work
 
@@ -577,7 +596,7 @@ The default (marked ★) is always the safe choice.
 
 Every command supports `--json`, `--plain` and `--help`, in `ko` or `en`. Read-only commands never start the daemon or write state.
 
-**Today (M1):** `kaisa "<goal>"`, `watch`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no `--json`, `--plain` or `ko`/`en` yet.
+**Today (M1):** `kaisa` (Home), `kaisa "<goal>"`, `watch`, `init`, `doctor`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no `--json`, `--plain` or `ko`/`en` yet.
 
 ---
 

@@ -77,7 +77,8 @@ pub fn candidate_diff(
 
 /// File names that decide what a project's checks do. A candidate that changes one could make
 /// its own checks pass, so evidence names such changes and delivery needs a person for them.
-const CHECK_DEFINITION_FILES: [&str; 17] = [
+const CHECK_DEFINITION_FILES: [&str; 18] = [
+    "kaisa.toml",
     "package.json",
     "Cargo.toml",
     "build.rs",
