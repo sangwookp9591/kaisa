@@ -385,6 +385,53 @@ fn init_without_a_terminal_only_previews_and_yes_creates_an_idempotent_profile()
     );
 }
 
+/// Where `kaisa init` puts the `/kaisa` slash command for Claude Code.
+const SLASH_COMMAND: &str = ".claude/commands/kaisa.md";
+
+#[test]
+fn init_adds_the_kaisa_slash_command_and_prints_the_user_scope_registration() {
+    let project = Project::rust("init-claude");
+    let applied = project.run(&["init", "--yes"]);
+    assert_eq!(
+        applied.status.code(),
+        Some(SUCCESS),
+        "explicit yes applies setup: {applied:?}"
+    );
+    let command = std::fs::read_to_string(project.repo().join(SLASH_COMMAND))
+        .expect("init writes the /kaisa command");
+    assert!(
+        command.contains("kaisa_start_goal") && command.contains("Never merge"),
+        "the command starts goals through Kaisa and forbids merging: {command}"
+    );
+    assert!(
+        text(&applied).contains("claude mcp add kaisa -- kaisa mcp serve"),
+        "the MCP server is registered by the person at user scope, so init prints how"
+    );
+    assert!(
+        !project.repo().join(".mcp.json").exists(),
+        "init does not write a project MCP server"
+    );
+}
+
+#[test]
+fn init_leaves_a_different_existing_slash_command_alone_and_says_so() {
+    let project = Project::rust("init-claude-conflict");
+    let own = "my own command\n";
+    std::fs::create_dir_all(project.repo().join(".claude/commands")).expect("commands directory");
+    std::fs::write(project.repo().join(SLASH_COMMAND), own).expect("existing command");
+    let applied = project.run(&["init", "--yes"]);
+    assert_eq!(
+        std::fs::read_to_string(project.repo().join(SLASH_COMMAND)).expect("command still there"),
+        own,
+        "a person's own /kaisa command is never overwritten"
+    );
+    assert!(
+        text(&applied).contains("Not changing"),
+        "the skipped file is named: {}",
+        text(&applied)
+    );
+}
+
 #[test]
 fn a_goal_uses_the_configured_test_without_a_check_program_override() {
     let project = Project::rust("configured-check");

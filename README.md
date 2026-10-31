@@ -323,8 +323,8 @@ the directory Claude Code was started in and must be a git repository with a com
 | Merge, approve or publish | ❌ never: Kaisa has no tool for it. A run that needs a person reports **"This needs you"** with the reason, and you continue in a terminal in the repository. `kaisa_result` only prints the merge command for you to run. |
 | Answer an agent's question, cancel a run | not available yet |
 
-The project slash command is `.claude/commands/kaisa.md` (`kaisa_cli::claude_code_integration` plans
-it for `kaisa init`; it does not overwrite a file you wrote). A team that wants the server in the
+The project slash command is `.claude/commands/kaisa.md`: `kaisa init` adds it with the rest of the
+project setup, prints the `claude mcp add` line above, and does not overwrite a file you wrote. A team that wants the server in the
 repository can instead commit `{"mcpServers":{"kaisa":{"command":"kaisa","args":["mcp","serve"]}}}`
 as `.mcp.json` (`claude_code_project_server`); Kaisa's settings scanner accepts exactly that entry on
 macOS and Linux and still flags any other server (on Windows every repository server is flagged).

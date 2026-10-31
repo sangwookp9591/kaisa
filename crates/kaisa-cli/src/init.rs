@@ -159,7 +159,7 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
     crate::doctor::show_manifest_warning(&root, out)?;
     crate::doctor::show_risks(&root, out)?;
     let destination = root.join("kaisa.toml");
-    let mut files = integration_files(&root);
+    let mut files = integration_files(&root, out)?;
     if fs::symlink_metadata(&destination).is_ok() {
         writeln!(
             out,
@@ -232,9 +232,33 @@ pub(crate) struct PlannedFile {
     pub(crate) merge_into_existing: bool,
 }
 
-/// Coordinator integration seam: UX-C supplies agent files here after merge.
-fn integration_files(_repo: &Path) -> Vec<PlannedFile> {
-    Vec::new()
+/// Claude Code integration: the `/kaisa` slash command. A file that is already right is skipped;
+/// a different file at the same path is left alone and named. The MCP server is registered at user
+/// scope by the person (printed here), not written into the repository.
+fn integration_files(repo: &Path, out: &mut dyn Write) -> io::Result<Vec<PlannedFile>> {
+    let mut files = Vec::new();
+    for file in crate::claude_code::claude_code_integration(repo) {
+        match file.action {
+            crate::claude_code::PlannedAction::Create
+            | crate::claude_code::PlannedAction::Merge => {
+                files.push(PlannedFile {
+                    path: file.path,
+                    contents: file.contents,
+                    merge_into_existing: false,
+                });
+            }
+            crate::claude_code::PlannedAction::Unchanged => {}
+            crate::claude_code::PlannedAction::Conflict(reason) => {
+                writeln!(out, "Not changing {}: {reason}", file.path.display())?;
+            }
+        }
+    }
+    writeln!(
+        out,
+        "To use /kaisa in Claude Code, register Kaisa once for your user: {}",
+        crate::claude_code::USER_SCOPE_REGISTRATION
+    )?;
+    Ok(files)
 }
 
 fn planned_contents(root: &Path, file: &PlannedFile) -> io::Result<String> {
