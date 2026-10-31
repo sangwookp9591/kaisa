@@ -13,8 +13,8 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::System::Console::HPCON;
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW, UpdateProcThreadAttribute,
 };
@@ -104,14 +104,7 @@ pub(crate) fn create_suspended_in(
     console: &PseudoConsole,
     spec: &ProcessSpec,
 ) -> io::Result<CreatedProcess> {
-    // The console path inherits Kaisa's environment; refusing beats silently dropping
-    // variables such as an agent's proxy settings.
-    if !spec.env.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "environment variables are not applied to console processes yet",
-        ));
-    }
+    let environment = crate::appcontainer::environment_block(&spec.env);
     let program: &str = spec.program.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -149,8 +142,8 @@ pub(crate) fn create_suspended_in(
             null(),
             null(),
             INHERIT_NO_HANDLES,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
-            null(),
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_ptr().cast::<c_void>(),
             directory.as_ptr(),
             (&raw const startup).cast::<STARTUPINFOW>(),
             &raw mut information,

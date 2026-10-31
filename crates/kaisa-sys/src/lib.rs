@@ -48,7 +48,7 @@ pub use identity::ProcessIdentity;
 pub use landlock::{LandlockRuleset, landlock_abi, udp_filter_supported, write_ruleset};
 #[cfg(unix)]
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
-pub use process::{OwnedProcess, ProcessExit, ProcessSpec};
+pub use process::{OwnedProcess, ProcessExit, ProcessSpec, base_environment};
 pub use pty::{InvalidTerminalSize, PseudoTerminal, TerminalSize};
 pub use random::fill_random;
 pub use seatbelt::{SeatbeltPolicy, sandboxed_spec, seatbelt_profile};

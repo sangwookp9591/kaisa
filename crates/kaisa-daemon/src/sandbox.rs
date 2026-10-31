@@ -105,13 +105,13 @@ impl AgentSandbox {
         }
     }
 
-    /// What this sandbox cannot guarantee: everything when unconfined, and on Linux whatever
-    /// the kernel's Landlock ABI and the datagram filter leave open (D02).
+    /// What this sandbox cannot guarantee. Unix PPID scans cannot discover descendants
+    /// already reparented outside the tree, so descendant containment is always reduced.
     pub(crate) fn missing(&self) -> Vec<ContainmentCapability> {
         match self {
             Self::Unconfined => ContainmentCapability::ALL.to_vec(),
             #[cfg(target_os = "macos")]
-            Self::Seatbelt(_) => Vec::new(),
+            Self::Seatbelt(_) => vec![ContainmentCapability::DescendantContainment],
             #[cfg(target_os = "linux")]
             Self::Landlock(ruleset) => {
                 kaisa_domain::landlock_missing(Some(ruleset.abi), ruleset.udp_confined())
@@ -213,7 +213,11 @@ pub(crate) fn expected_missing(confine: bool) -> Vec<ContainmentCapability> {
     {
         kaisa_domain::landlock_missing(kaisa_sys::landlock_abi(), kaisa_sys::udp_filter_supported())
     }
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
+    {
+        vec![ContainmentCapability::DescendantContainment]
+    }
+    #[cfg(windows)]
     {
         Vec::new()
     }
@@ -340,6 +344,31 @@ mod tests {
             expected_missing(false),
             ContainmentCapability::ALL.to_vec(),
             "admission sees the whole gap before the agent starts"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_seatbelt_sandbox_reports_the_same_descendant_limit_before_and_after_construction() {
+        let actual = AgentSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy::default()).missing();
+        assert_eq!(
+            actual,
+            vec![ContainmentCapability::DescendantContainment],
+            "PPID scans cannot promise cleanup of already reparented daemons"
+        );
+        assert_eq!(
+            expected_missing(true),
+            actual,
+            "admission must disclose exactly the capabilities the sandbox lacks"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_objects_do_not_report_the_unix_descendant_limit() {
+        assert!(
+            !expected_missing(true).contains(&ContainmentCapability::DescendantContainment),
+            "Job Object breakaway is denied, unlike Unix process groups"
         );
     }
 

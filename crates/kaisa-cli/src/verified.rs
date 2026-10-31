@@ -129,7 +129,7 @@ pub(crate) fn claude_spec(model: &str, mcp_config: &Path) -> ProcessSpec {
             mcp_config,
         }),
         working_directory: std::env::temp_dir(),
-        env: Vec::new(),
+        env: kaisa_agents::claude_environment(),
     }
 }
 

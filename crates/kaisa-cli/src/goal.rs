@@ -222,7 +222,7 @@ impl GoalCommand {
                 .unwrap_or_else(|| PathBuf::from("codex")),
             args: codex_args(),
             working_directory: std::env::temp_dir(),
-            env: Vec::new(),
+            env: kaisa_agents::codex_environment(),
         }
     }
 
@@ -252,7 +252,7 @@ impl GoalCommand {
                     mcp_config,
                 }),
                 working_directory: std::env::temp_dir(),
-                env: Vec::new(),
+                env: kaisa_agents::claude_environment(),
             },
         }
     }

@@ -212,6 +212,79 @@ mod tests {
     /// A first message, as an agent receives its context pack.
     const FIRST_MESSAGE: &str = "pack-for-attempt-41a";
 
+    #[cfg(unix)]
+    #[test]
+    fn captured_and_owned_children_receive_only_base_and_explicit_environment() {
+        const SUCCESS: ProcessExit = ProcessExit::Code(0);
+        const TEST: &str = "capture::tests::captured_and_owned_children_receive_only_base_and_explicit_environment";
+        const DUMMY_SECRET: &str = "KAISA_TEST_UNRELATED_SECRET";
+        const EXPLICIT: &str = "KAISA_TEST_EXPLICIT_VARIABLE";
+        const FIXTURE: &str = "KAISA_TEST_ENVIRONMENT_FIXTURE";
+        const MARKER: &str = "dummy-secret-marker";
+        if std::env::var(FIXTURE).is_err() {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(FIXTURE, "yes")
+                    .env(DUMMY_SECRET, MARKER)
+                    .output()
+                    .expect("isolated parent starts");
+            assert!(
+                output.status.success(),
+                "environment regression in isolated parent: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert_eq!(
+            std::env::var(DUMMY_SECRET).as_deref(),
+            Ok(MARKER),
+            "the launcher's parent really contains the dummy secret"
+        );
+        let command = format!(
+            "test -z \"${{{DUMMY_SECRET}}}\" && test -n \"$PATH\" && test -n \"$HOME\" && test \"${{{EXPLICIT}}}\" = allowed"
+        );
+        let mut spec = shell(&command);
+        spec.env.push((EXPLICIT.to_owned(), "allowed".to_owned()));
+        for confined in [false, true] {
+            #[cfg(target_os = "macos")]
+            let policy = crate::SeatbeltPolicy::default();
+            #[cfg(target_os = "macos")]
+            let confinement = if confined {
+                Confinement::Seatbelt(&policy)
+            } else {
+                Confinement::Unconfined
+            };
+            #[cfg(not(target_os = "macos"))]
+            let confinement = {
+                let _ = confined;
+                Confinement::Unconfined
+            };
+            let run = run_captured(&spec, &confinement, NO_INPUT, DEADLINE, SMALL_CAP)
+                .expect("check runs");
+            assert_eq!(
+                run.exit,
+                Some(SUCCESS),
+                "trusted checks and confined captured agents must exclude unrelated secrets"
+            );
+            #[cfg(target_os = "macos")]
+            let owned_spec = if confined {
+                crate::sandboxed_spec(&spec, &policy)
+            } else {
+                spec.clone()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let owned_spec = spec.clone();
+            let mut owned = crate::OwnedProcess::spawn(&owned_spec).expect("owned agent starts");
+            assert_eq!(
+                owned.wait().expect("agent exits"),
+                SUCCESS,
+                "owned agents, including Seatbelt-confined agents, use the environment allow-list"
+            );
+        }
+    }
+
     #[test]
     fn an_exec_reports_its_exit_and_output() {
         let run: CapturedRun = run_captured(

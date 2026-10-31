@@ -1361,8 +1361,11 @@ fn a_claude_reduced_developer_keeps_the_local_first_pass_confined() {
     const FIRST_PASS_INDEX: usize = 1;
     let first_pass = &outcome.attempts[FIRST_PASS_INDEX];
     assert!(
-        first_pass.confined && first_pass.admitted_on == kaisa_domain::ReducedModeBasis::None,
-        "the first pass must use its own loopback-only sandbox and need no Claude permission"
+        first_pass.missing == kaisa_domain::platform_limits()
+            && first_pass.admitted_on
+                == kaisa_domain::ReducedModeBasis::None
+                    .for_missing(kaisa_domain::platform_limits()),
+        "the first pass must disclose only platform limits under its own loopback-only sandbox, without Claude permission"
     );
 }
 

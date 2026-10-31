@@ -29,7 +29,7 @@ pub use catalog::{AgentEntry, AgentKind, Catalog, CatalogError, CatalogModel};
 pub use containment::{
     Admission, ContainmentAgentKind, ContainmentCapability, DefaultReducedPolicy,
     LANDLOCK_NETWORK_ABI, LANDLOCK_TRUNCATE_ABI, ReducedModeBasis, ReducedModeDecision, admit,
-    admit_agent_on, admit_on, codes, landlock_missing,
+    admit_agent_on, admit_on, codes, landlock_missing, platform_limits,
 };
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};

@@ -13,11 +13,11 @@ mod transcript;
 mod usage;
 
 pub use claude::{
-    ClaudeLaunch, claude_brokered_argv, claude_final_answer, claude_permission_denials,
-    first_message,
+    ClaudeLaunch, claude_brokered_argv, claude_environment, claude_final_answer,
+    claude_permission_denials, first_message,
 };
 pub use codex::{
-    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_final_answer,
+    CODEX_EFFORTS, CodexLaunch, CodexLaunchError, TrustMode, codex_environment, codex_final_answer,
     codex_observed_argv, codex_trust_mode,
 };
 pub use local_loop::{
