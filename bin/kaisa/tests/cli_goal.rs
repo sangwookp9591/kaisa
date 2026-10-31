@@ -1543,3 +1543,131 @@ printf '%s\n' '{requests}' | "$bridge" mcp --attempt "$(dirname "$config")"
         "both OS-confined exec and broker fs_write must leave root attributes unchanged"
     );
 }
+
+/// A run of the scripted agent that writes `src/notes.md` in `directory`.
+fn a_scripted_run_in(directory: &Path, state: &Path) -> Output {
+    let fake_agent: PathBuf = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &fake_agent.to_string_lossy(),
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            "src/notes.md",
+            GOAL,
+        ])
+        .current_dir(directory)
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa runs")
+}
+
+#[test]
+fn watch_leaves_the_ledger_file_unchanged() {
+    let bench = Workbench::new("watch-readonly");
+    let state: PathBuf = bench.base.join("state");
+    a_scripted_run_in(&bench.base.join("repo"), &state);
+    let database: PathBuf = state.join("kaisa.db");
+    let before: Vec<u8> = std::fs::read(&database).expect("the run created the ledger");
+
+    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa watch runs");
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("exited"),
+        "watch still shows the attempts: {:?}",
+        String::from_utf8_lossy(&watched.stdout)
+    );
+    assert_eq!(
+        std::fs::read(&database).expect("the ledger is still there"),
+        before,
+        "watch only reads: kaisa.db is byte for byte what the run left (NFR-03)"
+    );
+}
+
+#[test]
+fn watch_in_an_empty_state_directory_creates_no_ledger() {
+    let bench = Workbench::new("watch-empty");
+    let state: PathBuf = bench.base.join("state");
+    std::fs::create_dir_all(&state).expect("writable temp dir");
+
+    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa watch runs");
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("nothing"),
+        "an empty state reads as no attempts yet"
+    );
+    assert!(
+        !state.join("kaisa.db").exists(),
+        "watching must not create kaisa.db"
+    );
+}
+
+#[test]
+fn words_the_docs_name_as_commands_and_unknown_options_never_start_a_run() {
+    let bench = Workbench::new("no-paid-run");
+    let state: PathBuf = bench.base.join("state");
+    let cases: [(&[&str], u8); 6] = [
+        (&["gc", "--dry-run"], 2),
+        (&["retain", "41"], 2),
+        (&["run", "--issue", "123"], 2),
+        (&["audit", "verify"], 2),
+        (&["--agents", "a,b", "fix"], 64),
+        (&["--json", "fix"], 64),
+    ];
+
+    for (words, expected) in cases {
+        let ran: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+            .args(words)
+            .current_dir(bench.base.join("repo"))
+            .env("KAISA_STATE_DIR", &state)
+            .output()
+            .expect("kaisa runs");
+
+        assert_eq!(
+            ran.status.code(),
+            Some(i32::from(expected)),
+            "`kaisa {words:?}` is refused before any agent runs"
+        );
+    }
+    assert!(
+        !state.join("kaisa.db").exists(),
+        "no run was admitted, so no ledger was created"
+    );
+}
+
+#[test]
+fn a_run_below_the_repository_root_names_the_repository_it_uses() {
+    let bench = Workbench::new("subdirectory");
+    let repository: PathBuf = bench.base.join("repo");
+    let state: PathBuf = bench.base.join("state");
+
+    let from_subdirectory: Output = a_scripted_run_in(&repository.join("src"), &state);
+    let from_root: Output = a_scripted_run_in(&repository, &state);
+    let notice = |output: &Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.contains("using the git repository at"))
+            .map(str::to_owned)
+    };
+
+    let named = notice(&from_subdirectory).expect("the subdirectory run names the repository");
+    assert!(
+        named.ends_with("repo"),
+        "the line names the repository root: {named:?}"
+    );
+    assert_eq!(
+        notice(&from_root),
+        None,
+        "a run at the root has nothing to announce"
+    );
+}

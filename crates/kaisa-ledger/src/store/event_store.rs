@@ -64,6 +64,21 @@ impl EventStore {
         Ok(Self { connection })
     }
 
+    /// Opens an existing ledger for reading only: the file is opened read-only, no schema is
+    /// created and no pragma is written, so the database file is never modified. A missing file
+    /// is an error rather than a new empty ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the file does not exist or cannot be opened.
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let connection: Connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Ok(Self { connection })
+    }
+
     /// Records `event` at the next sequence, linked to the previous event's hash. Assigning the
     /// sequence, computing the hash and inserting the row happen in one transaction.
     ///
