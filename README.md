@@ -251,8 +251,12 @@ flowchart LR
    changes the candidate's source files, Kaisa refuses all evidence and the run is not delivered.
 5. **First pass (optional).** If you registered a T0 local model, it reviews first. Its blocking
    findings send the candidate back without spending the full review; its approval is only advisory.
-6. **Review.** A reviewer reads the frozen candidate and answers with a structured verdict. Kaisa
-   reads the verdict only from one final `kaisa-verdict` region of the reviewer's answer; a missing,
+6. **Review.** A reviewer reads the frozen candidate and answers with a structured verdict. Its
+   context carries the candidate's diff against the base (bounded; a cut says how to read the rest in
+   the worktree) and the trusted checks' results for that exact candidate: command, exit, whether it ran
+   confined, and a short output tail with secrets dropped. The diff and output are quoted as untrusted
+   data, so text in them cannot pose as Kaisa's results or as a verdict. A first-pass local model gets
+   the same evidence. Kaisa reads the verdict only from one final `kaisa-verdict` region of the reviewer's answer; a missing,
    repeated, quoted or malformed verdict never counts as approval.
 7. **Gate.** Only a candidate with fresh passing evidence and an approving verdict is delivered.
    Blocking findings go back to the developer as a revision, up to the policy's revision limit.
