@@ -164,6 +164,19 @@ fn candidate_settings_risks(
 ///
 /// Returns [`GoalError`] if a step cannot run; a failing agent or check is an outcome.
 pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcome, GoalError> {
+    let mut attempts = Vec::new();
+    run_verified_goal_inner(request, &mut attempts).map_err(|mut error| {
+        for attempt in attempts.iter().filter(|attempt| !attempt.confined) {
+            error.detail = format!("{}\n{}", attempt.summary(), error.detail);
+        }
+        error
+    })
+}
+
+fn run_verified_goal_inner(
+    request: &VerifiedRequest<'_>,
+    attempts: &mut Vec<GoalOutcome>,
+) -> Result<VerifiedOutcome, GoalError> {
     // An agent loads these settings when it starts, so they are judged before any agent runs.
     let risks = kaisa_workspace::scan_settings(request.repository)
         .map_err(at("scanning the repository's agent settings"))?;
@@ -185,7 +198,6 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
     let mut budget = RevisionBudget::new(request.policy.policy().revision_limit);
     let mut base: String = original_base.commit.clone();
     let mut instruction: String = request.goal.to_owned();
-    let mut attempts: Vec<GoalOutcome> = Vec::new();
     let no_paths = WriteSet::default();
     loop {
         let developed: GoalOutcome = run_goal(&GoalRequest {
@@ -218,7 +230,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             return Ok(finish(
                 Delivery::Refuse("the developer agent produced no successful change".to_owned()),
                 None,
-                attempts,
+                std::mem::take(attempts),
             ));
         };
         let candidate: Candidate =
@@ -241,7 +253,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                     outside.join(", ")
                 )),
                 Some(candidate),
-                attempts,
+                std::mem::take(attempts),
             ));
         }
         // Every later agent starts from this candidate, so its settings are judged again first.
@@ -261,6 +273,13 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             request.checks,
         )?;
         if let Some(first_pass) = request.first_pass {
+            let local_basis = match request.reduced_mode {
+                kaisa_domain::ReducedModeBasis::Decision(_) => request.reduced_mode.clone(),
+                _ if cfg!(windows) => kaisa_domain::ReducedModeBasis::DefaultPolicy(
+                    kaisa_domain::DefaultReducedPolicy::WindowsLocalModel,
+                ),
+                _ => kaisa_domain::ReducedModeBasis::None,
+            };
             let glanced: GoalOutcome = run_goal(&GoalRequest {
                 repository: request.repository,
                 goal: &review_instruction(request.goal, &candidate),
@@ -270,12 +289,12 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 role: Role::Reviewer,
                 launch: first_pass.launch,
                 kaisa_executable: request.kaisa_executable,
-                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                confine_agent: !cfg!(windows),
                 egress_hosts: &[],
                 agent_writable: &[],
                 local_model_port: first_pass.model_port,
                 observed: false,
-                reduced_mode: request.reduced_mode,
+                reduced_mode: &local_basis,
             })?;
             if let Some(failure) = reviewer_failure(&glanced) {
                 attempts.push(glanced);
@@ -291,7 +310,11 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                     decide_delivery(&candidate, &evidence, Some(&glance))
             {
                 if !budget.take() {
-                    return Ok(finish(Delivery::Revise(reasons), Some(candidate), attempts));
+                    return Ok(finish(
+                        Delivery::Revise(reasons),
+                        Some(candidate),
+                        std::mem::take(attempts),
+                    ));
                 }
                 base = candidate.commit.clone();
                 instruction = revision_goal(request.goal, &reasons);
@@ -327,7 +350,7 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 base = candidate.commit.clone();
                 instruction = revision_goal(request.goal, &reasons);
             }
-            other => return Ok(finish(other, Some(candidate), attempts)),
+            other => return Ok(finish(other, Some(candidate), std::mem::take(attempts))),
         }
     }
 }

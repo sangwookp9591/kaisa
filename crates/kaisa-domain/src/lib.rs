@@ -27,9 +27,9 @@ pub use attempt::{
 pub use authority::{Authority, Operation};
 pub use catalog::{AgentEntry, AgentKind, Catalog, CatalogError, CatalogModel};
 pub use containment::{
-    Admission, ContainmentCapability, DefaultReducedPolicy, LANDLOCK_NETWORK_ABI,
-    LANDLOCK_TRUNCATE_ABI, ReducedModeBasis, ReducedModeDecision, admit, admit_on, codes,
-    landlock_missing,
+    Admission, ContainmentAgentKind, ContainmentCapability, DefaultReducedPolicy,
+    LANDLOCK_NETWORK_ABI, LANDLOCK_TRUNCATE_ABI, ReducedModeBasis, ReducedModeDecision, admit,
+    admit_agent_on, admit_on, codes, landlock_missing,
 };
 pub use effect::EffectKind;
 pub use event::{Event, EventKind, RecordedEvent, Sequence};

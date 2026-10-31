@@ -1082,3 +1082,287 @@ fn a_codex_goal_records_the_default_policy_that_admitted_it_reduced() {
         "the ledger names the default policy that admitted the observed attempt: {admitted:?}"
     );
 }
+
+/// A direct daemon request, deliberately unconfined, using the same real agent as CLI tests.
+fn a_reduced_daemon_request<'a>(
+    repository: &'a Path,
+    state: &'a Path,
+    launch: kaisa_daemon::AgentLauncher<'a>,
+    basis: &'a kaisa_domain::ReducedModeBasis,
+    write_set: &'a kaisa_domain::WriteSet,
+) -> kaisa_daemon::GoalRequest<'a> {
+    kaisa_daemon::GoalRequest {
+        repository,
+        goal: GOAL,
+        base: "HEAD",
+        state_directory: state,
+        write_set,
+        role: kaisa_domain::Role::Developer,
+        launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: false,
+        egress_hosts: &[],
+        agent_writable: &[],
+        local_model_port: None,
+        observed: false,
+        reduced_mode: basis,
+    }
+}
+
+/// A short but ample setup budget; the delayed launcher deliberately consumes all of it.
+const SHORT_DECISION_MS: u64 = 3_000;
+
+fn a_short_decision() -> kaisa_domain::ReducedModeBasis {
+    kaisa_domain::ReducedModeBasis::Decision(kaisa_domain::ReducedModeDecision {
+        accepts_missing: kaisa_domain::ContainmentCapability::ALL.to_vec(),
+        expires_at_ms: now_ms() + SHORT_DECISION_MS,
+    })
+}
+
+#[test]
+fn a_decision_expiring_inside_the_launcher_refuses_spawn() {
+    let bench = Workbench::new("expiry-before-spawn");
+    let repository = bench.base.join("repo");
+    let state = bench.base.join("state");
+    let basis = a_short_decision();
+    let write_set = kaisa_domain::WriteSet::default();
+    let reached_launcher = std::cell::Cell::new(false);
+    let launch = |_: &Path| {
+        reached_launcher.set(true);
+        let remaining = basis
+            .expires_at_ms()
+            .expect("a Decision")
+            .saturating_sub(now_ms());
+        std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
+        kaisa_sys::ProcessSpec {
+            program: PathBuf::from(env!("CARGO_BIN_EXE_kaisa")),
+            args: vec!["--version".to_owned()],
+            working_directory: repository.clone(),
+            env: Vec::new(),
+        }
+    };
+    let result = kaisa_daemon::run_goal(&a_reduced_daemon_request(
+        &repository,
+        &state,
+        &launch,
+        &basis,
+        &write_set,
+    ));
+
+    assert!(
+        reached_launcher.get(),
+        "the initial admission passed before the deliberate delay"
+    );
+    assert!(
+        result.is_err_and(|error| error.not_admitted()),
+        "the daemon must recheck after launch preparation and refuse the expired spawn"
+    );
+    let attempts = state.join("attempts");
+    assert!(
+        std::fs::read_dir(attempts)
+            .expect("prepared attempts")
+            .all(|entry| !entry
+                .expect("an attempt directory")
+                .path()
+                .join(kaisa_daemon::AGENT_IDENTITY_FILE)
+                .exists()),
+        "no agent process may have started after expiry"
+    );
+}
+
+#[test]
+fn a_reduced_attempt_followed_by_a_check_infrastructure_error_keeps_its_label() {
+    let bench = Workbench::new("reduced-check-error");
+    let state = a_state_with_confinement_turned_off(&bench);
+    std::fs::write(state.join("checks"), "a file blocks check preparation")
+        .expect("a blocked check directory");
+    let extra = a_decision_accepting(EVERY_CAPABILITY, now_ms() + DECISION_LIFETIME_MS);
+    let fake_agent = PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    let mut args = extra;
+    args.extend(a_verified_run(&fake_agent, false));
+    args.splice(
+        0..0,
+        [
+            "--check-program".to_owned(),
+            bench
+                .base
+                .join("missing-check")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(args)
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", &state)
+        .output()
+        .expect("kaisa runs");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        !run.status.success()
+            && output.contains("reduced: the agent process ran without OS confinement")
+            && output.contains("preparing checks"),
+        "an infrastructure error must preserve the reduced attempt label: {output}"
+    );
+}
+
+#[test]
+fn a_running_decision_ends_at_expiry_and_cannot_launch_a_followup_attempt() {
+    let bench = Workbench::new("expiry-during-execution");
+    let repository = bench.base.join("repo");
+    let state = bench.base.join("state");
+    let basis = a_short_decision();
+    let write_set = kaisa_domain::WriteSet::new(vec![
+        kaisa_domain::RepoPath::try_new("src").expect("a path"),
+    ]);
+    let launch = |config: &Path| kaisa_sys::ProcessSpec {
+        program: PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+            .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX)),
+        args: vec![
+            "--mcp-config".to_owned(),
+            config.to_string_lossy().into_owned(),
+            "--fake-write".to_owned(),
+            "src/notes.md".to_owned(),
+            "--hang-after-write".to_owned(),
+        ],
+        working_directory: repository.clone(),
+        env: Vec::new(),
+    };
+    let request = a_reduced_daemon_request(&repository, &state, &launch, &basis, &write_set);
+    let started = std::time::Instant::now();
+    let outcome =
+        kaisa_daemon::run_goal(&request).expect("the expired process is ended and preserved");
+    const DEADLINE_TOLERANCE_MS: u64 = 2_000;
+    assert!(
+        outcome.exit.is_none()
+            && started.elapsed()
+                < std::time::Duration::from_millis(SHORT_DECISION_MS + DEADLINE_TOLERANCE_MS),
+        "a hanging agent must be killed by its Decision deadline"
+    );
+    let followup = kaisa_daemon::run_goal(&request);
+    assert!(
+        followup.is_err_and(|error| error.not_admitted()),
+        "reviewer and revision dispatches must not reuse the expired permission"
+    );
+    let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
+    let events = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("events read");
+    assert!(
+        events.iter().any(|event| event
+            .recorded
+            .event
+            .payload
+            .contains("Decision execution deadline reached")),
+        "the durable record must explain why the running agent was ended"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_reduced_developer_keeps_the_local_first_pass_confined() {
+    let bench = Workbench::new("claude-local-scope");
+    let repository = bench.base.join("repo");
+    let state = bench.base.join("state");
+    let fake = PathBuf::from(env!("CARGO_BIN_EXE_kaisa")).with_file_name("kaisa-fake-agent");
+    let claude = bench.base.join("claude");
+    std::os::unix::fs::symlink(&fake, &claude).expect("a test Claude executable");
+    let scripted = |program: PathBuf, config: &Path, words: &[&str]| kaisa_sys::ProcessSpec {
+        program,
+        args: [
+            vec![
+                "--mcp-config".to_owned(),
+                config.to_string_lossy().into_owned(),
+            ],
+            words.iter().map(|word| (*word).to_owned()).collect(),
+        ]
+        .concat(),
+        working_directory: repository.clone(),
+        env: Vec::new(),
+    };
+    let developer =
+        |config: &Path| scripted(claude.clone(), config, &["--fake-write-next", "src/step"]);
+    let reviewer = |config: &Path| {
+        scripted(
+            claude.clone(),
+            config,
+            &["--fake-review-require", "src/step-1.md"],
+        )
+    };
+    let local = |config: &Path| {
+        scripted(
+            fake.clone(),
+            config,
+            &["--fake-review-require", "src/step-1.md"],
+        )
+    };
+    let basis = kaisa_domain::ReducedModeBasis::DefaultPolicy(
+        kaisa_domain::DefaultReducedPolicy::ClaudeReducedUntilT16,
+    );
+    const LOCAL_MODEL_PORT: u16 = 12345;
+    let policy = kaisa_domain::Policy::personal_default()
+        .snapshot()
+        .expect("a valid policy");
+    let write_set = kaisa_domain::WriteSet::new(vec![
+        kaisa_domain::RepoPath::try_new("src").expect("a path"),
+    ]);
+    let outcome = kaisa_daemon::run_verified_goal(&kaisa_daemon::VerifiedRequest {
+        repository: &repository,
+        state_directory: &state,
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: false,
+        checks: &[],
+        policy: &policy,
+        observed: false,
+        first_pass: Some(kaisa_daemon::FirstPass {
+            launch: &local,
+            model_port: Some(LOCAL_MODEL_PORT),
+        }),
+        egress_hosts: &[],
+        agent_writable: &[],
+        reduced_mode: &basis,
+    })
+    .expect("Claude's policy does not leak into the local first pass");
+    const FIRST_PASS_INDEX: usize = 1;
+    let first_pass = &outcome.attempts[FIRST_PASS_INDEX];
+    assert!(
+        first_pass.confined && first_pass.admitted_on == kaisa_domain::ReducedModeBasis::None,
+        "the first pass must use its own loopback-only sandbox and need no Claude permission"
+    );
+}
+
+#[test]
+fn a_claude_default_cannot_spawn_a_scripted_or_local_model_process() {
+    let bench = Workbench::new("policy-executable-scope");
+    let repository = bench.base.join("repo");
+    let state = bench.base.join("state");
+    let basis = kaisa_domain::ReducedModeBasis::DefaultPolicy(
+        kaisa_domain::DefaultReducedPolicy::ClaudeReducedUntilT16,
+    );
+    let write_set = kaisa_domain::WriteSet::default();
+    let launch = |_: &Path| kaisa_sys::ProcessSpec {
+        program: PathBuf::from(env!("CARGO_BIN_EXE_kaisa")),
+        args: vec!["--version".to_owned()],
+        working_directory: repository.clone(),
+        env: Vec::new(),
+    };
+    const LOCAL_MODEL_PORT: u16 = 12345;
+    for port in [None, Some(LOCAL_MODEL_PORT)] {
+        let mut request =
+            a_reduced_daemon_request(&repository, &state, &launch, &basis, &write_set);
+        request.local_model_port = port;
+        assert!(
+            kaisa_daemon::run_goal(&request).is_err_and(|error| error.not_admitted()),
+            "the spawn boundary must bind Claude's default to the actual agent kind (port {port:?})"
+        );
+    }
+}
