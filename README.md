@@ -7,8 +7,9 @@ attempt its own copy of your repository and keeps the agent inside an OS sandbox
 against your tests and an independent reviewer, sends it back for revision when the review finds a
 blocking problem, and asks you only when a human decision is actually needed.
 
-> **Status: milestones M0 and M1 are implemented** (safe single attempt, verified team). CI runs on
-> macOS, Linux and Windows for every commit. Some protections are still *reduced* on some platforms;
+> **Status: M0 and M1 run end to end with real Claude Code and Codex on macOS; some M0/M1 tasks are
+> built but not yet connected** (marked ◐ in [`docs/tasks/`](docs/tasks/)). CI runs on macOS, Linux
+> and Windows for every commit; real-agent runs have been checked on macOS only. Some protections are still *reduced* on some platforms;
 > the [protection status](#protection-status) table says exactly which. Performance and security
 > properties are published only after they have been measured and tested on every supported
 > platform. Task-level progress lives in [`docs/tasks/`](docs/tasks/).
@@ -27,7 +28,11 @@ blocking problem, and asks you only when a human decision is actually needed.
 
 ## What works today
 
-<!-- W3b 결과 반영 대기 -->
+Checked with logged-in Claude Code and Codex CLIs on macOS: a verified fix, a second session that
+recalls the first one's lesson, Codex developing with Claude reviewing, a goal that weakens tests
+(stops for a person), a change to what the checks run (stops for a person) and `--confine-claude`.
+A delivered result stays on its `kaisa/att_…` branch; the last line of the output says how to
+bring it in.
 
 ```bash
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
