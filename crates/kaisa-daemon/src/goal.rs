@@ -8,14 +8,14 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kaisa_agents::first_message;
 use kaisa_context::{ContextPack, PackInputs, ProjectProfile, derive_profile};
 use kaisa_domain::{
-    Admission, AttemptId, AttemptState, Cleanup, ContainmentCapability, ContentDigest,
-    DefaultReducedPolicy, Event, EventKind, Execution, ExitStatus, MissionId, ReducedModeBasis,
-    RepoPath, Role, RunId, TaskId, WriteSet, admit_on, codes,
+    Admission, AttemptId, AttemptState, Cleanup, ContainmentAgentKind, ContainmentCapability,
+    ContentDigest, DefaultReducedPolicy, Event, EventKind, Execution, ExitStatus, MissionId,
+    ReducedModeBasis, RepoPath, Role, RunId, TaskId, WriteSet, admit_agent_on, admit_on, codes,
 };
 use kaisa_keeper::{ExitRecord, write_exit_record};
 use kaisa_ledger::EventStore;
@@ -274,6 +274,48 @@ pub(crate) fn record_cleanup(
     )
 }
 
+/// A Decision's first observation survives reviewer/revision dispatches in this daemon.
+/// The wall clock can shorten this budget, never extend its monotonic deadline.
+fn decision_budget(basis: &ReducedModeBasis) -> Option<Duration> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CLOCKS: OnceLock<Mutex<HashMap<u64, (u64, Instant)>>> = OnceLock::new();
+    let ReducedModeBasis::Decision(decision) = basis else {
+        return Some(AGENT_DEADLINE);
+    };
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|time| u64::try_from(time.as_millis()).ok())?;
+    let mut clocks = CLOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?;
+    let (started, instant) = clocks
+        .entry(decision.expires_at_ms)
+        .or_insert_with(|| (wall, Instant::now()));
+    let elapsed = u64::try_from(instant.elapsed().as_millis()).ok()?;
+    decision
+        .remaining_ms(*started, wall, elapsed)
+        .map(|ms| Duration::from_millis(ms).min(AGENT_DEADLINE))
+}
+
+fn executable_kind(request: &GoalRequest<'_>, agent: &ProcessSpec) -> ContainmentAgentKind {
+    if request.observed {
+        ContainmentAgentKind::Observed
+    } else if request.local_model_port.is_some() {
+        ContainmentAgentKind::LocalModel
+    } else if agent
+        .program
+        .file_stem()
+        .is_some_and(|name| name == "claude")
+    {
+        ContainmentAgentKind::Claude
+    } else {
+        ContainmentAgentKind::Other
+    }
+}
+
 /// Runs `request` to a preserved result.
 ///
 /// # Errors
@@ -281,6 +323,19 @@ pub(crate) fn record_cleanup(
 /// Returns [`GoalError`] naming the step that failed; everything recorded until then stays in
 /// the ledger, and nothing is deleted that was not preserved.
 pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
+    let mut reduced_notice = None;
+    run_goal_inner(request, &mut reduced_notice).map_err(|mut error| {
+        if let Some(notice) = reduced_notice {
+            error.detail = format!("{notice}\n{}", error.detail);
+        }
+        error
+    })
+}
+
+fn run_goal_inner(
+    request: &GoalRequest<'_>,
+    reduced_notice: &mut Option<String>,
+) -> Result<GoalOutcome, GoalError> {
     // An observed agent writes directly, which Kaisa's confinement would forbid.
     let confine_agent: bool = request.confine_agent && !request.observed;
     kaisa_sys::ensure_private_directory(request.state_directory)
@@ -297,6 +352,9 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         request.reduced_mode
     };
     let admission: Admission = admit_on(&expected_missing(confine_agent), basis, now_ms());
+    if decision_budget(basis).is_none() {
+        return Err(GoalError::refused(admission.missing(), basis));
+    }
     if let Admission::Refused { missing } = &admission {
         return Err(GoalError::refused(missing, basis));
     }
@@ -488,11 +546,23 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     // the agent does not start.
     let missing: Vec<ContainmentCapability> = sandbox.missing();
     let unaccepted: Vec<ContainmentCapability> = beyond_admitted(&missing, admission.missing());
-    if !unaccepted.is_empty() {
+    let spawn_admission =
+        admit_agent_on(&missing, basis, executable_kind(request, &agent), now_ms());
+    let deadline = decision_budget(basis);
+    if !unaccepted.is_empty()
+        || matches!(spawn_admission, Admission::Refused { .. })
+        || deadline.is_none()
+    {
         sandbox.release();
         #[cfg(any(unix, windows))]
         finish_broker(broker)?;
-        return Err(GoalError::refused(&unaccepted, basis));
+        return Err(GoalError::refused(&missing, basis));
+    }
+    if !missing.is_empty() {
+        *reduced_notice = Some(format!(
+            "reduced: missing {}; admitted on {basis}",
+            codes(&missing)
+        ));
     }
     state.start().map_err(at("starting the attempt"))?;
     record_execution(&mut ledger, &attempt, Execution::Starting)?;
@@ -503,11 +573,19 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
         &agent,
         &sandbox.confinement(),
         input.as_bytes(),
-        AGENT_DEADLINE,
+        deadline.expect("the spawn guard checked the Decision budget"),
         TRANSCRIPT_CAP,
         &mut |identity| record_identity(&identity_file, identity),
     )
     .map_err(at("running the agent"))?;
+    if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {
+        record(
+            &mut ledger,
+            EventKind::AttemptStateChanged,
+            attempt.as_str(),
+            json!({"reason": "Decision execution deadline reached", "expires_at_ms": basis.expires_at_ms()}),
+        )?;
+    }
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)
         .map_err(at("saving the transcript"))?;
     if let Some(usage) = kaisa_agents::parse_usage(&String::from_utf8_lossy(&finished.output)) {

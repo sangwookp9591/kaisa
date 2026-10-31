@@ -99,6 +99,36 @@ pub struct ReducedModeDecision {
     pub expires_at_ms: u64,
 }
 
+impl ReducedModeDecision {
+    /// Remaining permission, bounded by both clocks. A backwards wall clock fails closed.
+    #[must_use]
+    pub fn remaining_ms(&self, started_ms: u64, now_ms: u64, elapsed_ms: u64) -> Option<u64> {
+        if now_ms < started_ms {
+            return None;
+        }
+        let wall = self.expires_at_ms.checked_sub(now_ms)?;
+        let monotonic = self
+            .expires_at_ms
+            .checked_sub(started_ms)?
+            .checked_sub(elapsed_ms)?;
+        let remaining = wall.min(monotonic);
+        (remaining > 0).then_some(remaining)
+    }
+}
+
+/// The executable kind to which a default containment policy may apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainmentAgentKind {
+    /// Claude Code.
+    Claude,
+    /// Codex under its own sandbox.
+    Observed,
+    /// Kaisa's loopback-only model client.
+    LocalModel,
+    /// A scripted or other agent with no default reduced permission.
+    Other,
+}
+
 /// A documented default that admits a reduced run without a per-run Decision. The set is fixed
 /// in code: nothing a person or an agent types can name a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,17 +137,30 @@ pub enum DefaultReducedPolicy {
     /// Claude Code runs without OS confinement until a confined run is verified on every OS
     /// (T16.0; README "Protection status").
     ClaudeReducedUntilT16,
+    /// Windows local models need loopback, unavailable inside AppContainer (README).
+    WindowsLocalModel,
     /// An observed agent (Codex, T32c) writes under its own sandbox; its changes are checked
     /// against the write set afterwards, not on each write.
     ObservedCheckedAfterwards,
 }
 
 impl DefaultReducedPolicy {
+    /// Each default is bound to its documented executable kind.
+    #[must_use]
+    pub fn applies_to(self, kind: ContainmentAgentKind) -> bool {
+        match self {
+            Self::ClaudeReducedUntilT16 => kind == ContainmentAgentKind::Claude,
+            Self::ObservedCheckedAfterwards => kind == ContainmentAgentKind::Observed,
+            Self::WindowsLocalModel => cfg!(windows) && kind == ContainmentAgentKind::LocalModel,
+        }
+    }
+
     /// The stable code the ledger records.
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
             Self::ClaudeReducedUntilT16 => "claude-reduced-until-T16.0",
+            Self::WindowsLocalModel => "windows-local-model-loopback",
             Self::ObservedCheckedAfterwards => "observed-checked-afterwards",
         }
     }
@@ -129,6 +172,7 @@ impl fmt::Display for DefaultReducedPolicy {
             Self::ClaudeReducedUntilT16 => {
                 "default policy claude-reduced-until-T16.0: Claude Code runs reduced until its confined run is verified (T16.0)"
             }
+            Self::WindowsLocalModel => "default policy windows-local-model-loopback: local models run reduced because AppContainer has no loopback",
             Self::ObservedCheckedAfterwards => {
                 "default policy observed-checked-afterwards: an observed agent's changes are checked afterwards (T32c)"
             }
@@ -280,6 +324,22 @@ pub fn admit_on(
     }
 }
 
+/// Checks policy scope as well as Decision scope and expiry for an executable kind.
+#[must_use]
+pub fn admit_agent_on(
+    missing: &[ContainmentCapability],
+    basis: &ReducedModeBasis,
+    kind: ContainmentAgentKind,
+    now_ms: u64,
+) -> Admission {
+    if let ReducedModeBasis::DefaultPolicy(policy) = basis
+        && !policy.applies_to(kind)
+    {
+        return admit(missing, None, now_ms);
+    }
+    admit_on(missing, basis, now_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -292,6 +352,8 @@ mod tests {
     const NINE_O_CLOCK_MS: u64 = 1_793_350_800_000;
     /// One hour, in milliseconds.
     const HOUR_MS: u64 = 60 * 60 * 1000;
+    /// The wall clock moved backwards before any monotonic time elapsed.
+    const NO_ELAPSED_TIME_MS: u64 = 0;
 
     /// The Linux gap today: Landlock confines TCP but not UDP.
     fn the_linux_udp_gap() -> Vec<ContainmentCapability> {
@@ -453,6 +515,60 @@ mod tests {
             ContainmentCapability::from_code("everything"),
             None,
             "a Decision cannot accept a capability Kaisa does not know"
+        );
+    }
+    #[test]
+    fn a_backwards_wall_clock_expires_a_previously_observed_decision() {
+        let decision = a_decision_accepting_the_udp_gap_until(NINE_O_CLOCK_MS + HOUR_MS);
+        assert_eq!(
+            decision.remaining_ms(
+                NINE_O_CLOCK_MS,
+                NINE_O_CLOCK_MS - HOUR_MS,
+                NO_ELAPSED_TIME_MS
+            ),
+            None,
+            "clock rollback must fail closed instead of extending human permission"
+        );
+    }
+
+    #[test]
+    fn elapsed_monotonic_time_expires_a_decision_even_when_wall_time_stalls() {
+        let decision = a_decision_accepting_the_udp_gap_until(NINE_O_CLOCK_MS + HOUR_MS);
+        assert_eq!(
+            decision.remaining_ms(NINE_O_CLOCK_MS, NINE_O_CLOCK_MS, HOUR_MS),
+            None,
+            "the original monotonic deadline bounds permission even when wall time stops"
+        );
+    }
+
+    #[test]
+    fn the_claude_default_refuses_every_other_agent_kind() {
+        use super::{ContainmentAgentKind, admit_agent_on};
+        let basis = ReducedModeBasis::DefaultPolicy(DefaultReducedPolicy::ClaudeReducedUntilT16);
+        for kind in [
+            ContainmentAgentKind::LocalModel,
+            ContainmentAgentKind::Other,
+            ContainmentAgentKind::Observed,
+        ] {
+            assert!(
+                matches!(
+                    admit_agent_on(&ContainmentCapability::ALL, &basis, kind, NINE_O_CLOCK_MS),
+                    Admission::Refused { .. }
+                ),
+                "the Claude default must never admit {kind:?}"
+            );
+        }
+        assert!(
+            matches!(
+                admit_agent_on(
+                    &ContainmentCapability::ALL,
+                    &basis,
+                    ContainmentAgentKind::Claude,
+                    NINE_O_CLOCK_MS
+                ),
+                Admission::Reduced { .. }
+            ),
+            "the documented Claude policy still applies to Claude"
         );
     }
 }
