@@ -45,12 +45,40 @@ pub fn preserve_as_commit(
     let mut paths: Vec<String> = Vec::new();
     let mut covered: Vec<String> = Vec::new();
     let mut flagged: Vec<(String, Vec<SecretKind>)> = Vec::new();
+    let mut expanded = Vec::new();
     for entry in &inventory.preserve {
         let mut files = Vec::new();
         expand_files(worktree, &entry.path, &mut files)?;
+        expanded.push((entry, files));
+    }
+    let files: Vec<_> = expanded
+        .iter()
+        .flat_map(|(_, files)| files.iter())
+        .collect();
+    let mut encoded = std::collections::HashSet::new();
+    // Bound argv size while avoiding one Git process per file in large directories.
+    for batch in files.chunks(128) {
+        let mut args = vec!["check-attr", "-z", "working-tree-encoding", "--"];
+        args.extend(batch.iter().map(|path| path.as_str()));
+        let attributes = run_git_for_preservation(worktree.path(), &hooks, &args)?;
+        let fields: Vec<_> = attributes.split(|byte| *byte == 0).collect();
+        for record in fields.as_chunks::<3>().0 {
+            if record[2] != b"unspecified" && record[2] != b"unset" {
+                encoded.insert(String::from_utf8_lossy(record[0]).into_owned());
+            }
+        }
+    }
+    for (entry, files) in expanded {
         let mut all_clean = true;
         for path in files {
-            match secrets_in(worktree, &path) {
+            // Git can decode arbitrary encodings before committing. Raw byte scans
+            // cannot certify these files; retain them for manual preservation.
+            let kinds = if encoded.contains(&path) {
+                Some(vec![SecretKind::Unscannable])
+            } else {
+                secrets_in(worktree, &path)
+            };
+            match kinds {
                 Some(kinds) if !kinds.is_empty() => {
                     all_clean = false;
                     flagged.push((path, kinds));
@@ -137,6 +165,22 @@ pub fn preserve_as_commit(
         }
         committed.contains(&path.as_str())
     });
+    let mut verified = Vec::new();
+    for batch in covered.chunks(128) {
+        if content_matches_head(worktree, &hooks, batch) {
+            verified.extend_from_slice(batch);
+        } else {
+            verified.extend(
+                batch
+                    .iter()
+                    .filter(|path| {
+                        content_matches_head(worktree, &hooks, std::slice::from_ref(path))
+                    })
+                    .cloned(),
+            );
+        }
+    }
+    covered = verified;
     Ok(Preservation {
         receipt: PreservationReceipt::committed(
             &head,
@@ -144,6 +188,24 @@ pub fn preserve_as_commit(
         ),
         flagged,
     })
+}
+
+/// A receipt requires equal contents, not just a path present in the commit.
+fn content_matches_head(
+    worktree: &Worktree,
+    hooks: &crate::git::EmptyHooksDirectory,
+    paths: &[String],
+) -> bool {
+    let mut args = vec![
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        "--no-textconv",
+        "HEAD",
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    run_git_for_preservation(worktree.path(), hooks, &args).is_ok()
 }
 
 /// Expand directory inventory entries before scanning or staging. Symlinks are leaves;
@@ -942,6 +1004,25 @@ mod tests {
             ("keys.pfx", vec![0, 0xff, 0]),
             ("keys.jks", vec![0, 0xff, 0]),
             ("app.keystore", vec![0, 0xff, 0]),
+            (".env", b"opaque secret".to_vec()),
+            (".npmrc", b"opaque secret".to_vec()),
+            (".netrc", b"opaque secret".to_vec()),
+            ("state.tfstate", b"opaque state".to_vec()),
+            ("vault.kdbx", vec![0, 0xff, 0]),
+            ("slack.txt", format!("xoxb-{}", "a".repeat(24)).into_bytes()),
+            ("google.txt", format!("AIza{}", "a".repeat(35)).into_bytes()),
+            (
+                "openai.txt",
+                format!("sk-proj-{}", "a".repeat(24)).into_bytes(),
+            ),
+            (
+                "jwt.txt",
+                b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature".to_vec(),
+            ),
+            (
+                "short-aws.txt",
+                b"AWS_SECRET_ACCESS_KEY=shortButSensitive".to_vec(),
+            ),
             ("id_rsa", b"opaque SSH key".to_vec()),
             ("id_ed25519", b"opaque SSH key".to_vec()),
         ]
@@ -1202,5 +1283,163 @@ mod tests {
                 "committed deletion must be covered, staged={staged}"
             );
         }
+    }
+    #[test]
+    fn working_tree_encoding_files_are_flagged_before_git_decodes_a_secret() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let encoded_path = "encoded.txt";
+        the_agent_writes(
+            &worktree,
+            ".gitattributes",
+            "encoded.txt working-tree-encoding=UTF-32LE\n",
+        );
+        let secret = "AWS_KEY=AKIAABCDEFGHIJKLMNOP\n";
+        let encoded: Vec<u8> = secret
+            .chars()
+            .flat_map(|character| u32::from(character).to_le_bytes())
+            .collect();
+        std::fs::write(worktree.path().join(encoded_path), encoded).expect("write encoded secret");
+        git_text(worktree.path(), &["add", "--", encoded_path])
+            .expect("agent stages encoded secret");
+        assert_eq!(
+            git_text(worktree.path(), &["show", ":encoded.txt"]).expect("read Git's decoded blob"),
+            secret.trim(),
+            "the fixture must reproduce a plain-text secret in Git's staged blob"
+        );
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        let before = what_needs_preserving(&worktree);
+        let preservation = preserve_as_commit(&worktree, &before).expect("preserve clean source");
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, kinds)| path == encoded_path
+                    && kinds.contains(&crate::secrets::SecretKind::Unscannable)),
+            "Git's encoding conversion must never bypass the raw byte scanner"
+        );
+        assert!(
+            !committed_files(&worktree)
+                .lines()
+                .any(|path| path == encoded_path),
+            "encoded secrets must stay out of history"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "encoded data must remain available for manual preservation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gitlink_with_hostile_nested_filters_is_unscannable_without_executing_them() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let nested = worktree.path().join("sub");
+        std::fs::create_dir_all(&nested).expect("create nested checkout");
+        git_text(&nested, &["init", "--quiet"]).expect("initialize hostile nested repository");
+        std::fs::write(nested.join("notes"), "original nested data").expect("write nested file");
+        git_text(&nested, &["add", "notes"]).expect("stage nested file");
+        git_text(
+            &nested,
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "nested base",
+            ],
+        )
+        .expect("commit nested data");
+        let head = git_text(&nested, &["rev-parse", "HEAD"]).expect("read nested commit");
+        git_text(
+            worktree.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},sub"),
+            ],
+        )
+        .expect("stage matching parent gitlink");
+        git_text(
+            worktree.path(),
+            &["commit", "--quiet", "-m", "record gitlink"],
+        )
+        .expect("commit gitlink before hostile configuration");
+        let marker = repository.sibling("nested-filter-executed");
+        let filter = format!("touch '{}'; cat", marker.display());
+        git_text(&nested, &["config", "filter.hostile.clean", &filter])
+            .expect("install hostile nested filter");
+        std::fs::write(nested.join(".gitattributes"), "* filter=hostile\n")
+            .expect("set nested attributes");
+        std::fs::write(nested.join("notes"), "modified nested data").expect("modify nested file");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "clean source");
+        git_text(
+            worktree.path(),
+            &["status", "--porcelain=v2", "--ignore-submodules=none"],
+        )
+        .expect("demonstrate unsafe nested inspection");
+        assert!(
+            marker.exists(),
+            "the hostile fixture must execute its filter with ordinary Git status"
+        );
+        std::fs::remove_file(&marker).expect("clear reproduction marker");
+        let unbound_policy = crate::git::EmptyHooksDirectory::create()
+            .expect("create policy before metadata binding");
+        crate::git::run_git_for_preservation(
+            worktree.path(),
+            &unbound_policy,
+            &["status", "--porcelain=v2"],
+        )
+        .expect("configuration discovery policy must suppress nested inspection too");
+        assert!(
+            !marker.exists(),
+            "every preservation command must suppress nested configuration even before metadata binding"
+        );
+        let before = what_needs_preserving(&worktree);
+        assert!(
+            !marker.exists(),
+            "inventory must not execute a gitlink repository's filter"
+        );
+        let preservation = preserve_as_commit(&worktree, &before)
+            .expect("preserve clean source beside nested repository");
+        assert!(
+            !marker.exists(),
+            "add and commit must not execute nested configuration either"
+        );
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, kinds)| path == "sub"
+                    && kinds.contains(&crate::secrets::SecretKind::Unscannable)),
+            "ignored submodule status must still flag nested data"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "nested repository contents must block reclamation"
+        );
+    }
+
+    #[test]
+    fn an_existing_head_path_with_changed_contents_has_no_content_coverage() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        let policy = worktree
+            .preservation_policy()
+            .expect("bind safe Git policy");
+        assert!(
+            super::content_matches_head(&worktree, &policy, &["README.md".to_owned()]),
+            "unchanged tracked contents should match HEAD"
+        );
+        the_agent_writes(&worktree, "README.md", "uncommitted replacement");
+        assert!(
+            !super::content_matches_head(&worktree, &policy, &["README.md".to_owned()]),
+            "path existence alone cannot prove content preservation"
+        );
     }
 }
