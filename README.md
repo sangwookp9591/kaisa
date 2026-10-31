@@ -60,10 +60,12 @@ A goal ends with one of these results, which scripts and CI can rely on:
    needs no re-explanation.
 2. **Develop.** The developer agent works in its own worktree; its file writes go through Kaisa's
    broker, which enforces the write set. Before it starts, Kaisa compares what the OS sandbox really
-   guarantees (write confinement, TCP, UDP, descendants) with what is needed. A shortfall stops the run
-   with exit `3` and names what is missing, unless a documented default policy covers it (the output
-   names it, for example `claude-reduced-until-T16.0`) or you accept it for a limited time with
-   `--accept-reduced <write,tcp,udp,descendants> --accept-until <unix time in ms>`.
+   guarantees (write confinement, TCP, UDP, Kaisa state read isolation, descendants) with what is needed.
+   A shortfall stops the run with exit `3` and names what is missing, unless a documented default
+   policy covers it (the output names it, for example `claude-reduced-until-T16.0`) or you accept it for a limited time with
+   `--accept-reduced <write,tcp,udp,state-read,descendants> --accept-until <unix time in ms>`.
+   Decisions written for the old four capability codes no longer cover unconfined runs; they must
+   also accept `state-read`.
 3. **Freeze.** The result becomes an immutable candidate (commit and tree digest).
 4. **Check.** Your project's test command runs on a clean checkout of the candidate, in the sandbox,
    with no agent involved. A candidate that changes its own check definitions needs a person. If a check

@@ -146,6 +146,79 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
     );
 }
 
+/// A fake CLI renamed to select the Claude adapter; no real provider process is started.
+#[cfg(target_os = "macos")]
+fn a_scripted_claude_adapter(bench: &Workbench) -> PathBuf {
+    let program = bench.base.join("claude");
+    std::fs::copy(the_fake_agent(), &program).expect("copy only the fake agent, never real Claude");
+    program
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_claude_adapter_records_its_login_keychain_exception_in_the_ledger() {
+    const SUCCESS: ProcessExit = ProcessExit::Code(0);
+    let bench = Workbench::new("claude-keychain-notice");
+    let program = a_scripted_claude_adapter(&bench);
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let launch = |mcp_config: &Path| ProcessSpec {
+        program: program.clone(),
+        args: vec![
+            "--mcp-config".into(),
+            mcp_config.to_string_lossy().into_owned(),
+            "--fake-write".into(),
+            NOTES.into(),
+        ],
+        working_directory: std::env::temp_dir(),
+        env: Vec::new(),
+    };
+    let outcome = run_goal(&GoalRequest {
+        repository: &bench.repository(),
+        goal: GOAL,
+        base: "HEAD",
+        state_directory: &bench.state(),
+        write_set: &write_set,
+        role: kaisa_domain::Role::Developer,
+        launch: &launch,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        egress_hosts: &[],
+        agent_writable: &[],
+        local_model_port: None,
+        observed: false,
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    })
+    .expect("the scripted Claude adapter runs confined");
+    assert_eq!(
+        outcome.exit,
+        Some(SUCCESS),
+        "the fake adapter must complete"
+    );
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("ledger");
+    let events = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("ledger events");
+    let notices: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|event| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.recorded.event.payload).expect("JSON event");
+            (payload.get("login_keychain_access") == Some(&serde_json::Value::Bool(true)))
+                .then_some(payload)
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|payload| payload["notice"]
+            .as_str()
+            .is_some_and(|text| text.contains("login keychain"))),
+        "the ledger must disclose the confined agent's keychain exception"
+    );
+    ledger
+        .rebuild_attempts()
+        .expect("the notice must preserve the state event schema");
+}
+
 /// Where the probe tries to write around the broker, relative to the agent's worktree.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 const DIRECT_WRITE: &str = "src/direct.md";

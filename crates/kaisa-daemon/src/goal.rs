@@ -535,6 +535,7 @@ fn run_goal_inner(
             request.agent_writable,
             &broker.1,
             egress_port,
+            kaisa_agents::needs_keychain_login(&agent.program),
         )
         .map_err(at("building the agent's sandbox"))?
     } else {
@@ -588,7 +589,18 @@ fn run_goal_inner(
         ));
     }
     state.start().map_err(at("starting the attempt"))?;
-    record_execution(&mut ledger, &attempt, Execution::Starting)?;
+    let login_keychain_access = cfg!(target_os = "macos")
+        && confine_agent
+        && kaisa_agents::needs_keychain_login(&agent.program);
+    record(
+        &mut ledger,
+        EventKind::AttemptStateChanged,
+        attempt.as_str(),
+        json!({"execution": Execution::Starting.code(),
+            "login_keychain_access": login_keychain_access,
+            "notice": login_keychain_access.then_some(
+                "This confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot.")}),
+    )?;
     state.confirm_running().map_err(at("running the attempt"))?;
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);

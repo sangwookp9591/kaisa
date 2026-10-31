@@ -20,6 +20,11 @@ pub struct SeatbeltPolicy {
     pub unreadable: Vec<PathBuf>,
     /// Exact files or directory trees needed inside an otherwise unreadable state directory.
     pub readable: Vec<PathBuf>,
+    /// Canonical readable paths that existed as directories at policy construction.
+    pub readable_directories: Vec<PathBuf>,
+    /// Whether this agent needs the login keychain for its own OAuth credential.
+    /// Checks and broker exec must leave this false.
+    pub needs_keychain_login: bool,
     /// Directories (or files) the agent may change: the write set and the scratch area. Paths
     /// must be absolute and canonical (`/private/var`, not `/var`).
     pub writable: Vec<PathBuf>,
@@ -52,6 +57,12 @@ impl SeatbeltPolicy {
             .iter()
             .map(|path| Ok(canonical_path(&std::path::absolute(path)?)))
             .collect::<std::io::Result<_>>()?;
+        self.readable_directories = self
+            .readable
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect();
         Ok(())
     }
 }
@@ -65,6 +76,59 @@ fn canonical_path(path: &Path) -> PathBuf {
     match (path.parent(), path.file_name()) {
         (Some(parent), Some(name)) => canonical_path(parent).join(name),
         _ => path.to_owned(),
+    }
+}
+
+/// Include the configured home as well as the account database home.
+fn keychain_homes() -> Vec<PathBuf> {
+    let mut homes: Vec<PathBuf> = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    #[cfg(unix)]
+    homes.extend(passwd_home());
+    homes.sort();
+    homes.dedup();
+    homes
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)] // Account lookup belongs at the OS boundary.
+fn passwd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 1024];
+    loop {
+        // SAFETY: getpwuid_r receives an output passwd, a live writable buffer and result
+        // pointer. We inspect the entry only on success, and copy pw_dir before dropping
+        // the buffer that owns its string. getuid has no preconditions.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            buffer.resize(buffer.len().checked_mul(2)?, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: successful getpwuid_r initialized entry and its NUL-terminated pw_dir
+        // points into buffer, which remains alive while the path is copied.
+        return unsafe {
+            let home = entry.assume_init().pw_dir;
+            (!home.is_null()).then(|| {
+                PathBuf::from(std::ffi::OsStr::from_bytes(
+                    std::ffi::CStr::from_ptr(home).to_bytes(),
+                ))
+            })
+        };
     }
 }
 
@@ -94,14 +158,14 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
         ));
     }
     // Keep the denials after the broad read/write allowances. Exceptions are filters on
-    // the denial, never broad later allow rules that could reopen somebody else's state.
+    // the denial. The later ancestor allowances grant metadata only, never file data.
     for path in &policy.unreadable {
         profile.push_str(&format!(
             "(deny file-read* (require-all (subpath {})",
             sbpl_string(&path.to_string_lossy())
         ));
         for readable in &policy.readable {
-            let filter = if readable.is_dir() {
+            let filter = if policy.readable_directories.contains(readable) {
                 "subpath"
             } else {
                 "literal"
@@ -113,15 +177,30 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
         }
         profile.push_str("))\n");
     }
-    // Subscription CLI login is not a reason to expose Kaisa's signing key. Claude's
-    // documented default remains reduced/unconfined until confined login is verified.
-    profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.SecurityServer\") (global-name-regex \"^com[.]apple[.]security[.].*\"))\n");
-    if let Some(home) = std::env::var_os("HOME") {
-        let keychains = canonical_path(&PathBuf::from(home).join("Library/Keychains"));
-        profile.push_str(&format!(
-            "(deny file-read* file-write* (subpath {}))\n",
-            sbpl_string(&keychains.to_string_lossy())
-        ));
+    // Path-walking runtimes need ancestor metadata, but never directory listings or data.
+    for root in &policy.unreadable {
+        for readable in &policy.readable {
+            for ancestor in readable
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(root))
+            {
+                profile.push_str(&format!(
+                    "(allow file-read-metadata (literal {}))\n",
+                    sbpl_string(&ancestor.to_string_lossy())
+                ));
+            }
+        }
+    }
+    if !policy.needs_keychain_login {
+        profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.SecurityServer\") (global-name-regex \"^com[.]apple[.]security(d)?[.]\"))\n");
+        for home in keychain_homes() {
+            let keychains = canonical_path(&home.join("Library/Keychains"));
+            profile.push_str(&format!(
+                "(deny file-read* file-write* (subpath {}))\n",
+                sbpl_string(&keychains.to_string_lossy())
+            ));
+        }
     }
     if let Some(root) = &policy.git_control_root {
         let root = regex_literal(root.to_string_lossy().trim_end_matches('/'));
@@ -340,6 +419,63 @@ mod tests {
             }
         }
 
+        #[test]
+        fn readable_bridge_ancestors_allow_metadata_but_deny_directory_listings() {
+            const SUCCESS: ProcessExit = ProcessExit::Code(0);
+            let worktree = ScratchWorktree::new("ancestor-listing");
+            let state = worktree.path("state");
+            let attempt = state.join("attempts/own");
+            std::fs::create_dir_all(&attempt).expect("attempt directory");
+            let token = attempt.join("bridge.token");
+            std::fs::write(&token, "fixture").expect("bridge token");
+            let mut policy = SeatbeltPolicy {
+                readable: vec![token],
+                ..SeatbeltPolicy::default()
+            };
+            policy.protect_state(&state).expect("protected state");
+            for ancestor in [&state, &state.join("attempts"), &attempt] {
+                let listing = ProcessSpec {
+                    program: "/bin/ls".into(),
+                    args: vec![ancestor.to_string_lossy().into_owned()],
+                    working_directory: worktree.root.clone(),
+                    env: Vec::new(),
+                };
+                assert_ne!(
+                    run_sandboxed(&listing, &policy),
+                    SUCCESS,
+                    "ancestor metadata must not grant directory listing of {ancestor:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_overridden_home_still_denies_the_account_keychain_directory() {
+            const PROBE: &str = "KAISA_KEYCHAIN_HOME_PROBE";
+            if std::env::var_os(PROBE).is_some() {
+                let home = super::super::passwd_home().expect("account home");
+                let keychains = super::super::canonical_path(&home.join("Library/Keychains"));
+                let profile = super::super::seatbelt_profile(&SeatbeltPolicy::default());
+                let denial = format!(
+                    "(deny file-read* file-write* (subpath {}))",
+                    super::super::sbpl_string(&keychains.to_string_lossy())
+                );
+                assert!(
+                    profile.contains(&denial),
+                    "an overridden HOME must not conceal the account keychain denial"
+                );
+                return;
+            }
+            let result = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "seatbelt::tests::enforced::an_overridden_home_still_denies_the_account_keychain_directory", "--nocapture"])
+                .env(PROBE, "1").env("HOME", "/tmp/kaisa-fictional-login-home")
+                .output().expect("isolated HOME probe");
+            assert!(
+                result.status.success(),
+                "the account keychain must remain denied: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+
         /// Run the native Keychain query inside a sandboxed copy of this test executable.
         /// Unlike `security`, SecItemCopyMatching preserves the service denial error instead
         /// of falling back to a legacy search and reporting the misleading item-not-found.
@@ -347,20 +483,27 @@ mod tests {
         fn a_confined_keychain_query_is_denied_before_item_lookup() {
             const PROBE: &str = "KAISA_KEYCHAIN_SANDBOX_PROBE";
             if std::env::var_os(PROBE).is_some() {
-                let lookup = security_service_lookup_status();
                 const BOOTSTRAP_NOT_PRIVILEGED: i32 = 1100;
-                assert_eq!(
-                    lookup, BOOTSTRAP_NOT_PRIVILEGED,
-                    "Seatbelt must deny the securityd service, rather than rely on item absence"
-                );
-                let status = nonexistent_keychain_item_status();
+                for service in [c"com.apple.SecurityServer", c"com.apple.securityd.xpc"] {
+                    assert_eq!(
+                        security_service_lookup_status(service),
+                        BOOTSTRAP_NOT_PRIVILEGED,
+                        "Seatbelt must deny the real keychain service {service:?}"
+                    );
+                }
                 const ITEM_NOT_FOUND: i32 = -25300;
-                assert_ne!(
-                    status, ITEM_NOT_FOUND,
-                    "the query must fail at the sandbox boundary"
-                );
-                assert_ne!(status, 0, "a nonexistent item cannot be returned");
-                println!("sandboxed keychain query status: {status}");
+                const QUERY_SUCCEEDED: i32 = 0;
+                for data_protection in [false, true] {
+                    let status = nonexistent_keychain_item_status(data_protection);
+                    assert_ne!(
+                        status, ITEM_NOT_FOUND,
+                        "the query must fail at the sandbox boundary (data protection: {data_protection})"
+                    );
+                    assert_ne!(
+                        status, QUERY_SUCCEEDED,
+                        "a nonexistent item cannot be returned"
+                    );
+                }
                 return;
             }
             let spec = ProcessSpec {
@@ -378,8 +521,40 @@ mod tests {
             );
         }
 
+        #[test]
+        fn a_login_keychain_policy_keeps_real_keychain_services_reachable() {
+            const SUCCESS: ProcessExit = ProcessExit::Code(0);
+            const PROBE: &str = "KAISA_LOGIN_KEYCHAIN_PROBE";
+            if std::env::var_os(PROBE).is_some() {
+                const LOOKUP_SUCCEEDED: i32 = 0;
+                for service in [c"com.apple.SecurityServer", c"com.apple.securityd.xpc"] {
+                    assert_eq!(
+                        security_service_lookup_status(service),
+                        LOOKUP_SUCCEEDED,
+                        "Claude's declared login capability must retain {service:?}"
+                    );
+                }
+                return;
+            }
+            let spec = ProcessSpec {
+                program: std::env::current_exe().expect("test executable"),
+                args: vec!["--exact".into(), "seatbelt::tests::enforced::a_login_keychain_policy_keeps_real_keychain_services_reachable".into(), "--nocapture".into()],
+                working_directory: std::env::temp_dir(),
+                env: vec![(PROBE.into(), "1".into())],
+            };
+            let policy = SeatbeltPolicy {
+                needs_keychain_login: true,
+                ..SeatbeltPolicy::default()
+            };
+            assert_eq!(
+                run_sandboxed(&spec, &policy),
+                SUCCESS,
+                "the agent-only login policy must retain keychain service access"
+            );
+        }
+
         #[allow(unsafe_code)] // Native Mach lookup probe stays within the OS-boundary crate.
-        fn security_service_lookup_status() -> i32 {
+        fn security_service_lookup_status(service: &std::ffi::CStr) -> i32 {
             // SAFETY: declarations match bootstrap.h; the immutable bootstrap port belongs
             // to this process and the output port points to initialized writable storage.
             unsafe extern "C" {
@@ -392,11 +567,11 @@ mod tests {
             }
             let mut port = 0;
             // SAFETY: a NUL-terminated static name and a valid output pointer are supplied.
-            unsafe { bootstrap_look_up(bootstrap_port, c"com.apple.securityd".as_ptr(), &mut port) }
+            unsafe { bootstrap_look_up(bootstrap_port, service.as_ptr(), &mut port) }
         }
 
         #[allow(unsafe_code)] // Native Keychain probe stays within the OS-boundary crate.
-        fn nonexistent_keychain_item_status() -> i32 {
+        fn nonexistent_keychain_item_status(data_protection: bool) -> i32 {
             use std::ffi::c_void;
             // SAFETY: declarations match Security.framework's SecItem.h.
             #[link(name = "Security", kind = "framework")]
@@ -404,11 +579,13 @@ mod tests {
                 static kSecClass: *const c_void;
                 static kSecClassGenericPassword: *const c_void;
                 static kSecAttrService: *const c_void;
+                static kSecUseDataProtectionKeychain: *const c_void;
                 fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
             }
             // SAFETY: declarations match CoreFoundation's creation/release functions.
             #[link(name = "CoreFoundation", kind = "framework")]
             unsafe extern "C" {
+                static kCFBooleanTrue: *const c_void;
                 fn CFStringCreateWithCString(
                     allocator: *const c_void,
                     text: *const std::ffi::c_char,
@@ -434,8 +611,12 @@ mod tests {
                     UTF8,
                 );
                 assert!(!service.is_null(), "the service string must allocate");
-                let keys = [kSecClass, kSecAttrService];
-                let values = [kSecClassGenericPassword, service];
+                let mut keys = vec![kSecClass, kSecAttrService];
+                let mut values = vec![kSecClassGenericPassword, service];
+                if data_protection {
+                    keys.push(kSecUseDataProtectionKeychain);
+                    values.push(kCFBooleanTrue);
+                }
                 let query = CFDictionaryCreate(
                     std::ptr::null(),
                     keys.as_ptr(),
