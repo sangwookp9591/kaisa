@@ -44,6 +44,31 @@ try {
         Assert-Kaisa ($script:broadcasts -eq $priorBroadcasts) 'reinstalling must not duplicate the PATH entry'
         Write-Output "PASS: a_supported_windows_install_chooses_its_asset_and_updates_user_path ($requested)"
     }
+    # Reinstall over an existing binary through the destination-filesystem replacement path.
+    $null = Install-Kaisa
+    Assert-Kaisa ((Get-Content -LiteralPath (Join-Path $env:KAISA_INSTALL_DIR 'kaisa.exe')) -eq $binaryText) 'atomic replacement must preserve the expected binary'
+    function Move-KaisaBinary { throw 'fixture destination locked' }
+    $locked = $false
+    try { Install-Kaisa } catch {
+        Assert-Kaisa ($_.Exception.Message -like '*close running kaisa processes*') 'locked updates must explain how to retry'
+        $locked = $true
+    }
+    Assert-Kaisa $locked 'a failed replacement must fail installation'
+    Assert-Kaisa ((Get-Content -LiteralPath (Join-Path $env:KAISA_INSTALL_DIR 'kaisa.exe')) -eq $binaryText) 'failed replacement must preserve the existing binary'
+    Assert-Kaisa (@(Get-ChildItem -LiteralPath $env:KAISA_INSTALL_DIR -Filter '.kaisa-*.tmp' -Force).Count -eq 0) 'failed replacement must clean staged files'
+    Write-Output 'PASS: replacement failure preserves the previous installation and cleans staging'
+    # Execute the exact README bootstrap with an octet-stream fixture, without network access.
+    function Invoke-WebRequest {
+        param([switch]$UseBasicParsing, [Parameter(Position=0)]$Uri, $OutFile)
+        Assert-Kaisa (-not [string]::IsNullOrEmpty($OutFile)) 'bootstrap must download bytes to a file'
+        [IO.File]::WriteAllBytes($OutFile, [Text.Encoding]::UTF8.GetBytes("Write-Output 'bootstrap-fixture-executed'"))
+    }
+    $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../README.md') -Raw
+    $bootstrap = [regex]::Match($readme, '(?m)^\$installer = .+$').Value
+    Assert-Kaisa ($bootstrap.Length -gt 0) 'README bootstrap must be exercised by this test'
+    $bootstrapOutput = & ([scriptblock]::Create($bootstrap))
+    Assert-Kaisa ($bootstrapOutput -eq 'bootstrap-fixture-executed') 'download-and-run must execute UTF-8 octet-stream bytes'
+    Write-Output 'PASS: documented download-and-run executes octet-stream content'
     $env:KAISA_INSTALL_DIR = Join-Path $fixture 'rejected'
     Add-Content -LiteralPath (Join-Path $release $asset) -Value 'tampered archive'
     $rejected = $false

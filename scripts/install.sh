@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install a checksum-verified release. The override base uses GitHub's releases layout.
 set -eu
+main() {
 fail() { printf 'kaisa install: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || fail 'curl is required'
 case "$(uname -s)" in
@@ -14,11 +15,23 @@ case "$(uname -m)" in
     arm64|aarch64) arch=aarch64 ;;
     *) fail 'unsupported architecture (expected x86_64 or aarch64)' ;;
 esac
+if [ "$platform" = apple-darwin ] && [ "$arch" = x86_64 ] &&
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || :)" = 1 ]; then
+    arch=aarch64
+fi
 base=${KAISA_INSTALL_BASE_URL:-https://github.com/sangwookp9591/kaisa/releases}
 base=${base%/}
 work=$(mktemp -d) || fail 'cannot create temporary directory'
-trap 'rm -rf "$work"' EXIT HUP INT TERM
-fetch() { curl -fsSL "$1" -o "$2" || fail "download failed: $1"; }
+trap 'rm -rf "$work"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fetch() {
+    case "$base" in
+        https://*) curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1" -o "$2" ;;
+        *) curl -fsSL "$1" -o "$2" ;;
+    esac || fail "download failed: $1"
+}
 version=${KAISA_VERSION:-}
 if [ -z "$version" ]; then
     fetch "$base/latest/download/VERSION" "$work/VERSION"
@@ -40,6 +53,7 @@ elif command -v shasum >/dev/null 2>&1; then
 else
     fail 'sha256sum or shasum is required to verify the checksum'
 fi
+expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
 actual=${actual%% *}
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset; nothing installed"
 # Extract only the expected binary; never unpack arbitrary archive paths into the destination.
@@ -50,7 +64,7 @@ case "$install_dir" in /*) ;; *) fail 'KAISA_INSTALL_DIR must be an absolute pat
 mkdir -p "$install_dir"
 # Stage on the destination filesystem so replacing an existing binary is atomic.
 staged=$(mktemp "$install_dir/.kaisa.XXXXXX") || fail 'cannot stage binary'
-trap 'rm -rf "$work"; rm -f "$staged"' EXIT HUP INT TERM
+trap 'rm -rf "$work"; rm -f "$staged"' EXIT
 cp "$work/kaisa" "$staged"
 chmod 755 "$staged"
 mv -f "$staged" "$install_dir/kaisa"
@@ -60,8 +74,25 @@ case ":${PATH:-}:" in
     *)
         # Single-quote escaping keeps spaces, dollar signs and apostrophes literal.
         quoted_dir=$(printf '%s' "$install_dir" | sed "s/'/'\\\\''/g")
-        printf 'Add this exact line to your shell profile (for example ~/.profile):\n'
-        printf "export PATH='%s':\"\$PATH\"\n" "$quoted_dir"
+        # Literal profile names are instructions, not paths opened by this script.
+        # shellcheck disable=SC2088
+        case "${SHELL:-}" in
+            */zsh|zsh) profile='~/.zshrc' ;;
+            */bash|bash)
+                if [ "$platform" = apple-darwin ]; then profile='~/.bash_profile'; else profile='~/.bashrc'; fi ;;
+            */fish|fish) profile='~/.config/fish/config.fish' ;;
+            *) profile='~/.profile' ;;
+        esac
+        printf 'Add this exact line to %s, then open a new terminal:\n' "$profile"
+        case "${SHELL:-}" in
+            */fish|fish)
+                # Fish single quotes escape backslashes and apostrophes with a backslash.
+                fish_dir=$(printf '%s' "$install_dir" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")
+                printf "fish_add_path -- '%s'\n" "$fish_dir" ;;
+            *) printf "export PATH='%s':\"\$PATH\"\n" "$quoted_dir" ;;
+        esac
         ;;
 esac
 printf 'Open a new terminal, then run: kaisa\n'
+}
+main "$@"

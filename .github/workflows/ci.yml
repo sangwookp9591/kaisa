@@ -37,9 +37,9 @@ jobs:
         shell: sh
         run: |
           scripts/test-install.sh
-          if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck scripts/install.sh scripts/test-install.sh
-          fi
+      - name: ShellCheck installers
+        if: runner.os == 'Linux'
+        run: shellcheck scripts/install.sh scripts/test-install.sh
       - name: Offline installer tests (PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell

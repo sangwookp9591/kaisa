@@ -30,12 +30,14 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           if [ "$EVENT_NAME" = push ]; then
             version=${RELEASE_TAG#v}
           else
-            version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+            version=$cargo_version
           fi
           [[ "$version" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo 'Invalid release version'; exit 1; }
+          [ "$version" = "$cargo_version" ] || { echo "Tag version differs from Cargo version"; exit 1; }
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain and target
         shell: bash
@@ -55,16 +57,24 @@ jobs:
             export RUSTFLAGS='-C target-feature=+crt-static -C linker=musl-gcc'
           fi
           cargo build --release --locked -p kaisa --target '${{ matrix.target }}'
+      - name: Test release commit
+        shell: bash
+        run: |
+          cargo build --locked -p kaisa-fake-agent
+          cargo test --workspace --locked --no-fail-fast
       - name: Verify Linux binary has no dynamic interpreter
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          if readelf -l 'target/${{ matrix.target }}/release/kaisa' | grep -q INTERP; then
+          readelf -l 'target/${{ matrix.target }}/release/kaisa' > elf-headers.txt
+          if grep -q INTERP elf-headers.txt; then
             echo 'Expected a static musl binary without a dynamic loader'; exit 1
           fi
       - name: Smoke-test native release
         shell: bash
-        run: target/${{ matrix.target }}/release/kaisa --version
+        run: |
+          actual=$(target/${{ matrix.target }}/release/kaisa --version)
+          [ "$actual" = "kaisa $VERSION" ] || { echo "Unexpected binary version: $actual"; exit 1; }
       - name: Package Unix binary
         if: runner.os != 'Windows'
         shell: bash
@@ -77,7 +87,7 @@ jobs:
         run: |
           New-Item -ItemType Directory dist
           Compress-Archive -LiteralPath 'target/${{ matrix.target }}/release/kaisa.exe' -DestinationPath "dist/kaisa-$env:VERSION-${{ matrix.target }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -85,11 +95,9 @@ jobs:
   collect:
     needs: build
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-*
           merge-multiple: true
@@ -103,14 +111,27 @@ jobs:
           version=${first#./kaisa-}
           printf '%s\n' "${version%-x86_64-pc-windows-msvc.zip}" > VERSION
           cp ../scripts/install.sh ../scripts/install.ps1 .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
           path: dist/*
           if-no-files-found: error
+  publish:
+    needs: collect
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist
       - name: Publish tagged release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"

@@ -1,5 +1,6 @@
 # PowerShell 5.1+; dot-source to load functions without installing.
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 function Get-KaisaUserPath {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
     try { return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
@@ -44,6 +45,21 @@ function Get-KaisaDownload([string]$Url, [string]$Destination) {
     if ($uri.IsFile) { Copy-Item -LiteralPath $uri.LocalPath -Destination $Destination }
     else { Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination }
 }
+function Move-KaisaBinary([string]$Source, [string]$Destination) {
+    if ([IO.File]::Exists($Destination)) { [IO.File]::Replace($Source, $Destination, [System.Management.Automation.Language.NullString]::Value) }
+    else { [IO.File]::Move($Source, $Destination) }
+}
+function Publish-KaisaBinary([string]$Source, [string]$Directory) {
+    $staged = Join-Path $Directory ('.kaisa-' + [Guid]::NewGuid().ToString() + '.tmp')
+    try {
+        Copy-Item -LiteralPath $Source -Destination $staged
+        Move-KaisaBinary $staged (Join-Path $Directory 'kaisa.exe')
+    } catch {
+        throw "kaisa install: could not replace kaisa.exe; close running kaisa processes and retry. Existing installation preserved. $($_.Exception.Message)"
+    } finally {
+        if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+    }
+}
 function Install-Kaisa {
     if ($env:OS -ne 'Windows_NT') { throw 'kaisa install: Windows is required; use install.sh on macOS/Linux' }
     $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -83,7 +99,7 @@ function Install-Kaisa {
         if (-not [IO.Path]::IsPathRooted($directory) -or $directory.Contains(';')) { throw 'kaisa install: install directory must be absolute and contain no semicolon' }
         $directory = [IO.Path]::GetFullPath($directory)
         $null = New-Item -ItemType Directory -Force -Path $directory
-        Copy-Item -LiteralPath (Join-Path $work 'kaisa.exe') -Destination (Join-Path $directory 'kaisa.exe') -Force
+        Publish-KaisaBinary (Join-Path $work 'kaisa.exe') $directory
         Write-Output "Installed kaisa $version to $directory\kaisa.exe"
         Update-KaisaUserPath $directory
         Write-Output 'Open a new terminal, then run: kaisa'

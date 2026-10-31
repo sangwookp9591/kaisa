@@ -134,15 +134,14 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 
   | OS | Command |
   |---|---|
-  | macOS | `brew install kaisa` |
-  | Windows | `winget install Kaisa` |
-  | Linux | the distro package, or the install script from the internal portal |
+  | macOS / Linux | See the checksum-verified POSIX command in [README Install](../README.md#install) |
+  | Windows | See the PowerShell download-and-run command in [README Install](../README.md#install) |
 
-  The exact internal URL and package names are fixed at release *(tbd)*.
+  Homebrew, winget and internal package distribution remain planned.
 - **Non-admin install.** On every OS a per-user install goes to `~/.local/bin` or `%LOCALAPPDATA%\Programs\kaisa`.
-  - The installer adds that directory to the user PATH and prints *"Open a new terminal, then run `kaisa`"*.
+  - POSIX prints a PATH command for the user’s shell (zsh, bash or fish) to add; Windows updates the user PATH. It then prints *"Open a new terminal, then run `kaisa`"*.
   - On Windows it writes the user-PATH registry entry and broadcasts the change, so a new PowerShell window sees it.
-- **What Kaisa installs.** One signed binary. Nothing else is downloaded, and no daemon starts.
+- **What Kaisa installs.** One checksum-verified binary from a release archive, checked against the release manifest. Signing is planned; no daemon starts.
 - **WSL.** Native Windows is recommended. Inside WSL, Kaisa runs as a Linux install and says so.
 - **Proxies and certificates.**
   - Proxy settings come from the OS.

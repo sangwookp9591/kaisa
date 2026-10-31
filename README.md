@@ -89,27 +89,27 @@ the review may even approve it, and Kaisa still refuses to deliver: the candidat
 
 ```sh
 # macOS / Linux
-curl -fsSL https://github.com/sangwookp9591/kaisa/releases/latest/download/install.sh | sh
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://github.com/sangwookp9591/kaisa/releases/latest/download/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell 5.1+ or pwsh)
-& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing https://github.com/sangwookp9591/kaisa/releases/latest/download/install.ps1).Content))
+$installer = Join-Path ([IO.Path]::GetTempPath()) (([Guid]::NewGuid().ToString()) + '.ps1'); try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing https://github.com/sangwookp9591/kaisa/releases/latest/download/install.ps1 -OutFile $installer; & ([scriptblock]::Create([IO.File]::ReadAllText($installer))) } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
 ```
 
 The installers download one binary archive and verify it against the release's `SHA256SUMS` before
 installing. They need no administrator rights and start no daemon. macOS/Linux installs to
 `~/.local/bin` and prints the exact PATH line to add to your shell profile when needed; Windows
 installs to `%LOCALAPPDATA%\Programs\kaisa`, announces the user PATH update, then saves it and
-broadcasts the change. Open a new terminal, then run: `kaisa`.
+broadcasts the change. Add the printed PATH line if needed, open a new terminal, then run: `kaisa`.
 
 Set `KAISA_VERSION` (for example `v0.1.0`) to pin a release, or `KAISA_INSTALL_DIR` to choose an
 absolute install directory. `KAISA_INSTALL_BASE_URL` overrides the release root for mirrors or
 offline tests: it must provide `latest/download/VERSION` and `download/v<version>/<asset>` plus
 `SHA256SUMS` in that version's directory. Local `file://` roots are supported. Proxy and certificate
 handling follows curl / PowerShell; TLS verification stays enabled. Archives are checksummed,
-**not code-signed**; Homebrew and winget packages are not available yet. Linux binaries use musl
-on x86_64 and aarch64, with SQLite bundled; macOS supports both architectures and Windows supports x86_64.
+**not code-signed**; checksums confirm integrity against the same trusted release host and are not independent signatures; Homebrew and winget packages are not available yet. The release workflow targets musl Linux
+on x86_64 and aarch64, with SQLite bundled (native build validation pending); macOS supports both architectures and Windows supports x86_64.
 
 **Build from source**
 
