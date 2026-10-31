@@ -328,8 +328,6 @@ fn run_verified_goal_inner(
             request.checks,
         )?;
         for piece in &mut evidence {
-            piece.require_person_when_tests_weaken =
-                request.policy.policy().require_person_when_tests_weaken;
             let exit = match piece.exit {
                 Some(ProcessExit::Code(code)) => json!({"code": code}),
                 Some(ProcessExit::Terminated) => json!({"terminated": true}),

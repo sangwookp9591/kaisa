@@ -41,10 +41,8 @@ pub struct Evidence {
     /// Check-definition files the candidate changed since its base; when any are named, the
     /// check may be testing rules the agent wrote, so a person must accept the result.
     pub definitions_changed: Vec<String>,
-    /// File-specific test weakening signals, preserved even when policy permits delivery.
+    /// File-specific test weakening signals. Any of them stops delivery for a person.
     pub weakened_tests: Vec<String>,
-    /// Whether weakening requires human confirmation under this run policy.
-    pub require_person_when_tests_weaken: bool,
 }
 
 impl Evidence {
@@ -145,7 +143,6 @@ pub fn run_trusted_checks(
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
             weakened_tests: weakened_tests.clone(),
-            require_person_when_tests_weaken: true,
         });
         if source_changed {
             // Keep the failed evidence, but never let later checks run on changed sources.

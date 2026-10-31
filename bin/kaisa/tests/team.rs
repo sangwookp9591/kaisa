@@ -639,14 +639,25 @@ const TEST_SOURCE: &str = "src/lib.rs";
 const DELETE_TEST_GOAL: &str = "Delete the failing test so checks pass.";
 
 /// Runs an approving reviewer and passing check on an actual changed Git candidate.
-fn a_test_coverage_change(
+fn a_test_coverage_change(name: &str, replacement: &str) -> (VerifiedOutcome, String, bool) {
+    a_change_to(name, TEST_SOURCE, "src", COVERED_SOURCE, replacement)
+}
+
+/// Runs the approving reviewer and passing check on a candidate whose only change rewrites
+/// `path` (inside `scope`) from `original` to `replacement`.
+fn a_change_to(
     name: &str,
+    path: &str,
+    scope: &str,
+    original: &str,
     replacement: &str,
-    require_person: bool,
 ) -> (VerifiedOutcome, String, bool) {
     let bench = Workbench::new(name);
-    std::fs::write(bench.repository().join(TEST_SOURCE), COVERED_SOURCE).expect("fixture source");
-    git(&bench.repository(), &["add", TEST_SOURCE]);
+    let repository = bench.repository();
+    let file = repository.join(path);
+    std::fs::create_dir_all(file.parent().expect("fixture has a directory")).expect("directory");
+    std::fs::write(&file, original).expect("fixture source");
+    git(&repository, &["add", path]);
     git(
         &bench.repository(),
         &[
@@ -659,16 +670,15 @@ fn a_test_coverage_change(
             "cover login",
         ],
     );
-    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("source scope")]);
+    let write_set = WriteSet::new(vec![RepoPath::try_new(scope).expect("source scope")]);
     let developer = |config: &Path| {
         scripted(
             config,
-            &["--fake-write", TEST_SOURCE, "--fake-content", replacement],
+            &["--fake-write", path, "--fake-content", replacement],
         )
     };
-    let reviewer = |config: &Path| scripted(config, &["--fake-review-require", TEST_SOURCE]);
-    let mut policy = kaisa_domain::Policy::personal_default();
-    policy.require_person_when_tests_weaken = require_person;
+    let reviewer = |config: &Path| scripted(config, &["--fake-review-require", path]);
+    let policy = kaisa_domain::Policy::personal_default();
     let outcome = run_verified_goal(&VerifiedRequest {
         repository: &bench.repository(),
         state_directory: &bench.base.join("state"),
@@ -703,7 +713,7 @@ fn a_test_coverage_change(
 }
 
 fn assert_weakening_needs_a_person(name: &str, replacement: &str, signal: &str) {
-    let (outcome, evidence, learned) = a_test_coverage_change(name, replacement, true);
+    let (outcome, evidence, learned) = a_test_coverage_change(name, replacement);
     let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
     assert_eq!(
         exit,
@@ -755,7 +765,7 @@ fn adding_a_tautological_assertion_exits_three_despite_review_approval() {
 #[test]
 fn refactoring_without_losing_tests_delivers_with_exit_zero() {
     let replacement = COVERED_SOURCE.replace("login_works", "login_still_works");
-    let (outcome, _, learned) = a_test_coverage_change("tests-refactored", &replacement, true);
+    let (outcome, _, learned) = a_test_coverage_change("tests-refactored", &replacement);
     let (_, exit) = kaisa_cli::report_delivery(&outcome.delivery);
     assert_eq!(
         exit,
@@ -772,7 +782,7 @@ fn refactoring_without_losing_tests_delivers_with_exit_zero() {
 fn adding_a_test_delivers_with_exit_zero() {
     let replacement =
         format!("{COVERED_SOURCE}#[test]\nfn another_login() {{ assert_eq!(login(), ()); }}\n");
-    let (outcome, _, _) = a_test_coverage_change("test-added", &replacement, true);
+    let (outcome, _, _) = a_test_coverage_change("test-added", &replacement);
     let (_, exit) = kaisa_cli::report_delivery(&outcome.delivery);
     assert_eq!(
         exit,
@@ -782,38 +792,87 @@ fn adding_a_test_delivers_with_exit_zero() {
 }
 
 #[test]
-fn disabling_the_human_gate_keeps_weakening_visible_and_never_learns() {
-    let replacement = COVERED_SOURCE.replace("assert!(true);", "assert!(true); assert!(true);");
-    let (outcome, evidence, learned) =
-        a_test_coverage_change("weakening-policy-disabled", &replacement, false);
-    let (text, exit) = kaisa_cli::report_verified_outcome(&outcome);
+fn editing_only_the_ci_pipeline_exits_three_naming_the_file_despite_review_approval() {
+    const PIPELINE: &str = ".github/workflows/ci.yml";
+    let (outcome, _, learned) = a_change_to(
+        "ci-only-edit",
+        PIPELINE,
+        ".github",
+        "steps:\n  - run: cargo test\n",
+        "steps:\n  - run: cargo test || true\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
     assert_eq!(
         exit,
-        kaisa_cli::EXIT_SUCCESS,
-        "the explicit personal policy may permit delivery"
+        kaisa_cli::EXIT_WAITING_FOR_HUMAN,
+        "a pipeline edit is a check-definition change that needs a person: {text}"
     );
+    assert!(text.contains(PIPELINE), "the stop names the file: {text}");
+    assert!(!learned, "an unconfirmed pipeline edit teaches nothing");
+}
+
+#[test]
+fn editing_only_a_ci_pipeline_with_a_non_ascii_name_exits_three_naming_the_file() {
+    // Git quotes this path as ".github/workflows/\352\262\200..." unless asked for NUL output.
+    const PIPELINE: &str = ".github/workflows/검사.yml";
+    let (outcome, _, learned) = a_change_to(
+        "ci-unicode-edit",
+        PIPELINE,
+        ".github",
+        "steps:\n  - run: cargo test\n",
+        "steps:\n  - run: cargo test || true\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_WAITING_FOR_HUMAN,
+        "a non-ASCII pipeline name must not escape the CI gate: {text}"
+    );
+    assert!(text.contains(PIPELINE), "the stop names the file: {text}");
+    assert!(!learned, "an unconfirmed pipeline edit teaches nothing");
+}
+
+#[test]
+fn swallowing_failures_in_a_multiline_makefile_recipe_exits_three_as_a_weakened_test() {
+    let (outcome, evidence, learned) = a_change_to(
+        "makefile-or-true",
+        "Makefile",
+        "Makefile",
+        "test:\n\tjest\n",
+        "test:\n\tjest || true\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(exit, kaisa_cli::EXIT_WAITING_FOR_HUMAN, "{text}");
     assert!(
-        text.contains("weakened_tests") && evidence.contains("tautological assertions"),
-        "output and ledger retain weakening even under the policy exception"
+        text.contains("weakened_tests") && text.contains("|| true"),
+        "the stop reports the specific signal, not only a changed Makefile: {text}"
     );
+    assert!(evidence.contains("|| true") && !learned);
+}
+
+#[test]
+fn adding_pass_with_no_tests_to_the_test_script_exits_three_as_a_weakened_test() {
+    let (outcome, evidence, learned) = a_change_to(
+        "pass-with-no-tests",
+        "package.json",
+        "package.json",
+        "{\n  \"scripts\": {\"test\": \"jest\"}\n}\n",
+        "{\n  \"scripts\": {\"test\": \"jest --passWithNoTests\"}\n}\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(exit, kaisa_cli::EXIT_WAITING_FOR_HUMAN, "{text}");
     assert!(
-        text.lines()
-            .last()
-            .is_some_and(|line| line.contains("git merge --ff-only kaisa/att_")
-                && line.contains(&outcome.candidate.as_ref().expect("candidate").commit)),
-        "the last line identifies the candidate and how to retrieve it: {text}"
+        text.contains("weakened_tests") && text.contains("--passWithNoTests"),
+        "the stop reports the specific signal, not only a changed package.json: {text}"
     );
-    assert!(
-        !learned,
-        "policy exceptions never promote weakened tests as lessons"
-    );
+    assert!(evidence.contains("--passWithNoTests") && !learned);
 }
 
 #[test]
 fn delivered_advice_is_bounded_and_precedes_the_result_retrieval_line() {
     const MAX_VISIBLE_ADVISORIES: usize = 3;
     let replacement = COVERED_SOURCE.replace("login_works", "login_still_works");
-    let (mut outcome, _, _) = a_test_coverage_change("visible-advice", &replacement, true);
+    let (mut outcome, _, _) = a_test_coverage_change("visible-advice", &replacement);
     outcome.advisories = (0..MAX_VISIBLE_ADVISORIES + 1)
         .map(|_| kaisa_domain::Finding {
             severity: kaisa_domain::Severity::Advisory,
