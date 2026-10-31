@@ -1,0 +1,137 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: # Build and collect artifacts only; never publishes.
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$EVENT_NAME" = push ]; then
+            version=${RELEASE_TAG#v}
+          else
+            version=$cargo_version
+          fi
+          [[ "$version" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo 'Invalid release version'; exit 1; }
+          [ "$version" = "$cargo_version" ] || { echo "Tag version differs from Cargo version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain and target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add '${{ matrix.target }}'
+      # Native musl builds avoid both a minimum glibc version and cross-C toolchains.
+      # musl-gcc compiles bundled SQLite and BLAKE3 C/assembly on each matching CPU.
+      - name: Install native musl C toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            export CC=musl-gcc
+            export RUSTFLAGS='-C target-feature=+crt-static -C linker=musl-gcc'
+          fi
+          cargo build --release --locked -p kaisa --target '${{ matrix.target }}'
+      - name: Test release commit
+        shell: bash
+        run: |
+          cargo build --locked -p kaisa-fake-agent
+          cargo test --workspace --locked --no-fail-fast
+      - name: Verify Linux binary has no dynamic interpreter
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          readelf -l 'target/${{ matrix.target }}/release/kaisa' > elf-headers.txt
+          if grep -q INTERP elf-headers.txt; then
+            echo 'Expected a static musl binary without a dynamic loader'; exit 1
+          fi
+      - name: Smoke-test native release
+        shell: bash
+        run: |
+          actual=$(target/${{ matrix.target }}/release/kaisa --version)
+          [ "$actual" = "kaisa $VERSION" ] || { echo "Unexpected binary version: $actual"; exit 1; }
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/kaisa-$VERSION-${{ matrix.target }}.tar.gz" -C 'target/${{ matrix.target }}/release' kaisa
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist
+          Compress-Archive -LiteralPath 'target/${{ matrix.target }}/release/kaisa.exe' -DestinationPath "dist/kaisa-$env:VERSION-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  collect:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums and installer assets
+        shell: bash
+        run: |
+          cd dist
+          sha256sum kaisa-*.tar.gz kaisa-*.zip > SHA256SUMS
+          first=$(find . -name 'kaisa-*-x86_64-pc-windows-msvc.zip' -print -quit)
+          version=${first#./kaisa-}
+          printf '%s\n' "${version%-x86_64-pc-windows-msvc.zip}" > VERSION
+          cp ../scripts/install.sh ../scripts/install.ps1 .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: collect
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"
