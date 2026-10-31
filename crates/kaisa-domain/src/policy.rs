@@ -15,9 +15,11 @@ pub struct Policy {
     pub confine_agents: bool,
     /// The lowest model grade allowed for security review.
     pub min_grade_for_security_review: Grade,
-    /// Whether changing check definitions requires a person's approval.
+    /// Whether changing check definitions requires a person's approval. Only `true` is
+    /// admitted: a candidate that edits what its own checks run is never a pass on its own.
     pub require_person_when_check_definitions_change: bool,
-    /// Whether test weakening requires a person, regardless of reviewer approval.
+    /// Whether test weakening requires a person, regardless of reviewer approval. Only `true`
+    /// is admitted: a flagged candidate never counts as a pass (architecture §5.8).
     pub require_person_when_tests_weaken: bool,
 }
 
@@ -28,6 +30,10 @@ pub enum PolicyError {
     SecurityReviewFloorBelowT3,
     /// The egress allow-list contains an empty host.
     EmptyEgressHost,
+    /// Weakened tests were set not to stop for a person.
+    TestWeakeningMustStopForAPerson,
+    /// Changed check definitions were set not to stop for a person.
+    CheckDefinitionChangesMustStopForAPerson,
 }
 
 impl fmt::Display for PolicyError {
@@ -37,6 +43,14 @@ impl fmt::Display for PolicyError {
                 f.write_str("security review requires a grade of at least T3")
             }
             Self::EmptyEgressHost => f.write_str("an allowed egress host must not be empty"),
+            Self::TestWeakeningMustStopForAPerson => f.write_str(
+                "require_person_when_tests_weaken cannot be false: a candidate that weakens \
+                 tests always stops for a person",
+            ),
+            Self::CheckDefinitionChangesMustStopForAPerson => f.write_str(
+                "require_person_when_check_definitions_change cannot be false: a candidate \
+                 that changes what its checks run always stops for a person",
+            ),
         }
     }
 }
@@ -63,13 +77,20 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`PolicyError`] if security review is below T3 or an egress host is empty.
+    /// Returns [`PolicyError`] if security review is below T3, an egress host is empty, or a
+    /// rule that keeps tampered candidates from passing is switched off.
     pub fn validate(&self) -> Result<(), PolicyError> {
         if self.min_grade_for_security_review < Grade::T3 {
             return Err(PolicyError::SecurityReviewFloorBelowT3);
         }
         if self.allowed_egress_hosts.iter().any(String::is_empty) {
             return Err(PolicyError::EmptyEgressHost);
+        }
+        if !self.require_person_when_tests_weaken {
+            return Err(PolicyError::TestWeakeningMustStopForAPerson);
+        }
+        if !self.require_person_when_check_definitions_change {
+            return Err(PolicyError::CheckDefinitionChangesMustStopForAPerson);
         }
         Ok(())
     }
@@ -182,7 +203,6 @@ mod tests {
         personal_policy.revision_limit = UPDATED_REVISION_LIMIT;
         personal_policy.allowed_egress_hosts.clear();
         personal_policy.confine_agents = false;
-        personal_policy.require_person_when_check_definitions_change = false;
 
         assert_eq!(
             running_attempt.policy(),
@@ -270,6 +290,25 @@ mod tests {
                 "security review must never be routed to {weaker_grade:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_policy_that_lets_tampered_candidates_pass_without_a_person_is_rejected() {
+        let mut weakening: Policy = Policy::personal_default();
+        weakening.require_person_when_tests_weaken = false;
+        let mut definitions: Policy = Policy::personal_default();
+        definitions.require_person_when_check_definitions_change = false;
+
+        assert_eq!(
+            weakening.snapshot(),
+            Err(PolicyError::TestWeakeningMustStopForAPerson),
+            "weakened tests always need a person; no policy lifts that"
+        );
+        assert_eq!(
+            definitions.snapshot(),
+            Err(PolicyError::CheckDefinitionChangesMustStopForAPerson),
+            "changed check definitions always need a person; no policy lifts that"
+        );
     }
 
     #[test]

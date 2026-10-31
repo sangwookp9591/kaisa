@@ -18,8 +18,8 @@ const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
 keys: revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
-      require_person_when_check_definitions_change (true|false),
-      require_person_when_tests_weaken (true|false),
+      require_person_when_check_definitions_change (true only; always enforced),
+      require_person_when_tests_weaken (true only; always enforced),
       min_grade_for_security_review (T0..T3; requires T3)";
 
 fn grade_from(code: &str) -> Option<Grade> {
@@ -272,8 +272,8 @@ mod tests {
         );
         for (key, value) in [
             ("allowed_egress_hosts", "example.com,api.openai.com"),
-            ("require_person_when_check_definitions_change", "false"),
-            ("require_person_when_tests_weaken", "false"),
+            ("require_person_when_check_definitions_change", "true"),
+            ("require_person_when_tests_weaken", "true"),
             ("min_grade_for_security_review", "T3"),
         ] {
             let (status, _, _) = state.command(&["set", key, value]);
@@ -284,8 +284,6 @@ mod tests {
             );
         }
         expected.allowed_egress_hosts = vec!["example.com".into(), "api.openai.com".into()];
-        expected.require_person_when_check_definitions_change = false;
-        expected.require_person_when_tests_weaken = false;
         assert_eq!(
             load(&state.0).expect("all personal choices are saved"),
             expected,
@@ -313,7 +311,9 @@ mod tests {
             ("confine_agents", "yes"),
             ("allowed_egress_hosts", "api.openai.com,"),
             ("require_person_when_check_definitions_change", "no"),
+            ("require_person_when_check_definitions_change", "false"),
             ("require_person_when_tests_weaken", "no"),
+            ("require_person_when_tests_weaken", "false"),
             ("min_grade_for_security_review", "T0"),
             ("min_grade_for_security_review", "T1"),
             ("min_grade_for_security_review", "T2"),
@@ -384,6 +384,46 @@ mod tests {
                 error.kind(),
                 std::io::ErrorKind::InvalidData,
                 "malformed and invalid policies are reported as damaged data"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_off_the_person_gate_is_refused_with_a_message_naming_the_key() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let (status, _, diagnostic) = state.command(&["set", key, "false"]);
+            assert_eq!(status, crate::EXIT_USAGE, "{key}=false is refused");
+            assert!(
+                diagnostic.contains(key) && diagnostic.contains("always stops for a person"),
+                "the refusal says the gate cannot be lifted: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_policy_file_that_switched_the_person_gate_off_is_refused_not_obeyed() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let mut policy = serde_json::json!({
+                "revision_limit": 2, "allowed_egress_hosts": [], "confine_agents": true,
+                "min_grade_for_security_review": "T3",
+                "require_person_when_check_definitions_change": true,
+                "require_person_when_tests_weaken": true,
+            });
+            policy[key] = serde_json::json!(false);
+            std::fs::write(state.0.join(POLICY_FILE), policy.to_string())
+                .expect("the scenario installs an older policy");
+            let error = load(&state.0).expect_err("a policy that lifts the gate is not admitted");
+            assert!(
+                error.to_string().contains(key),
+                "the error names {key}: {error}"
             );
         }
     }

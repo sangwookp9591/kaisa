@@ -51,7 +51,6 @@ pub fn decide_delivery(
     }
     let weakened: Vec<_> = evidence
         .iter()
-        .filter(|piece| piece.require_person_when_tests_weaken)
         .flat_map(|piece| &piece.weakened_tests)
         .collect();
     if !weakened.is_empty() {
@@ -170,7 +169,6 @@ mod tests {
             confined: true,
             definitions_changed: Vec::new(),
             weakened_tests: Vec::new(),
-            require_person_when_tests_weaken: true,
         }
     }
 

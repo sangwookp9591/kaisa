@@ -23,6 +23,9 @@ pub enum RiskRule {
     ClaudeHooks,
     /// A repository MCP configuration adds tool servers.
     RepositoryMcpServer,
+    /// Claude settings approve repository-declared MCP servers without asking
+    /// (`enableAllProjectMcpServers`, `enabledMcpjsonServers`).
+    ClaudeAutoApprovesMcpServers,
     /// Codex never asks for approval.
     CodexApprovalNever,
     /// Codex disables sandbox containment.
@@ -213,6 +216,7 @@ enum Json {
     Object(Vec<(String, Json)>),
     Array(Vec<Json>),
     String(String),
+    Bool(bool),
     Scalar,
 }
 
@@ -252,6 +256,17 @@ fn json_rules(contents: &str, mcp: bool) -> io::Result<Vec<(RiskRule, String)>> 
         }
         match key.as_str() {
             "hooks" => rules.push((RiskRule::ClaudeHooks, "hooks".to_owned())),
+            "enableAllProjectMcpServers" if matches!(value, Json::Bool(true)) => rules.push((
+                RiskRule::ClaudeAutoApprovesMcpServers,
+                "enableAllProjectMcpServers: true".to_owned(),
+            )),
+            "enabledMcpjsonServers" if matches!(value, Json::Array(servers) if !servers.is_empty()) =>
+            {
+                rules.push((
+                    RiskRule::ClaudeAutoApprovesMcpServers,
+                    "enabledMcpjsonServers".to_owned(),
+                ));
+            }
             "defaultMode" if value.string() == Some("bypassPermissions") => rules.push((
                 RiskRule::ClaudeBypassPermissions,
                 "defaultMode: bypassPermissions".to_owned(),
@@ -364,7 +379,11 @@ impl JsonParser<'_> {
             return Err(invalid_json());
         }
         self.remaining = &self.remaining[end..];
-        Ok(Json::Scalar)
+        Ok(match scalar {
+            "true" => Json::Bool(true),
+            "false" => Json::Bool(false),
+            _ => Json::Scalar,
+        })
     }
 
     fn next(&mut self) -> io::Result<char> {
@@ -537,6 +556,60 @@ mod tests {
                 (".codex", RiskRule::Unscannable),
             ],
             "links an agent would follow are reported, and their targets are never read"
+        );
+    }
+
+    #[test]
+    fn claude_settings_that_auto_approve_repository_mcp_servers_are_flagged() {
+        for (file, contents, excerpt) in [
+            (
+                ".claude/settings.json",
+                r#"{"enableAllProjectMcpServers":true}"#,
+                "enableAllProjectMcpServers: true",
+            ),
+            (
+                ".claude/settings.json",
+                r#"{"enabledMcpjsonServers":["repository-tools"]}"#,
+                "enabledMcpjsonServers",
+            ),
+            (
+                ".claude/settings.local.json",
+                r#"{"enableAllProjectMcpServers":true}"#,
+                "enableAllProjectMcpServers: true",
+            ),
+        ] {
+            let repository = a_repository_with_one_commit_on_main();
+            write_settings(repository.path(), file, contents, "auto-approve servers");
+            let findings = scan_settings(repository.path()).expect("settings can be scanned");
+            assert_eq!(
+                findings
+                    .iter()
+                    .map(|finding| (
+                        finding.path.as_str(),
+                        finding.rule,
+                        finding.excerpt.as_str()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![(file, RiskRule::ClaudeAutoApprovesMcpServers, excerpt)],
+                "{contents} lets repository servers run without a prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_settings_that_decline_repository_mcp_servers_are_not_flagged() {
+        let repository = a_repository_with_one_commit_on_main();
+        write_settings(
+            repository.path(),
+            ".claude/settings.json",
+            r#"{"enableAllProjectMcpServers":false,"enabledMcpjsonServers":[]}"#,
+            "decline servers",
+        );
+        assert!(
+            scan_settings(repository.path())
+                .expect("settings can be scanned")
+                .is_empty(),
+            "declining or enabling nothing widens no authority"
         );
     }
 
