@@ -158,7 +158,8 @@ pub fn scan(text: &str) -> Vec<SecretKind> {
 
 /// Scan UTF-8 and UTF-16 in either byte order. BOM-less UTF-16 is common in
 /// generated configuration; scanning both orders avoids trusting an encoding guess.
-pub(crate) fn scan_bytes(bytes: &[u8]) -> Vec<SecretKind> {
+#[must_use]
+pub fn scan_bytes(bytes: &[u8]) -> Vec<SecretKind> {
     let mut found = scan(&String::from_utf8_lossy(bytes));
     for little_endian in [true, false] {
         let units = bytes.as_chunks::<2>().0.iter().map(|pair| {

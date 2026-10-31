@@ -365,8 +365,27 @@ fn executable_kind(request: &GoalRequest<'_>, agent: &ProcessSpec) -> Containmen
 /// Returns [`GoalError`] naming the step that failed; everything recorded until then stays in
 /// the ledger, and nothing is deleted that was not preserved.
 pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
+    run_goal_with_context(request, &AttemptContext::default())
+}
+
+/// Additional context supplied by verification, never inferred from agent-written text.
+#[derive(Default)]
+pub(crate) struct AttemptContext<'a> {
+    pub findings: &'a [String],
+    pub diff: &'a str,
+    pub diff_remainder: &'a str,
+    pub checks: &'a str,
+}
+
+/// A unified patch gets at most 24 KiB, leaving room for requirements and check receipts.
+const REVIEW_DIFF_BYTES: usize = 24 * 1024;
+
+pub(crate) fn run_goal_with_context(
+    request: &GoalRequest<'_>,
+    context: &AttemptContext<'_>,
+) -> Result<GoalOutcome, GoalError> {
     let mut reduced_notice = None;
-    run_goal_inner(request, &mut reduced_notice).map_err(|mut error| {
+    run_goal_inner(request, context, &mut reduced_notice).map_err(|mut error| {
         if let Some(notice) = reduced_notice {
             error.detail = format!("{notice}\n{}", error.detail);
         }
@@ -376,6 +395,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
 
 fn run_goal_inner(
     request: &GoalRequest<'_>,
+    context: &AttemptContext<'_>,
     reduced_notice: &mut Option<String>,
 ) -> Result<GoalOutcome, GoalError> {
     // An observed agent writes directly, which Kaisa's confinement would forbid.
@@ -474,11 +494,13 @@ fn run_goal_inner(
         acceptance: &[],
         write_set: request.write_set,
         profile: &profile,
-        findings: &[],
+        findings: context.findings,
         impact: &[],
-        diff: "",
+        diff: context.diff,
         lessons: &lesson_texts,
     })
+    .with_checks(context.checks)
+    .bound_diff(REVIEW_DIFF_BYTES, context.diff_remainder)
     .fit(kaisa_context::budget_for(request.role))
     .map_err(at("fitting the context pack"))?;
     let digest = pack.digest();

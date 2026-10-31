@@ -45,24 +45,34 @@ impl RevisionBudget {
 /// reviewer's words are quoted as untrusted data, never as instructions to follow.
 #[must_use]
 pub fn revision_goal(original: &str, reasons: &[RevisionReason]) -> String {
+    let findings = revision_findings(reasons);
     let mut goal: String = format!("{original}\n\n## Fix before delivery\n\n{UNTRUSTED_NOTICE}\n");
+    for finding in findings {
+        for line in finding.lines() {
+            let _ = writeln!(goal, "> {line}");
+        }
+    }
+    goal
+}
+
+/// Plain finding text for the pack, whose renderer quotes each line as untrusted data.
+pub(crate) fn revision_findings(reasons: &[RevisionReason]) -> Vec<String> {
+    let mut findings = Vec::new();
     for reason in reasons {
         match reason {
             RevisionReason::FailingCheck(check) => {
-                let _ = writeln!(goal, "> failing check: `{}`", check.join(" "));
+                findings.push(format!("failing check: `{}`", check.join(" ")));
             }
             RevisionReason::Finding(finding) => {
                 let place: String = finding.line.map_or_else(
                     || finding.path.as_str().to_owned(),
                     |line| format!("{}:{line}", finding.path.as_str()),
                 );
-                for line in finding.message.lines() {
-                    let _ = writeln!(goal, "> {place}: {line}");
-                }
+                findings.push(format!("{place}: {}", finding.message));
             }
         }
     }
-    goal
+    findings
 }
 
 #[cfg(test)]

@@ -20,12 +20,13 @@ pub fn estimated_tokens(text: &str) -> usize {
     text.len().div_ceil(BYTES_PER_TOKEN_ESTIMATE)
 }
 
-/// The sections that are never cut: without them an agent does not know what to do or where.
-const REQUIRED: [SectionKind; 5] = [
+/// Required sections are never omitted by fitting. A diff may first be explicitly bounded.
+const REQUIRED: [SectionKind; 6] = [
     SectionKind::Spec,
     SectionKind::Acceptance,
     SectionKind::Findings,
     SectionKind::Diff,
+    SectionKind::Checks,
     SectionKind::WriteSet,
 ];
 
@@ -63,6 +64,8 @@ pub enum SectionKind {
     Findings,
     /// The candidate's changes a reviewer judges, quoted: agent-written code is data (T24b).
     Diff,
+    /// Trusted execution metadata and quoted, scrubbed check output.
+    Checks,
     /// The paths the attempt may change.
     WriteSet,
     /// Languages and confirmed commands.
@@ -84,6 +87,7 @@ impl SectionKind {
             Self::Acceptance => "acceptance",
             Self::Findings => "findings",
             Self::Diff => "diff",
+            Self::Checks => "checks",
             Self::WriteSet => "write_set",
             Self::Profile => "profile",
             Self::Lessons => "lessons",
@@ -210,6 +214,49 @@ impl ContextPack {
         }
     }
 
+    /// Adds Kaisa-authored check receipts, rendered verbatim. The caller must JSON-escape
+    /// command arguments and quote every untrusted output line separately from metadata.
+    #[must_use]
+    pub fn with_checks(mut self, evidence: &str) -> Self {
+        if !evidence.is_empty() {
+            let position = self
+                .sections
+                .iter()
+                .position(|section| section.kind == SectionKind::WriteSet)
+                .unwrap_or(self.sections.len());
+            self.sections.insert(
+                position,
+                Section {
+                    kind: SectionKind::Checks,
+                    text: evidence.to_owned(),
+                },
+            );
+        }
+        self
+    }
+
+    /// Bounds the required diff before fitting; partial cuts are recorded like omitted sections.
+    /// `remainder` explains how the reviewer can read the entire patch in its worktree.
+    #[must_use]
+    pub fn bound_diff(mut self, max_bytes: usize, remainder: &str) -> Self {
+        if let Some(diff) = self
+            .sections
+            .iter_mut()
+            .find(|section| section.kind == SectionKind::Diff)
+            && diff.text.len() > max_bytes
+        {
+            let mut end = max_bytes.saturating_sub(remainder.len() + 1);
+            while !diff.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            diff.text.truncate(end);
+            diff.text.push('\n');
+            diff.text.push_str(remainder);
+            self.cut.push(SectionKind::Diff);
+        }
+        self
+    }
+
     /// Fits the pack into `budget_tokens`, cutting the lowest-priority sections first and
     /// recording each cut.
     ///
@@ -278,7 +325,7 @@ impl ContextPack {
         if !self.cut.is_empty() {
             let cut: Vec<&str> = self.cut.iter().map(|&kind| heading(kind)).collect();
             message.push_str(&format!(
-                "Left out to fit your context budget: {}. Ask with `kaisa_knowledge` if you need them.\n",
+                "Omitted or truncated to fit your context budget: {}. Follow any recovery command above; read other missing context in your worktree.\n",
                 cut.join(", ")
             ));
         }
@@ -367,6 +414,7 @@ fn heading(kind: SectionKind) -> &'static str {
         SectionKind::Acceptance => "Done when",
         SectionKind::Findings => "Fix before delivery",
         SectionKind::Diff => "Changes under review",
+        SectionKind::Checks => "Trusted checks on this candidate",
         SectionKind::WriteSet => "You may change only",
         SectionKind::Profile => "Project",
         SectionKind::Lessons => "Learned on this repository",

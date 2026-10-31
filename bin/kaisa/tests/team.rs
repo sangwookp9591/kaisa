@@ -900,3 +900,224 @@ fn delivered_advice_is_bounded_and_precedes_the_result_retrieval_line() {
     );
     assert!(text.lines().last().is_some_and(|line| line.starts_with("Result:") && line.contains("git merge --ff-only")), "retrieval remains the final instruction: {text}");
 }
+
+/// The recorded canonical fields, including cuts, for the attempt at `index`.
+fn recorded_pack_fields(
+    bench: &Workbench,
+    outcome: &VerifiedOutcome,
+    index: usize,
+) -> Vec<(String, String)> {
+    let ledger =
+        kaisa_ledger::EventStore::open(&bench.base.join("state/kaisa.db")).expect("ledger");
+    let attempt = &outcome.attempts[index].attempt;
+    let event = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("events")
+        .into_iter()
+        .find(|event| {
+            event.recorded.event.kind == kaisa_domain::EventKind::ContextPackRecorded
+                && event.recorded.event.subject == attempt.as_str()
+        })
+        .expect("pack event");
+    let payload: serde_json::Value =
+        serde_json::from_str(&event.recorded.event.payload).expect("payload");
+    let digest = kaisa_domain::ContentDigest::try_new(payload["digest"].as_str().expect("digest"))
+        .expect("valid digest");
+    let bytes = ledger
+        .context_pack(&digest)
+        .expect("pack query")
+        .expect("pack bytes");
+    let mut rest = &bytes[b"kaisa-context-pack v1\n".len()..];
+    let mut fields = Vec::new();
+    while !rest.is_empty() {
+        let mut field = || {
+            let (length, after) = rest.split_at(size_of::<u64>());
+            let length = usize::try_from(u64::from_be_bytes(length.try_into().expect("length")))
+                .expect("fits");
+            let (value, after) = after.split_at(length);
+            rest = after;
+            String::from_utf8_lossy(value).into_owned()
+        };
+        fields.push((field(), field()));
+    }
+    fields
+}
+
+const DEVELOPER_ATTEMPT: usize = 0;
+const FIRST_REVIEW_ATTEMPT: usize = 1;
+const REVISION_ATTEMPT: usize = 2;
+const LARGE_REVIEW_CONTENT_BYTES: usize = 32 * 1024;
+const CHECK_OUTPUT_SECRET: &str = "AKIAABCDEFGHIJKLMNOP";
+const CHECK_OUTPUT_FILE: &str = "check-output.txt";
+
+/// A verified change with controlled source bytes and check output, using only fake agents.
+fn a_review_with_output(bench: &Workbench, content: &str, output: &str) -> VerifiedOutcome {
+    let repository = bench.repository();
+    std::fs::write(repository.join(CHECK_OUTPUT_FILE), output).expect("check output fixture");
+    git(&repository, &["add", CHECK_OUTPUT_FILE]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Kaisa Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "check output fixture",
+        ],
+    );
+    let check = DetectedCommand {
+        argv: if cfg!(windows) {
+            vec![
+                "cmd".into(),
+                "/c".into(),
+                format!("type {CHECK_OUTPUT_FILE}"),
+            ]
+        } else {
+            vec!["cat".into(), CHECK_OUTPUT_FILE.into()]
+        },
+        ..the_projects_test_command()
+    };
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("scope")]);
+    let developer = |config: &Path| {
+        scripted(
+            config,
+            &["--fake-write", FIRST_STEP, "--fake-content", content],
+        )
+    };
+    let reviewer = |config: &Path| scripted(config, &["--fake-review-require", FIRST_STEP]);
+    run_verified_goal(&VerifiedRequest {
+        repository: &repository,
+        state_directory: &bench.base.join("state"),
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[check],
+        policy: &a_policy(true),
+        observed: false,
+        first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    })
+    .expect("review run completes")
+}
+
+#[test]
+fn a_reviewers_recorded_pack_contains_the_candidate_diff_and_exact_check_results() {
+    let bench = Workbench::new("review-pack-evidence");
+    let content = "Session notes for review.\n";
+    let output = "project checks passed\n";
+    let outcome = a_review_with_output(&bench, content, output);
+    let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
+    assert!(
+        fields
+            .iter()
+            .any(|(kind, text)| kind == "diff" && text.contains("+Session notes for review.")),
+        "the reviewer must see the actual candidate patch"
+    );
+    assert!(
+        fields.iter().any(|(kind, text)| kind == "checks"
+            && text.contains(CHECK_OUTPUT_FILE)
+            && text.contains("exit: code 0")
+            && text.contains("confined:")
+            && text.contains(output.trim())
+            && text.contains(&outcome.candidate.as_ref().expect("candidate").tree)),
+        "check results must be bound to the reviewed tree and include output"
+    );
+    assert!(
+        fields.iter().any(|(kind, text)| kind == "spec"
+            && text.contains("Do not ask to re-run these checks")
+            && text.contains("not by itself a blocking finding")),
+        "review instructions must direct the reviewer to consume the evidence already provided"
+    );
+}
+
+#[test]
+fn a_large_candidate_diff_is_cut_with_a_recorded_pack_notice_and_recovery_command() {
+    let bench = Workbench::new("review-pack-large");
+    let content = "x".repeat(LARGE_REVIEW_CONTENT_BYTES);
+    let outcome = a_review_with_output(&bench, &content, "passed\n");
+    let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
+    assert!(
+        fields
+            .iter()
+            .any(|(kind, text)| kind == "cut" && text == "diff"),
+        "partial diffs must be recorded as cuts in canonical bytes"
+    );
+    assert!(
+        fields.iter().any(|(kind, text)| kind == "diff"
+            && text.contains("Diff truncated")
+            && text.contains("git diff")
+            && text.len() < content.len()),
+        "the bounded patch must explain how to read the complete diff in the worktree"
+    );
+}
+
+#[test]
+fn a_secret_in_check_output_is_replaced_with_an_omission_note_in_the_review_pack() {
+    let bench = Workbench::new("review-pack-secret");
+    let outcome = a_review_with_output(&bench, "notes\n", CHECK_OUTPUT_SECRET);
+    let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
+    assert!(
+        fields
+            .iter()
+            .all(|(_, text)| !text.contains(CHECK_OUTPUT_SECRET)),
+        "credentials from check output must never enter recorded packs"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(kind, text)| kind == "checks" && text.contains("omitted: secret detected")),
+        "scrubbed output must have an explicit omission note"
+    );
+}
+
+#[test]
+fn a_revision_pack_places_the_blocking_review_finding_in_findings() {
+    let bench = Workbench::new("revision-pack-findings");
+    let outcome = a_team_run(&bench, SECOND_STEP);
+    let fields = recorded_pack_fields(&bench, &outcome, REVISION_ATTEMPT);
+    assert!(
+        fields.iter().any(|(kind, text)| kind == "findings"
+            && text.contains(&format!("{SECOND_STEP} is missing"))),
+        "the revision receives the blocking finding in the dedicated quoted section"
+    );
+    assert!(
+        fields
+            .iter()
+            .filter(|(kind, _)| kind == "spec")
+            .all(|(_, text)| !text.contains("is missing")),
+        "long findings must not be duplicated in the task text"
+    );
+    let original = recorded_pack_fields(&bench, &outcome, DEVELOPER_ATTEMPT);
+    assert!(
+        original.iter().all(|(kind, _)| kind != "findings"),
+        "initial development has no review findings"
+    );
+}
+
+#[test]
+fn a_first_pass_pack_contains_the_same_diff_and_check_evidence_as_full_review() {
+    let bench = Workbench::new("first-pass-pack");
+    let outcome = a_team_run_with_a_first_pass(&bench, FIRST_STEP, FIRST_STEP);
+    let first = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
+    let full = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT + 1);
+    let review_fields = |fields: Vec<(String, String)>| {
+        fields
+            .into_iter()
+            .filter(|(kind, _)| kind == "diff" || kind == "checks")
+            .collect::<Vec<_>>()
+    };
+    let first = review_fields(first);
+    assert!(!first.is_empty(), "first pass must receive review context");
+    assert_eq!(
+        first,
+        review_fields(full),
+        "both reviewers judge the same candidate with the same evidence"
+    );
+}
