@@ -72,6 +72,9 @@ const WRITES_ABI_1: u64 = ACCESS_FS_WRITE_FILE
     | ACCESS_FS_MAKE_BLOCK
     | ACCESS_FS_MAKE_SYM;
 
+/// The rights Landlock accepts on a rule for a regular file rather than a directory.
+const FILE_RIGHTS: u64 = ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE;
+
 /// `struct landlock_ruleset_attr`, first field only: the kernel accepts the shorter struct of
 /// an older ABI.
 #[repr(C)]
@@ -301,6 +304,22 @@ fn allow_port(ruleset: &LandlockRuleset, port: u16) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether the opened (`O_PATH`) descriptor names a directory.
+fn is_directory(descriptor: &OwnedFd) -> io::Result<bool> {
+    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+    #[allow(unsafe_code)]
+    // SAFETY: the descriptor is valid for the call and `status` is writable memory of the right
+    // type; `fstat` accepts `O_PATH` descriptors.
+    let result: libc::c_int = unsafe { libc::fstat(descriptor.as_raw_fd(), status.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: `fstat` succeeded, so it initialised `status`.
+    let status: libc::stat = unsafe { status.assume_init() };
+    Ok(status.st_mode & libc::S_IFMT == libc::S_IFDIR)
+}
+
 fn allow_beneath(ruleset: &LandlockRuleset, path: &Path, access: u64) -> io::Result<()> {
     let mut name: Vec<u8> = path.as_os_str().as_bytes().to_vec();
     name.push(0);
@@ -318,6 +337,12 @@ fn allow_beneath(ruleset: &LandlockRuleset, path: &Path, access: u64) -> io::Res
     #[allow(unsafe_code)]
     // SAFETY: `open` returned a fresh descriptor owned by nothing else.
     let parent: OwnedFd = unsafe { OwnedFd::from_raw_fd(parent) };
+    let access: u64 = if is_directory(&parent)? {
+        access
+    } else {
+        // The kernel refuses (EINVAL) a rule on a non-directory that names directory rights.
+        access & FILE_RIGHTS
+    };
     let rule = PathBeneathAttr {
         allowed_access: access,
         parent_fd: parent.as_raw_fd(),
@@ -437,6 +462,24 @@ mod tests {
             .expect("the agent starts")
             .wait()
             .expect("the agent exits")
+    }
+
+    #[test]
+    fn a_regular_file_in_the_write_set_can_be_granted_and_written() {
+        let worktree = ScratchWorktree::new("file");
+        let manifest: PathBuf = worktree.path("Cargo.toml");
+        std::fs::write(&manifest, "[package]\n").expect("writable temp dir");
+        let ruleset: LandlockRuleset = write_ruleset(std::slice::from_ref(&manifest), None)
+            .expect("a rule for a regular file is accepted")
+            .expect("the CI kernel supports Landlock");
+
+        let exit: ProcessExit = run_confined(&an_agent_writing(&manifest), &ruleset);
+
+        assert_eq!(
+            exit,
+            ProcessExit::Code(0),
+            "a file granted directly, as a checkout's root files are, stays writable"
+        );
     }
 
     #[test]
