@@ -12,6 +12,26 @@ use crate::transcript::{event_type, events};
 /// Names follow Claude Code's environment configuration, including optional cloud backends.
 const ENVIRONMENT: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_GIT_BASH_PATH",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CA_BUNDLE",
+    "AWS_SDK_LOAD_CONFIG",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -156,7 +176,8 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| (*value).to_owned())
         });
-        let expected = parent[..2]
+        const DECLARED_INPUTS: usize = 2;
+        let expected = parent[..DECLARED_INPUTS]
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect::<Vec<_>>();
@@ -164,6 +185,43 @@ mod tests {
             environment, expected,
             "only the selected adapter's declared inputs may cross the launch boundary"
         );
+    }
+
+    #[test]
+    fn optional_claude_backends_receive_their_declared_authentication_inputs() {
+        let expected = [
+            "CLAUDE_CODE_GIT_BASH_PATH",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "ANTHROPIC_FOUNDRY_API_KEY",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "CLAUDE_CODE_CLIENT_CERT",
+            "CLAUDE_CODE_CLIENT_KEY",
+            "GOOGLE_CLOUD_PROJECT",
+            "CLOUDSDK_CONFIG",
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_ROLE_SESSION_NAME",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            "AWS_CA_BUNDLE",
+            "AWS_SDK_LOAD_CONFIG",
+        ];
+        let actual = super::environment_with(|name| {
+            expected
+                .contains(&name)
+                .then(|| "dummy-backend-input".to_owned())
+        });
+        for name in expected {
+            assert!(
+                actual.iter().any(|(key, _)| key == name),
+                "Claude backend input {name} must reach the selected adapter"
+            );
+        }
     }
 
     fn a_sonnet_launch() -> ClaudeLaunch<'static> {

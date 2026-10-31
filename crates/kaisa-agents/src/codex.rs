@@ -12,23 +12,45 @@ const ENVIRONMENT: &[&str] = &[
     "CODEX_API_KEY",
     "CODEX_HOME",
     "OPENAI_BASE_URL",
-    "OPENAI_ORG_ID",
-    "OPENAI_PROJECT_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "CODEX_ACCESS_TOKEN",
     "CODEX_CA_CERTIFICATE",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 ];
 
-/// Explicit parent variables required by Codex; other provider credentials stay in Kaisa.
+/// Explicit parent variables required by Codex, plus names in comma-separated
+/// `KAISA_PASS_ENV` (for custom provider `env_key` and `env_http_headers` inputs).
+/// Only named variables are forwarded; the declaration itself is not forwarded.
 #[must_use]
 pub fn codex_environment() -> Vec<(String, String)> {
     environment_with(|name| std::env::var(name).ok())
 }
 
 fn environment_with(mut lookup: impl FnMut(&str) -> Option<String>) -> Vec<(String, String)> {
-    ENVIRONMENT
+    let mut names = ENVIRONMENT
         .iter()
-        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    // Custom model-provider env_key/env_http_headers names belong to the user's config.
+    // Let users explicitly name those inputs without reading configuration or credentials.
+    if let Some(extra) = lookup("KAISA_PASS_ENV") {
+        for name in extra.split(',').map(str::trim) {
+            if !name.is_empty()
+                && name != "KAISA_PASS_ENV"
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && !names.iter().any(|declared| declared == name)
+            {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|name| lookup(&name).map(|value| (name, value)))
         .collect()
 }
 
@@ -182,13 +204,52 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| (*value).to_owned())
         });
-        let expected = parent[..2]
+        const DECLARED_INPUTS: usize = 2;
+        let expected = parent[..DECLARED_INPUTS]
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect::<Vec<_>>();
         assert_eq!(
             environment, expected,
             "Codex receives its own authentication and home without another provider's key"
+        );
+    }
+
+    #[test]
+    fn codex_receives_current_auth_names_and_explicit_custom_provider_inputs() {
+        let declared = [
+            "OPENAI_ORGANIZATION",
+            "OPENAI_PROJECT",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_BASE_URL",
+            "OPENROUTER_API_KEY",
+            "AZURE_HEADER",
+        ];
+        let environment = super::environment_with(|name| match name {
+            "KAISA_PASS_ENV" => {
+                Some("OPENROUTER_API_KEY, AZURE_HEADER,OPENROUTER_API_KEY, BAD=NAME".to_owned())
+            }
+            name if declared.contains(&name) => Some("dummy-input".to_owned()),
+            _ => None,
+        });
+        for name in declared {
+            assert!(
+                environment.iter().any(|(key, _)| key == name),
+                "Codex must receive declared input {name}"
+            );
+        }
+        let unique: std::collections::BTreeSet<_> =
+            environment.iter().map(|(key, _)| key).collect();
+        assert_eq!(
+            environment.len(),
+            unique.len(),
+            "duplicate declarations must not produce ambiguous overrides"
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, _)| key == "KAISA_PASS_ENV" || key.contains('=')),
+            "the declaration itself and malformed names are not forwarded"
         );
     }
 

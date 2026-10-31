@@ -221,12 +221,25 @@ mod tests {
         const EXPLICIT: &str = "KAISA_TEST_EXPLICIT_VARIABLE";
         const FIXTURE: &str = "KAISA_TEST_ENVIRONMENT_FIXTURE";
         const MARKER: &str = "dummy-secret-marker";
+        const PROXIES: [&str; 8] = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        const USER_PROXY: &str = "user-proxy-marker";
+        const BROKER_PROXY: &str = "broker-proxy-marker";
         if std::env::var(FIXTURE).is_err() {
             let output =
                 std::process::Command::new(std::env::current_exe().expect("test executable"))
                     .args(["--exact", TEST, "--nocapture"])
                     .env(FIXTURE, "yes")
                     .env(DUMMY_SECRET, MARKER)
+                    .envs(PROXIES.map(|name| (name, USER_PROXY)))
                     .output()
                     .expect("isolated parent starts");
             assert!(
@@ -247,7 +260,26 @@ mod tests {
         );
         let mut spec = shell(&command);
         spec.env.push((EXPLICIT.to_owned(), "allowed".to_owned()));
-        for confined in [false, true] {
+        for (confined, proxy_override) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut spec = spec.clone();
+            let expected_proxy = if proxy_override {
+                BROKER_PROXY
+            } else {
+                USER_PROXY
+            };
+            let proxy_checks = PROXIES
+                .iter()
+                .map(|name| format!(" && test \"${{{name}}}\" = {expected_proxy}"))
+                .collect::<String>();
+            let mut checked = shell(&format!("{command}{proxy_checks}"));
+            checked.env.clone_from(&spec.env);
+            spec = checked;
+            if proxy_override {
+                spec.env
+                    .extend(PROXIES.map(|name| (name.to_owned(), BROKER_PROXY.to_owned())));
+            }
             #[cfg(target_os = "macos")]
             let policy = crate::SeatbeltPolicy::default();
             #[cfg(target_os = "macos")]
