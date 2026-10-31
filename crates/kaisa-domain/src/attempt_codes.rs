@@ -8,10 +8,12 @@ use crate::attempt::{Cleanup, Execution, ExitStatus};
 const EXITED_PREFIX: &str = "exited:";
 /// The part after [`EXITED_PREFIX`] for a process ended from outside.
 const TERMINATED: &str = "terminated";
+/// An agent that the OS never started.
+const FAILED_TO_START: &str = "failed-to-start";
 
 impl Execution {
     /// Stable code: `admitted`, `starting`, `running`, `stalled`, `unknown`, or `exited:<code>`
-    /// and `exited:terminated` for an exit.
+    /// and `exited:terminated` for an exit, or `exited:failed-to-start` for a proven non-start.
     #[must_use]
     pub fn code(self) -> String {
         match self {
@@ -22,6 +24,7 @@ impl Execution {
             Self::Unknown => "unknown".to_owned(),
             Self::Exited(ExitStatus::Code(code)) => format!("{EXITED_PREFIX}{code}"),
             Self::Exited(ExitStatus::Terminated) => format!("{EXITED_PREFIX}{TERMINATED}"),
+            Self::Exited(ExitStatus::FailedToStart) => format!("{EXITED_PREFIX}{FAILED_TO_START}"),
         }
     }
 
@@ -38,6 +41,8 @@ impl Execution {
                 let exit: &str = other.strip_prefix(EXITED_PREFIX)?;
                 if exit == TERMINATED {
                     Some(Self::Exited(ExitStatus::Terminated))
+                } else if exit == FAILED_TO_START {
+                    Some(Self::Exited(ExitStatus::FailedToStart))
                 } else {
                     exit.parse()
                         .ok()
@@ -97,6 +102,7 @@ mod tests {
             Execution::Exited(ExitStatus::Code(ExitStatus::SUCCESS_CODE)),
             Execution::Exited(ExitStatus::Code(AGENT_FAILURE_CODE)),
             Execution::Exited(ExitStatus::Terminated),
+            Execution::Exited(ExitStatus::FailedToStart),
         ] {
             assert_eq!(
                 Execution::from_code(&execution.code()),

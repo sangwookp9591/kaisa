@@ -506,7 +506,11 @@ fn report_error(
         return Ok(crate::EXIT_WAITING_FOR_HUMAN);
     }
     writeln!(err, "kaisa: {error}")?;
-    Ok(crate::EXIT_FAILURE)
+    Ok(if error.failed_to_start() {
+        crate::EXIT_RUN_FAILED
+    } else {
+        crate::EXIT_FAILURE
+    })
 }
 
 /// CI contract (user-flows F26): 0 when the agent finished and its work is preserved, 4 when

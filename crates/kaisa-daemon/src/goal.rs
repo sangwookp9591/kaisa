@@ -7,6 +7,7 @@
 //! reclaim the worktree.
 
 use std::fmt;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -220,6 +221,12 @@ impl GoalError {
         self.step == ADMISSION_STEP
     }
 
+    /// True when the OS proved that no agent process was started.
+    #[must_use]
+    pub fn failed_to_start(&self) -> bool {
+        self.step == "starting the agent"
+    }
+
     fn refused(missing: &[ContainmentCapability], basis: &ReducedModeBasis) -> Self {
         Self {
             step: ADMISSION_STEP,
@@ -379,6 +386,21 @@ fn run_goal_inner(
     let task = TaskId::try_new(&id(TaskId::PREFIX)).map_err(at("naming the task"))?;
     let attempt = AttemptId::try_new(&id(AttemptId::PREFIX)).map_err(at("naming the attempt"))?;
 
+    let attempt_directory = request
+        .state_directory
+        .join("attempts")
+        .join(attempt.as_str());
+    std::fs::create_dir_all(&attempt_directory).map_err(at("preparing the attempt directory"))?;
+    // Lock before recording admission, not just before spawn: recovery must never reclaim
+    // a live invocation's in-progress preparation. Retain the handle through reclamation.
+    let _owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(attempt_directory.join(crate::recover::OWNER_LOCK_FILE))
+        .map_err(at("creating the attempt owner lock"))?;
+    _owner.lock().map_err(at("locking the attempt owner"))?;
+
     record(
         &mut ledger,
         EventKind::MissionCreated,
@@ -450,11 +472,6 @@ fn run_goal_inner(
     let worktree: Worktree =
         create_worktree(request.repository, request.base, &branch, &worktree_path)
             .map_err(at("creating the worktree"))?;
-    let attempt_directory: PathBuf = request
-        .state_directory
-        .join("attempts")
-        .join(attempt.as_str());
-    std::fs::create_dir_all(&attempt_directory).map_err(at("preparing the attempt directory"))?;
     BridgeConfig {
         worktree: worktree.path().to_owned(),
         write_set: request.write_set.clone(),
@@ -594,15 +611,53 @@ fn run_goal_inner(
     state.confirm_running().map_err(at("running the attempt"))?;
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
-    let finished: CapturedRun = run_captured_reporting(
+    let mut process_started = false;
+    let captured = run_captured_reporting(
         &agent,
         &sandbox.confinement(),
         input.as_bytes(),
         deadline.expect("the spawn guard checked the Decision budget"),
         TRANSCRIPT_CAP,
+        &mut process_started,
         &mut |identity| record_identity(&identity_file, identity),
-    )
-    .map_err(at("running the agent"))?;
+    );
+    let finished: CapturedRun = match captured {
+        Ok(finished) => finished,
+        Err(error) => {
+            #[cfg(any(unix, windows))]
+            finish_broker(broker)?;
+            sandbox.release();
+            if process_started {
+                // An error after creation is not proof of a non-start. Keep the existing
+                // identity-based recovery path rather than inventing an exit.
+                return Err(at("running the agent")(error));
+            }
+            let status = ExitStatus::FailedToStart;
+            write_exit_record(
+                &attempt_directory,
+                &ExitRecord {
+                    attempt: attempt.clone(),
+                    incarnation: FIRST_INCARNATION,
+                    status,
+                    finished_at_ms: now_ms(),
+                },
+            )
+            .map_err(at("writing the failed-start record"))?;
+            state
+                .record_exit(status)
+                .map_err(at("recording the failed start"))?;
+            record_execution(&mut ledger, &attempt, Execution::Exited(status))?;
+            reclaim(
+                &mut state,
+                request.repository,
+                &worktree,
+                &IgnoredPolicy::with_build_output(&BUILD_OUTPUT),
+            )
+            .map_err(at("reclaiming the failed start"))?;
+            record_cleanup(&mut ledger, &attempt, state.cleanup())?;
+            return Err(at("starting the agent")(error));
+        }
+    };
     if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {
         record(
             &mut ledger,

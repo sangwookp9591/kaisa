@@ -62,7 +62,16 @@ impl OwnedProcess {
     /// Starts `command` as an owned process: leading its own process group on Unix, created
     /// suspended and put in a Job Object on Windows. Callers may have set its stdio and, on
     /// Unix, `pre_exec` hooks.
-    pub(crate) fn spawn_owned(mut command: Command) -> io::Result<Self> {
+    pub(crate) fn spawn_owned(command: Command) -> io::Result<Self> {
+        Self::spawn_owned_observing(command, &mut false)
+    }
+
+    /// Records raw process creation before ownership setup can itself fail. Such a failure
+    /// must never be mistaken for proof that no agent process was created.
+    pub(crate) fn spawn_owned_observing(
+        mut command: Command,
+        created: &mut bool,
+    ) -> io::Result<Self> {
         #[cfg(unix)]
         {
             // The process leads a new group. Cleanup also walks attached descendants that
@@ -78,6 +87,7 @@ impl OwnedProcess {
             );
         }
         let child: Child = command.spawn()?;
+        *created = true;
         #[cfg(windows)]
         let child = crate::windows_child::WindowsChild::Std(child);
         Self::adopt(child)

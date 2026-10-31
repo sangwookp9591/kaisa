@@ -54,11 +54,21 @@ pub fn run_captured(
     deadline: Duration,
     cap: usize,
 ) -> io::Result<CapturedRun> {
-    run_captured_reporting(spec, confinement, input, deadline, cap, &mut |_| Ok(()))
+    run_captured_reporting(
+        spec,
+        confinement,
+        input,
+        deadline,
+        cap,
+        &mut false,
+        &mut |_| Ok(()),
+    )
 }
 
 /// [`run_captured`], telling `started` the process's identity as soon as it exists, before any
 /// input is sent, so a crash of the caller can later be recovered from (T16.6b).
+/// `created` is reset to false and set true as soon as the OS creates the process, even if
+/// ownership setup fails before `started` can run. Only false proves a non-start on error.
 ///
 /// # Errors
 ///
@@ -70,11 +80,13 @@ pub fn run_captured_reporting(
     input: &[u8],
     deadline: Duration,
     cap: usize,
+    created: &mut bool,
     started: &mut dyn FnMut(Option<crate::ProcessIdentity>) -> io::Result<()>,
 ) -> io::Result<CapturedRun> {
+    *created = false;
     let (reader, writer) = io::pipe()?;
     let (mut process, stdin): (OwnedProcess, Option<Box<dyn io::Write + Send>>) =
-        spawn_captured(spec, confinement, !input.is_empty(), writer)?;
+        spawn_captured(spec, confinement, !input.is_empty(), writer, created)?;
     let collector = std::thread::spawn(move || collect(reader, cap));
     let identity: Option<crate::ProcessIdentity> =
         crate::ProcessIdentity::of(process.id()).unwrap_or(None);
@@ -112,21 +124,23 @@ fn spawn_captured(
     confinement: &Confinement<'_>,
     piped: bool,
     output: io::PipeWriter,
+    created: &mut bool,
 ) -> io::Result<(OwnedProcess, Option<Box<dyn io::Write + Send>>)> {
     #[cfg(windows)]
     if let Confinement::AppContainer(profile) = confinement {
         use std::os::windows::io::AsRawHandle;
         // A pipe even without input: dropping its writer gives the process an immediate EOF.
         let (child_stdin, our_stdin) = io::pipe()?;
-        let created = crate::appcontainer::create_suspended_contained(
+        let process = crate::appcontainer::create_suspended_contained(
             profile,
             spec,
             child_stdin.as_raw_handle(),
             output.as_raw_handle(),
             output.as_raw_handle(),
         )?;
+        *created = true;
         drop((child_stdin, output));
-        let process: OwnedProcess = OwnedProcess::adopt_created(created)?;
+        let process: OwnedProcess = OwnedProcess::adopt_created(process)?;
         let stdin: Option<Box<dyn io::Write + Send>> =
             piped.then(|| Box::new(our_stdin) as Box<dyn io::Write + Send>);
         return Ok((process, stdin));
@@ -136,7 +150,7 @@ fn spawn_captured(
         .stdin(if piped { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::from(output));
-    let mut process: OwnedProcess = OwnedProcess::spawn_owned(command)?;
+    let mut process: OwnedProcess = OwnedProcess::spawn_owned_observing(command, created)?;
     let stdin: Option<Box<dyn io::Write + Send>> = process
         .take_stdin()
         .map(|stdin| Box::new(stdin) as Box<dyn io::Write + Send>);
@@ -193,7 +207,7 @@ fn confined_command(spec: &ProcessSpec, confinement: &Confinement<'_>) -> Comman
 mod tests {
     use std::time::Duration;
 
-    use super::{CapturedRun, Confinement, run_captured};
+    use super::{CapturedRun, Confinement, run_captured, run_captured_reporting};
     use crate::process::ProcessExit;
     use crate::process::test_support::{a_long_running_process, shell};
 
@@ -283,6 +297,45 @@ mod tests {
                 "owned agents, including Seatbelt-confined agents, use the environment allow-list"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_executable_reports_a_proven_non_start() {
+        let mut missing = shell("echo unreachable");
+        missing.program =
+            std::env::temp_dir().join(format!("kaisa-nonexistent-agent-{}", std::process::id()));
+        let mut created = true;
+        let result = run_captured_reporting(
+            &missing,
+            &Confinement::Unconfined,
+            NO_INPUT,
+            DEADLINE,
+            SMALL_CAP,
+            &mut created,
+            &mut |_| panic!("a missing program cannot have an identity"),
+        );
+        assert!(
+            result.is_err() && !created,
+            "only a rejected OS creation proves that no process started: {result:?}"
+        );
+    }
+
+    #[test]
+    fn an_identity_recording_error_keeps_proof_that_a_process_was_created() {
+        let mut created = false;
+        let result = run_captured_reporting(
+            &a_long_running_process(),
+            &Confinement::Unconfined,
+            NO_INPUT,
+            DEADLINE,
+            SMALL_CAP,
+            &mut created,
+            &mut |_| Err(std::io::Error::other("identity record unavailable")),
+        );
+        assert!(
+            result.is_err() && created,
+            "a failure after creation must never authorize failed-start reclamation: {result:?}"
+        );
     }
 
     #[test]
