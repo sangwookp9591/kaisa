@@ -82,6 +82,22 @@ pub fn learn_from_delivery(
     {
         return Ok(None);
     }
+    let weakened = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)?
+        .into_iter()
+        .filter(|event| event.recorded.event.kind == kaisa_domain::EventKind::CheckEvidence)
+        .filter_map(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.recorded.event.payload).ok()
+        })
+        .any(|piece| {
+            piece["candidate_tree"] == candidate.tree
+                && piece["weakened_tests"]
+                    .as_array()
+                    .is_some_and(|signals| !signals.is_empty())
+        });
+    if weakened {
+        return Ok(None);
+    }
     // A blake3 hex digest is always well formed; if it ever were not, learning nothing is the
     // safe outcome.
     let Ok(digest) = ContentDigest::try_new(blake3::hash(lesson.as_bytes()).to_hex().as_str())

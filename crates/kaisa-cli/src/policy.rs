@@ -19,6 +19,7 @@ const USAGE: &str = "usage: kaisa policy show
 keys: revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true|false),
+      require_person_when_tests_weaken (true|false),
       min_grade_for_security_review (T0..T3; requires T3)";
 
 fn grade_from(code: &str) -> Option<Grade> {
@@ -33,6 +34,10 @@ fn grade_from(code: &str) -> Option<Grade> {
 
 fn policy_from_json(value: &Value) -> Option<Policy> {
     Some(Policy {
+        require_person_when_tests_weaken: match value.get("require_person_when_tests_weaken") {
+            None => true,
+            Some(value) => value.as_bool()?,
+        },
         revision_limit: u32::try_from(value["revision_limit"].as_u64()?).ok()?,
         allowed_egress_hosts: value["allowed_egress_hosts"]
             .as_array()?
@@ -79,6 +84,7 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
     kaisa_sys::ensure_private_directory(state)?;
     let value = json!({
         "revision_limit": policy.revision_limit,
+        "require_person_when_tests_weaken": policy.require_person_when_tests_weaken,
         "allowed_egress_hosts": policy.allowed_egress_hosts,
         "confine_agents": policy.confine_agents,
         "min_grade_for_security_review": format!("{:?}", policy.min_grade_for_security_review),
@@ -123,6 +129,10 @@ fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
             } else {
                 value.split(',').map(str::to_owned).collect()
             };
+        }
+        "require_person_when_tests_weaken" => {
+            policy.require_person_when_tests_weaken =
+                value.parse().map_err(|_| "use true or false")?;
         }
         "require_person_when_check_definitions_change" => {
             policy.require_person_when_check_definitions_change =
@@ -263,6 +273,7 @@ mod tests {
         for (key, value) in [
             ("allowed_egress_hosts", "example.com,api.openai.com"),
             ("require_person_when_check_definitions_change", "false"),
+            ("require_person_when_tests_weaken", "false"),
             ("min_grade_for_security_review", "T3"),
         ] {
             let (status, _, _) = state.command(&["set", key, value]);
@@ -274,6 +285,7 @@ mod tests {
         }
         expected.allowed_egress_hosts = vec!["example.com".into(), "api.openai.com".into()];
         expected.require_person_when_check_definitions_change = false;
+        expected.require_person_when_tests_weaken = false;
         assert_eq!(
             load(&state.0).expect("all personal choices are saved"),
             expected,
@@ -301,6 +313,7 @@ mod tests {
             ("confine_agents", "yes"),
             ("allowed_egress_hosts", "api.openai.com,"),
             ("require_person_when_check_definitions_change", "no"),
+            ("require_person_when_tests_weaken", "no"),
             ("min_grade_for_security_review", "T0"),
             ("min_grade_for_security_review", "T1"),
             ("min_grade_for_security_review", "T2"),

@@ -49,6 +49,21 @@ pub fn decide_delivery(
     if evidence.iter().any(|piece| !piece.applies_to(candidate)) {
         return Delivery::Refuse("evidence was produced on other content".to_owned());
     }
+    let weakened: Vec<_> = evidence
+        .iter()
+        .filter(|piece| piece.require_person_when_tests_weaken)
+        .flat_map(|piece| &piece.weakened_tests)
+        .collect();
+    if !weakened.is_empty() {
+        return Delivery::NeedsPerson(format!(
+            "weakened_tests: {}",
+            weakened
+                .iter()
+                .map(|reason| reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
     let Some(verdict) = verdict else {
         return Delivery::Refuse("there is no valid review verdict".to_owned());
     };
@@ -124,6 +139,8 @@ mod tests {
             output_digest: "digest-of-test-output".to_owned(),
             confined: true,
             definitions_changed: Vec::new(),
+            weakened_tests: Vec::new(),
+            require_person_when_tests_weaken: true,
         }
     }
 

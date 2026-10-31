@@ -17,6 +17,8 @@ pub struct Policy {
     pub min_grade_for_security_review: Grade,
     /// Whether changing check definitions requires a person's approval.
     pub require_person_when_check_definitions_change: bool,
+    /// Whether test weakening requires a person, regardless of reviewer approval.
+    pub require_person_when_tests_weaken: bool,
 }
 
 /// Why a policy cannot be admitted for a run.
@@ -53,6 +55,7 @@ impl Policy {
             confine_agents: true,
             min_grade_for_security_review: Grade::T3,
             require_person_when_check_definitions_change: true,
+            require_person_when_tests_weaken: true,
         }
     }
 
@@ -100,9 +103,10 @@ impl Policy {
             Grade::T3 => "T3",
         };
         format!(
-            "allowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrevision_limit={}\n",
+            "allowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
             self.confine_agents,
             self.require_person_when_check_definitions_change,
+            self.require_person_when_tests_weaken,
             self.revision_limit,
         )
     }
@@ -223,13 +227,14 @@ mod tests {
             "confine_agents=true\n",
             "min_grade_for_security_review=T3\n",
             "require_person_when_check_definitions_change=true\n",
+            "require_person_when_tests_weaken=true\n",
             "revision_limit=2\n",
         );
 
         assert_eq!(
             Policy::personal_default().canonical_text(),
             expected,
-            "the digest input has a stable spelling for all five rules"
+            "the digest input has a stable spelling for every policy rule"
         );
     }
 

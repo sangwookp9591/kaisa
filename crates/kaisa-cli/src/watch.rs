@@ -39,15 +39,28 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
         "{:<24} {:<24} {:<16} {:<12} {:<14} COST",
         "ATTEMPT", "TASK", "EXECUTION", "CLEANUP", "TOKENS"
     )?;
+    let total: f64 = usage
+        .iter()
+        .flatten()
+        .filter_map(|usage| usage.cost_usd)
+        .fold(0.0, |total, cost| total + cost);
+    let excluded = usage
+        .iter()
+        .filter(|usage| usage.as_ref().is_none_or(|usage| usage.cost_usd.is_none()))
+        .count();
     for (row, usage) in rows.iter().zip(usage) {
         let (tokens, cost) = match usage {
             Some(usage) => (
                 format!("{}/{}", usage.input_tokens, usage.output_tokens),
-                usage
-                    .cost_usd
-                    .map_or_else(|| "-".to_owned(), |cost| format!("${cost:.4}")),
+                usage.cost_usd.map_or_else(
+                    || "n/a (provider gives no cost; excluded from total)".to_owned(),
+                    |cost| format!("${cost:.4}"),
+                ),
             ),
-            None => ("-".to_owned(), "-".to_owned()),
+            None => (
+                "-".to_owned(),
+                "n/a (usage not reported; excluded from total)".to_owned(),
+            ),
         };
         writeln!(
             out,
@@ -60,5 +73,9 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
             cost
         )?;
     }
+    writeln!(
+        out,
+        "Reported cost total: ${total:.4}; {excluded} attempt(s) with unavailable cost excluded"
+    )?;
     Ok(crate::EXIT_SUCCESS)
 }

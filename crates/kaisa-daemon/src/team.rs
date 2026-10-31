@@ -78,6 +78,10 @@ pub struct VerifiedOutcome {
     pub attempts: Vec<GoalOutcome>,
     /// Revisions that ran.
     pub revisions: u32,
+    /// Non-blocking findings from the final valid review.
+    pub advisories: Vec<kaisa_domain::Finding>,
+    /// Test weakening signals, including when policy permits delivery.
+    pub weakened_tests: Vec<String>,
 }
 
 fn review_instruction(goal: &str, candidate: &Candidate) -> String {
@@ -223,6 +227,8 @@ fn run_verified_goal_inner(
             candidate: None,
             attempts: Vec::new(),
             revisions: 0,
+            advisories: Vec::new(),
+            weakened_tests: Vec::new(),
         });
     }
     let original_base: Candidate =
@@ -307,7 +313,7 @@ fn run_verified_goal_inner(
                 attempts,
             );
         }
-        let evidence: Vec<Evidence> = run_trusted_checks(
+        let mut evidence: Vec<Evidence> = run_trusted_checks(
             request.repository,
             request.state_directory,
             &request.state_directory.join("attempts").join(
@@ -321,7 +327,9 @@ fn run_verified_goal_inner(
             &candidate,
             request.checks,
         )?;
-        for piece in &evidence {
+        for piece in &mut evidence {
+            piece.require_person_when_tests_weaken =
+                request.policy.policy().require_person_when_tests_weaken;
             let exit = match piece.exit {
                 Some(ProcessExit::Code(code)) => json!({"code": code}),
                 Some(ProcessExit::Terminated) => json!({"terminated": true}),
@@ -334,7 +342,8 @@ fn run_verified_goal_inner(
                 json!({"candidate_tree": piece.candidate_tree, "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                     "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
                     "exit": exit, "output_digest": piece.output_digest,
-                    "confined": piece.confined, "definitions_changed": piece.definitions_changed}),
+                    "confined": piece.confined, "definitions_changed": piece.definitions_changed,
+                    "weakened_tests": piece.weakened_tests}),
             )?;
         }
         if let Some(first_pass) = request.first_pass {
@@ -518,7 +527,32 @@ fn finish(
             .map_err(at("learning from delivery"))?;
         }
     }
+    let weakened_tests = candidate
+        .as_ref()
+        .map(|candidate| {
+            kaisa_workspace::weakened_tests(request.repository, &original_base.commit, candidate)
+        })
+        .transpose()
+        .map_err(at("reading final test weakening"))?
+        .unwrap_or_default();
+    let advisories = candidate
+        .as_ref()
+        .and_then(|candidate| {
+            attempts
+                .last()
+                .and_then(|review| verdict_from(request.state_directory, review, &candidate.tree))
+        })
+        .map(|verdict| {
+            verdict
+                .findings
+                .into_iter()
+                .filter(|finding| finding.severity == kaisa_domain::Severity::Advisory)
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(VerifiedOutcome {
+        advisories,
+        weakened_tests,
         delivery,
         candidate,
         attempts: std::mem::take(attempts),
