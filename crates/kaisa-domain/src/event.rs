@@ -66,6 +66,7 @@ pub enum EventKind {
     RouteDecided,
     /// A context pack was assembled for an attempt; the payload names its digest.
     ContextPackRecorded,
+    /// Verification payloads carry `run_id`, `mission_id` and repository identity.
     /// A developer result was frozen as a commit and tree.
     CandidateFrozen,
     /// A trusted check produced evidence on a frozen tree.

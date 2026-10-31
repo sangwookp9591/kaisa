@@ -361,6 +361,14 @@ const ORIGINAL_CANDIDATES: usize = 1;
 
 /// Runs the actual CLI, with a trusted file check and an independent fake reviewer.
 fn a_verified_cli_session(bench: &Workbench, review_requires: &str) -> std::process::Output {
+    a_verified_cli_session_in_state(bench, review_requires, &bench.state())
+}
+
+fn a_verified_cli_session_in_state(
+    bench: &Workbench,
+    review_requires: &str,
+    state: &Path,
+) -> std::process::Output {
     let (program, flag, check) = if cfg!(windows) {
         (
             "cmd",
@@ -394,7 +402,7 @@ fn a_verified_cli_session(bench: &Workbench, review_requires: &str) -> std::proc
             GOAL,
         ])
         .current_dir(bench.repository())
-        .env("KAISA_STATE_DIR", bench.state())
+        .env("KAISA_STATE_DIR", state)
         .output()
         .expect("the CLI runs")
 }
@@ -432,7 +440,13 @@ fn a_second_session_needs_no_re_explanation() {
     let lesson = taught["text"].as_str().expect("lesson text");
     let before_second = history.last().expect("recorded run").sequence;
     assert!(
-        lesson.contains(GOAL) && lesson.contains(NOTES),
+        lesson.contains(GOAL)
+            && lesson.contains(NOTES)
+            && !lesson.contains("test -f")
+            && matches!(
+                taught["provenance"].as_str(),
+                Some("confined" | "reduced" | "observed")
+            ),
         "the lesson describes the verified goal and observed changed paths: {taught}"
     );
 
@@ -500,6 +514,27 @@ fn a_second_session_needs_no_re_explanation() {
         assert_eq!(
             receipt["candidate_tree"], taught["source_tree"],
             "every receipt and the learned lesson must refer to the same frozen content"
+        );
+        assert!(
+            receipt["run_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("run_"))
+                && receipt["mission_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("mis_"))
+                && receipt["repository"] == taught["repository"],
+            "every verification receipt names its run, mission and repository: {receipt}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|event| event.event.kind == EventKind::RunStarted
+                    && Some(event.event.subject.as_str()) == receipt["run_id"].as_str())
+                && history
+                    .iter()
+                    .any(|event| event.event.kind == EventKind::MissionCreated
+                        && Some(event.event.subject.as_str()) == receipt["mission_id"].as_str()),
+            "receipt ownership resolves to recorded runs and missions"
         );
         match recorded.event.kind {
             EventKind::CandidateFrozen => {
@@ -605,7 +640,12 @@ fn exhausted_revisions_record_the_loop_and_exit_four_without_teaching_a_lesson()
         "the original and revised candidates each get a durable gate decision"
     );
     assert!(
-        gates.iter().all(|gate| gate["decision"] == "revision"),
+        gates
+            .first()
+            .is_some_and(|gate| gate["decision"] == "revision")
+            && gates
+                .last()
+                .is_some_and(|gate| gate["decision"] == "revision_exhausted"),
         "blocking reviews remain undelivered, including at the revision limit: {gates:?}"
     );
     assert!(
@@ -822,4 +862,47 @@ fn an_observed_agent_writes_directly_and_is_reported_as_observed() {
         "the summary tells the person the run was observed: {}",
         outcome.summary()
     );
+}
+
+#[test]
+fn a_lesson_from_repository_a_never_enters_repository_bs_pack() {
+    use kaisa_domain::EventKind;
+    let repository_a = Workbench::new("cross-repository-a");
+    let repository_b = Workbench::new("cross-repository-b");
+    let first = a_verified_cli_session(&repository_a, NOTES);
+    assert!(first.status.success(), "repository A delivers: {first:?}");
+    let original_history = verified_history(&repository_a);
+    let learned = original_history
+        .iter()
+        .find(|event| event.event.kind == EventKind::KnowledgePromoted)
+        .expect("A taught a lesson");
+    let before_b = original_history.last().expect("A history").sequence;
+    let second = a_verified_cli_session_in_state(&repository_b, NOTES, &repository_a.state());
+    assert!(second.status.success(), "repository B delivers: {second:?}");
+    let ledger =
+        kaisa_ledger::EventStore::open(&repository_a.state().join("kaisa.db")).expect("B ledger");
+    let history = verified_history(&repository_a);
+    for packed in history.iter().filter(|event| {
+        event.sequence > before_b && event.event.kind == EventKind::ContextPackRecorded
+    }) {
+        let attempt = kaisa_domain::AttemptId::try_new(&packed.event.subject).expect("attempt");
+        assert!(
+            !ledger
+                .injections_for(&attempt)
+                .expect("injections")
+                .iter()
+                .any(|digest| digest.as_str() == learned.event.subject),
+            "neither B developer nor reviewer receives A's lesson"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&packed.event.payload).expect("payload");
+        let digest =
+            kaisa_domain::ContentDigest::try_new(payload["digest"].as_str().expect("digest"))
+                .expect("pack digest");
+        let pack = ledger.context_pack(&digest).expect("pack").expect("stored");
+        assert!(
+            !String::from_utf8_lossy(&pack).contains("goal_summary"),
+            "the actual B context pack has no A observation text"
+        );
+    }
 }

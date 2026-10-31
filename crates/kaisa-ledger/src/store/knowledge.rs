@@ -7,11 +7,15 @@ use super::error::StoreError;
 use super::event_store::EventStore;
 
 /// Payload schema version of `KnowledgePromoted` events.
-const KNOWLEDGE_PAYLOAD_VERSION: u16 = 1;
+const KNOWLEDGE_PAYLOAD_VERSION: u16 = 2;
 
 /// A knowledge item Kaisa trusts, with where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedKnowledge {
+    /// Canonical repository root and initial commit identity; absent in legacy items.
+    pub repository: Option<String>,
+    /// Containment of the run that taught this item.
+    pub provenance: Option<String>,
     /// Content address of `text`.
     pub digest: ContentDigest,
     /// What kind of knowledge it is.
@@ -36,6 +40,8 @@ impl EventStore {
             return Err(StoreError::DigestMismatch(item.digest.clone()));
         }
         let payload = serde_json::json!({
+            "repository": item.repository,
+            "provenance": item.provenance,
             "kind": item.kind.code(),
             "text": item.text,
             "source_tree": item.source_tree,
@@ -132,10 +138,16 @@ impl EventStore {
             if blake3::hash(text.as_bytes()).to_hex().as_str() != digest.as_str() {
                 return Err(corrupt());
             }
-            if items.iter().any(|item| item.digest == digest) {
+            let repository = payload["repository"].as_str().map(str::to_owned);
+            if items
+                .iter()
+                .any(|item| item.digest == digest && item.repository == repository)
+            {
                 continue;
             }
             items.push(TrustedKnowledge {
+                repository,
+                provenance: payload["provenance"].as_str().map(str::to_owned),
                 digest,
                 kind: payload["kind"]
                     .as_str()
@@ -174,6 +186,8 @@ mod tests {
 
     fn a_lesson(text: &str) -> TrustedKnowledge {
         TrustedKnowledge {
+            repository: Some("/repository#initial-commit".to_owned()),
+            provenance: Some("confined".to_owned()),
             digest: ContentDigest::try_new(blake3::hash(text.as_bytes()).to_hex().as_str())
                 .expect("a blake3 digest is a valid content digest"),
             kind: KnowledgeKind::Lesson,
