@@ -163,6 +163,10 @@ pub fn claude_code_project_server(repository: &Path) -> PlannedFile {
 mod tests {
     use super::{PlannedAction, claude_code_integration, claude_code_project_server};
 
+    /// The integration plans one file: the slash command.
+    const PLANNED_COMMAND_FILES: usize = 1;
+    const SLASH_COMMAND_PATH: &str = ".claude/commands/kaisa.md";
+
     /// A throwaway repository directory, removed on drop.
     struct Repo(std::path::PathBuf);
 
@@ -188,9 +192,21 @@ mod tests {
 
         let files = claude_code_integration(&repo.0);
 
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path.to_string_lossy(), ".claude/commands/kaisa.md");
-        assert_eq!(files[0].action, PlannedAction::Create);
+        assert_eq!(
+            files.len(),
+            PLANNED_COMMAND_FILES,
+            "the integration plans exactly the slash-command file"
+        );
+        assert_eq!(
+            files[0].path.to_string_lossy(),
+            SLASH_COMMAND_PATH,
+            "the command lives where Claude Code looks for project commands"
+        );
+        assert_eq!(
+            files[0].action,
+            PlannedAction::Create,
+            "a repository without the command gets it created"
+        );
         let text = &files[0].contents;
         assert!(
             text.contains("$ARGUMENTS")
@@ -221,11 +237,16 @@ mod tests {
 
         let file = claude_code_project_server(&repo.0);
 
-        assert_eq!(file.action, PlannedAction::Create);
+        assert_eq!(
+            file.action,
+            PlannedAction::Create,
+            "no .mcp.json means the file is created"
+        );
         let value: serde_json::Value = serde_json::from_str(&file.contents).expect("JSON");
         assert_eq!(
             value,
-            serde_json::json!({"mcpServers": {"kaisa": {"command": "kaisa", "args": ["mcp", "serve"]}}})
+            serde_json::json!({"mcpServers": {"kaisa": {"command": "kaisa", "args": ["mcp", "serve"]}}}),
+            "the registration starts exactly `kaisa mcp serve`"
         );
     }
 
@@ -240,10 +261,19 @@ mod tests {
 
         let file = claude_code_project_server(&repo.0);
 
-        assert!(file.merges_into_existing_file());
+        assert!(
+            file.merges_into_existing_file(),
+            "an existing .mcp.json is merged into, not replaced"
+        );
         let value: serde_json::Value = serde_json::from_str(&file.contents).expect("JSON");
-        assert_eq!(value["mcpServers"]["docs"]["command"], "docs-server");
-        assert_eq!(value["mcpServers"]["kaisa"]["args"][0], "mcp");
+        assert_eq!(
+            value["mcpServers"]["docs"]["command"], "docs-server",
+            "the team's own server stays"
+        );
+        assert_eq!(
+            value["mcpServers"]["kaisa"]["args"][0], "mcp",
+            "Kaisa's server is added beside it"
+        );
         assert_eq!(value["other"], 1, "nothing else in the file changes");
     }
 
@@ -257,7 +287,8 @@ mod tests {
         .expect("written");
         assert_eq!(
             claude_code_project_server(&repo.0).action,
-            PlannedAction::Unchanged
+            PlannedAction::Unchanged,
+            "the same registration needs no change"
         );
 
         std::fs::write(
@@ -265,15 +296,21 @@ mod tests {
             r#"{"mcpServers": {"kaisa": {"command": "./evil"}}}"#,
         )
         .expect("written");
-        assert!(matches!(
-            claude_code_project_server(&repo.0).action,
-            PlannedAction::Conflict(_)
-        ));
+        assert!(
+            matches!(
+                claude_code_project_server(&repo.0).action,
+                PlannedAction::Conflict(_)
+            ),
+            "a different server named kaisa is the team's, so it is a conflict"
+        );
 
         std::fs::write(repo.0.join(".mcp.json"), "not json").expect("written");
-        assert!(matches!(
-            claude_code_project_server(&repo.0).action,
-            PlannedAction::Conflict(_)
-        ));
+        assert!(
+            matches!(
+                claude_code_project_server(&repo.0).action,
+                PlannedAction::Conflict(_)
+            ),
+            "a file that is not JSON is never overwritten"
+        );
     }
 }

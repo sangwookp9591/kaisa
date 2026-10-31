@@ -37,11 +37,13 @@ const PROCESS_FILE: &str = "process";
 /// Written when the run ends: its exit status.
 const EXIT_FILE: &str = "exit";
 
-/// Test-only hook: a JSON array of extra `kaisa` arguments (for example `--agent-program` with
-/// the scripted fake agent) put in front of the goal. It is read from the environment of the
-/// MCP server process, which the person's MCP configuration controls; no tool argument can set
-/// it, so the model cannot use it to choose a different agent program. It offers nothing the
-/// public `--agent-program` flag of `kaisa` does not already offer to the person at a terminal.
+/// Test-only hook, compiled only with the non-default `test-hooks` feature of `kaisa-cli`: a
+/// JSON array of extra `kaisa` arguments (for example `--agent-program` with the scripted fake
+/// agent) put in front of the goal. Only the integration-test build of the `kaisa` binary
+/// enables the feature (through `bin/kaisa`'s dev-dependency); `cargo install` and release
+/// builds do not, so a production server has neither the reader nor the metadata consumer and
+/// the variable means nothing to it.
+#[cfg(feature = "test-hooks")]
 pub(crate) const TEST_GOAL_ARGS_ENV: &str = "KAISA_MCP_TEST_GOAL_ARGS";
 
 /// Longest goal accepted, in characters.
@@ -275,9 +277,10 @@ impl Goals {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let started_ms = now_ms();
-        let meta = json!({"handle": handle, "goal": goal, "agent": agent,
-            "repository": repository, "started_ms": started_ms, "extra_args": extra_args});
-        fs::write(directory.join(META_FILE), meta.to_string())
+        let mut meta = json!({"handle": handle, "goal": goal, "agent": agent,
+            "repository": repository, "started_ms": started_ms});
+        record_test_goal_args(&mut meta, extra_args);
+        write_private_file(&directory.join(META_FILE), meta.to_string().as_bytes())
             .map_err(|error| format!("the goal could not be recorded: {error}"))?;
 
         let executable = std::env::current_exe()
@@ -307,13 +310,15 @@ impl Goals {
 
     /// Creates `<state>/goals/goal-<ms>-<n>` exclusively, so two goals never share a handle.
     fn new_goal_directory(&self) -> io::Result<PathBuf> {
-        fs::create_dir_all(self.goals_directory())?;
+        // Private before any goal data exists, whatever the umask or an earlier run left behind.
+        kaisa_sys::ensure_private_directory(&self.state)?;
+        kaisa_sys::ensure_private_directory(&self.goals_directory())?;
         loop {
             let number = GOAL_COUNTER.fetch_add(1, Ordering::Relaxed);
             let directory = self
                 .goals_directory()
                 .join(format!("goal-{}-{number}", now_ms()));
-            match fs::create_dir(&directory) {
+            match create_private_directory(&directory) {
                 Ok(()) => return Ok(directory),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
@@ -374,12 +379,88 @@ impl Goals {
 }
 
 /// The extra arguments of the test hook, if it is set.
+#[cfg(feature = "test-hooks")]
 fn test_goal_args() -> Result<Vec<String>, String> {
     let Some(text) = std::env::var_os(TEST_GOAL_ARGS_ENV) else {
         return Ok(Vec::new());
     };
     serde_json::from_str::<Vec<String>>(&text.to_string_lossy())
         .map_err(|_| format!("{TEST_GOAL_ARGS_ENV} must be a JSON array of strings"))
+}
+
+/// A production build has no hook: the environment is never consulted.
+#[cfg(not(feature = "test-hooks"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the test-hooks build"
+)]
+fn test_goal_args() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// Records the hook's arguments for the detached runner (test builds only).
+#[cfg(feature = "test-hooks")]
+fn record_test_goal_args(meta: &mut Value, extra_args: Vec<String>) {
+    meta["extra_args"] = json!(extra_args);
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn record_test_goal_args(_meta: &mut Value, _extra_args: Vec<String>) {}
+
+/// The hook's arguments recorded for the runner (test builds only).
+#[cfg(feature = "test-hooks")]
+fn recorded_test_goal_args(meta: &Value) -> Vec<String> {
+    meta.get("extra_args")
+        .and_then(Value::as_array)
+        .map(|extra| {
+            extra
+                .iter()
+                .filter_map(|arg| arg.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A production runner ignores `extra_args` in `goal.json`, whoever wrote them.
+#[cfg(not(feature = "test-hooks"))]
+fn recorded_test_goal_args(_meta: &Value) -> Vec<String> {
+    Vec::new()
+}
+
+/// Creates one directory readable only by its owner (`0700` on Unix; on Windows the private
+/// state directory's per-user profile location already restricts it, as for the state directory).
+fn create_private_directory(directory: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(kaisa_sys::PRIVATE_MODE);
+    }
+    builder.create(directory)
+}
+
+/// Opens `path` for appending (creating it) readable only by its owner (`0600` on Unix).
+fn open_private_append(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(kaisa_sys::PRIVATE_FILE_MODE);
+    }
+    options.open(path)
+}
+
+/// Writes `path` readable only by its owner.
+fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(kaisa_sys::PRIVATE_FILE_MODE);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// What was asked, from `goal.json`.
@@ -650,25 +731,11 @@ fn run_goal(directory: &Path, err: &mut dyn Write) -> io::Result<u8> {
         return Ok(crate::EXIT_FAILURE);
     };
     if let Some(identity) = ProcessIdentity::of(std::process::id()).ok().flatten() {
-        fs::write(directory.join(PROCESS_FILE), identity.to_line())?;
+        write_private_file(&directory.join(PROCESS_FILE), identity.to_line().as_bytes())?;
     }
-    let log = || {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(directory.join(LOG_FILE))
-    };
+    let log = || open_private_append(&directory.join(LOG_FILE));
     let (mut out, mut diagnostics) = (log()?, log()?);
-    let mut args: Vec<String> = meta
-        .get("extra_args")
-        .and_then(Value::as_array)
-        .map(|extra| {
-            extra
-                .iter()
-                .filter_map(|arg| arg.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut args: Vec<String> = recorded_test_goal_args(&meta);
     if meta.get("agent").and_then(Value::as_str) == Some("codex") {
         args.extend(["--agent".to_owned(), "codex".to_owned()]);
     }
@@ -688,9 +755,11 @@ fn run_goal(directory: &Path, err: &mut dyn Write) -> io::Result<u8> {
             crate::EXIT_USAGE
         }
     };
-    fs::write(
-        directory.join(EXIT_FILE),
-        json!({"code": status, "finished_ms": now_ms()}).to_string(),
+    write_private_file(
+        &directory.join(EXIT_FILE),
+        json!({"code": status, "finished_ms": now_ms()})
+            .to_string()
+            .as_bytes(),
     )?;
     Ok(status)
 }
@@ -698,6 +767,12 @@ fn run_goal(directory: &Path, err: &mut dyn Write) -> io::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::{GoalRecord, Snapshot, result_branch, tools, valid_handle};
+
+    /// Architecture §15: a tool catalog stays under 2k tokens.
+    const CATALOG_TOKEN_BUDGET: usize = 2_000;
+    /// Four bytes per token is the usual estimate, so the budget in bytes is generous.
+    const BYTES_PER_TOKEN: usize = 4;
+    const CATALOG_BYTE_BUDGET: usize = CATALOG_TOKEN_BUDGET * BYTES_PER_TOKEN;
 
     /// A goal's snapshot after a run that exited with `code` and printed `log`.
     fn settled(code: i64, log: &[&str]) -> Snapshot {
@@ -726,11 +801,15 @@ mod tests {
         );
         let json = snapshot.to_json();
 
-        assert_eq!(snapshot.state, "waiting_for_you");
+        assert_eq!(
+            snapshot.state, "waiting_for_you",
+            "exit code 3 is a run that needs a person"
+        );
         assert!(
             json["reason"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("package.json"))
+                .is_some_and(|reason| reason.contains("package.json")),
+            "the reason names the file that needs the person's attention"
         );
         assert!(
             json["next"]
@@ -763,13 +842,17 @@ mod tests {
         assert!(
             silent
                 .reason
-                .is_some_and(|reason| reason.contains("without a verification verdict"))
+                .is_some_and(|reason| reason.contains("without a verification verdict")),
+            "the reason says no verdict was printed"
         );
     }
 
     #[test]
     fn handles_cannot_name_a_path() {
-        assert!(valid_handle("goal-1700000000000-0"));
+        assert!(
+            valid_handle("goal-1700000000000-0"),
+            "a handle Kaisa itself creates is valid"
+        );
         assert!(
             !valid_handle("../goal-1") && !valid_handle("goal-1/../../x") && !valid_handle("x"),
             "a handle names one directory under the goals directory and nothing else"
@@ -781,7 +864,11 @@ mod tests {
         let honest = vec!["Result: kaisa/att_abc123 at deadbeef; retrieve with git merge --ff-only kaisa/att_abc123".to_owned()];
         let hostile = vec!["Result: main; rm -rf / at deadbeef".to_owned()];
 
-        assert_eq!(result_branch(&honest).as_deref(), Some("kaisa/att_abc123"));
+        assert_eq!(
+            result_branch(&honest).as_deref(),
+            Some("kaisa/att_abc123"),
+            "an attempt branch named in the result line becomes the merge command"
+        );
         assert_eq!(
             result_branch(&hostile),
             None,
@@ -790,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_stays_far_below_the_two_thousand_token_budget() {
+    fn the_catalog_stays_far_below_the_catalog_token_budget() {
         let catalog: usize = serde_json::to_string(
             &tools()
                 .iter()
@@ -803,7 +890,9 @@ mod tests {
         .expect("serializes")
         .len();
 
-        // Four bytes per token is the usual estimate; the budget is 2k tokens (§15).
-        assert!(catalog < 2_000, "the catalog is {catalog} bytes");
+        assert!(
+            catalog < CATALOG_BYTE_BUDGET,
+            "the catalog is {catalog} bytes; the budget is {CATALOG_TOKEN_BUDGET} tokens (§15)"
+        );
     }
 }
