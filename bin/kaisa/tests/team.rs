@@ -305,10 +305,28 @@ fn a_team_run_with_a_first_pass(
     first_pass_requires: &str,
     reviewer_requires: &str,
 ) -> VerifiedOutcome {
+    a_team_run_with_a_first_pass_format(bench, first_pass_requires, reviewer_requires, "raw")
+}
+
+fn a_team_run_with_a_first_pass_format(
+    bench: &Workbench,
+    first_pass_requires: &str,
+    reviewer_requires: &str,
+    format: &str,
+) -> VerifiedOutcome {
     let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
     let developer = |mcp_config: &Path| scripted(mcp_config, &["--fake-write-next", STEP_PREFIX]);
-    let first_pass =
-        |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", first_pass_requires]);
+    let first_pass = |mcp_config: &Path| {
+        scripted(
+            mcp_config,
+            &[
+                "--fake-review-require",
+                first_pass_requires,
+                "--fake-review-format",
+                format,
+            ],
+        )
+    };
     let reviewer =
         |mcp_config: &Path| scripted(mcp_config, &["--fake-review-require", reviewer_requires]);
     run_verified_goal(&VerifiedRequest {
@@ -468,6 +486,57 @@ fn a_claude_result_without_a_verdict_is_never_delivered() {
     );
 }
 
+/// A reviewer prints a successful Claude result before either overflowing capture or exiting 1.
+fn a_team_with_an_unreliable_reviewer(bench: &Workbench, format: &str) -> VerifiedOutcome {
+    a_team_run_with_a_reviewer(
+        bench,
+        &[
+            "--fake-review-require",
+            FIRST_STEP,
+            "--fake-review-format",
+            format,
+        ],
+    )
+}
+
+#[test]
+fn a_truncated_reviewer_transcript_is_refused_and_its_metadata_preserves_the_loss() {
+    let bench = Workbench::new("truncated-reviewer");
+    let outcome = a_team_with_an_unreliable_reviewer(&bench, "claude-truncated");
+    let review = outcome.attempts.last().expect("the reviewer ran");
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            bench
+                .base
+                .join("state/attempts")
+                .join(review.attempt.as_str())
+                .join("transcript-meta.json"),
+        )
+        .expect("capture metadata was saved"),
+    )
+    .expect("metadata is JSON");
+    assert!(
+        review.truncated && metadata["truncated"] == true,
+        "both the outcome and saved metadata must preserve the capture loss"
+    );
+    assert!(
+        matches!(outcome.delivery, Delivery::Refuse(ref reason) if reason.contains("truncated")),
+        "a success result before a lost failing result cannot approve: {:?}",
+        outcome.delivery
+    );
+}
+
+#[test]
+fn a_reviewer_that_exits_unsuccessfully_after_success_is_refused() {
+    let bench = Workbench::new("failed-reviewer");
+    let outcome = a_team_with_an_unreliable_reviewer(&bench, "claude-failed");
+    assert!(
+        matches!(outcome.delivery, Delivery::Refuse(ref reason) if reason.contains("exit")),
+        "a success event cannot override the actual process exit: {:?}",
+        outcome.delivery
+    );
+}
+
 /// Where Claude Code reads a repository's agent settings.
 const CLAUDE_SETTINGS: &str = ".claude/settings.json";
 /// Claude settings that let an agent act without asking.
@@ -537,4 +606,23 @@ fn a_candidate_that_widens_agent_settings_needs_a_person_before_any_reviewer_sta
         ONLY_THE_DEVELOPER,
         "no reviewer or revision starts in a candidate whose settings would widen its authority"
     );
+}
+
+#[test]
+fn a_failed_or_truncated_first_pass_is_refused_before_full_review() {
+    const DEVELOPER_AND_FIRST_PASS: usize = 2;
+    for format in ["claude-failed", "claude-truncated"] {
+        let bench = Workbench::new(format);
+        let outcome = a_team_run_with_a_first_pass_format(&bench, FIRST_STEP, FIRST_STEP, format);
+        assert!(
+            matches!(outcome.delivery, Delivery::Refuse(_)),
+            "a first pass with incomplete evidence must refuse: {:?}",
+            outcome.delivery
+        );
+        assert_eq!(
+            outcome.attempts.len(),
+            DEVELOPER_AND_FIRST_PASS,
+            "an unreliable first pass must stop before starting the full reviewer"
+        );
+    }
 }

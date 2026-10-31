@@ -68,13 +68,15 @@ const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
 /// How the scripted reviewer answers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReviewFormat {
-    /// The verdict alone, as the last line of standard output.
+    /// The verdict alone, in a final dedicated fence on standard output.
     Raw,
     /// Claude Code's stream-json events, the verdict in a code fence inside prose in the
     /// assistant message and the final `result` event, which is the transcript's last line.
     Claude,
     /// The same events, the answer only prose with no verdict.
     ClaudeProse,
+    ClaudeTruncated,
+    ClaudeFailed,
 }
 
 impl ReviewFormat {
@@ -83,6 +85,8 @@ impl ReviewFormat {
             None | Some("raw") => Ok(Self::Raw),
             Some("claude") => Ok(Self::Claude),
             Some("claude-prose") => Ok(Self::ClaudeProse),
+            Some("claude-truncated") => Ok(Self::ClaudeTruncated),
+            Some("claude-failed") => Ok(Self::ClaudeFailed),
             Some(other) => Err(format!("unknown review format {other:?}")),
         }
     }
@@ -139,11 +143,25 @@ fn review(required: &str, format: ReviewFormat) -> Result<(), String> {
     };
     let verdict: Value = json!({"candidate_tree": tree, "approve": approve, "findings": findings});
     match format {
-        ReviewFormat::Raw => println!("{verdict}"),
-        ReviewFormat::Claude => print_as_claude(&format!(
-            "I reviewed the candidate against the goal.\n\n```json\n{verdict}\n```"
-        )),
+        ReviewFormat::Raw => println!("```kaisa-verdict\n{verdict}\n```"),
+        ReviewFormat::Claude | ReviewFormat::ClaudeTruncated | ReviewFormat::ClaudeFailed => {
+            print_as_claude(&format!(
+                "I reviewed the candidate against the goal.\n\n```kaisa-verdict\n{verdict}\n```"
+            ))
+        }
         ReviewFormat::ClaudeProse => print_as_claude("I reviewed the candidate. Looks good to me!"),
+    }
+    if format == ReviewFormat::ClaudeTruncated {
+        const CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
+        println!("{}", "x".repeat(CAPTURE_LIMIT));
+        println!(
+            "{}",
+            json!({"type":"result", "is_error":true,
+            "subtype":"error_during_execution", "result":"last result failed"})
+        );
+    }
+    if format == ReviewFormat::ClaudeFailed {
+        return Err("reviewer failed after printing success".to_owned());
     }
     Ok(())
 }

@@ -105,6 +105,8 @@ pub struct GoalOutcome {
     pub attempt: AttemptId,
     /// How the agent ended; `None` if it ran past its deadline.
     pub exit: Option<ProcessExit>,
+    /// True if the saved transcript lost output at the capture limit.
+    pub truncated: bool,
     /// The branch holding the preserved work.
     pub branch: String,
     /// The WIP commit with the work, if there was any to preserve.
@@ -433,6 +435,11 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     .map_err(at("running the agent"))?;
     std::fs::write(attempt_directory.join("transcript.log"), &finished.output)
         .map_err(at("saving the transcript"))?;
+    std::fs::write(
+        attempt_directory.join("transcript-meta.json"),
+        serde_json::json!({"truncated": finished.truncated}).to_string(),
+    )
+    .map_err(at("saving transcript metadata"))?;
     if let Some(usage) = kaisa_agents::parse_usage(&String::from_utf8_lossy(&finished.output)) {
         ledger
             .record_usage(
@@ -485,6 +492,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
     Ok(GoalOutcome {
         attempt,
         exit: finished.exit,
+        truncated: finished.truncated,
         branch,
         commit,
         kept_back,

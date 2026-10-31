@@ -97,6 +97,7 @@ pub const CODEX_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub fn codex_final_answer(transcript: &str) -> Option<String> {
     let mut answer: Option<String> = None;
     let mut completed: bool = false;
+    let mut failed: bool = false;
     for event in events(transcript) {
         match event_type(&event) {
             Some("item.completed")
@@ -108,10 +109,16 @@ pub fn codex_final_answer(transcript: &str) -> Option<String> {
                     .map(str::to_owned);
                 completed = false;
             }
-            Some("turn.completed") => completed = true,
+            Some("turn.completed") => completed = !failed,
+            Some("thread.started" | "turn.started") => {
+                answer = None;
+                completed = false;
+                failed = false;
+            }
             Some("turn.failed" | "error") => {
                 answer = None;
                 completed = false;
+                failed = true;
             }
             _ => {}
         }
