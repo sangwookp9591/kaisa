@@ -178,6 +178,7 @@ kaisa agent add local --endpoint http://127.0.0.1:11434/v1 --model qwen=T0
 kaisa agent list                          # personal agents and model servers
 kaisa policy show                         # your personal policy
 kaisa policy set revision_limit 3         # change it (validated before it is saved)
+kaisa mcp serve                           # MCP server for Claude Code (see below)
 ```
 
 A goal ends with one of these results, which scripts and CI can rely on:
@@ -199,6 +200,44 @@ list) never start a run. `kaisa review the parser` exits `2` and prints the quot
 that must contain `--word` can follow `--`: `kaisa -- fix the --verbose bug`. Run `kaisa` from a
 subdirectory and it uses the enclosing git repository and says so in one line:
 `using the git repository at <root>`. `kaisa watch` only reads the ledger: it does not append events, migrate the database or rebuild projections. A closed ledger is read without any file change; reading a live WAL database can create or update SQLite shared-memory sidecar files (`-shm`).
+
+<a id="use-kaisa-from-claude-code"></a>
+
+## 🔌 Use Kaisa from Claude Code
+
+Register Kaisa's MCP server once for yourself (user scope; nothing is written into any repository):
+
+```bash
+claude mcp add kaisa -- kaisa mcp serve
+```
+
+Then, in a Claude Code session inside a git repository, ask for a goal with the slash command or in
+plain words:
+
+```text
+/kaisa fix the flaky date test
+```
+
+Claude calls `kaisa_start_goal`, which starts `kaisa "<goal>"` as a **background process** (its own
+process group; output in `<state>/goals/<handle>/output.log`) and returns a handle. It keeps running
+if you close the session. Ask "how is it going?" and Claude calls `kaisa_status` (running, verified,
+waiting for you, or not delivered, with tokens and cost from the ledger once the run ends);
+`kaisa_result` returns the final lines and the exact `git merge --ff-only kaisa/att_…` command.
+Several goals can run at once. `agent` can be `claude` (default) or `codex`; `repository` defaults to
+the directory Claude Code was started in and must be a git repository with a commit.
+
+| From inside the agent | |
+|---|---|
+| Start a verified goal, read its status and result | ✅ |
+| Merge, approve or publish | ❌ never: Kaisa has no tool for it. A run that needs a person reports **"This needs you"** with the reason, and you continue in a terminal in the repository. `kaisa_result` only prints the merge command for you to run. |
+| Answer an agent's question, cancel a run | not available yet |
+
+The project slash command is `.claude/commands/kaisa.md` (`kaisa_cli::claude_code_integration` plans
+it for `kaisa init`; it does not overwrite a file you wrote). A team that wants the server in the
+repository can instead commit `{"mcpServers":{"kaisa":{"command":"kaisa","args":["mcp","serve"]}}}`
+as `.mcp.json` (`claude_code_project_server`); Kaisa's settings scanner accepts exactly that entry on
+macOS and Linux and still flags any other server (on Windows every repository server is flagged).
+Claude Code asks you to approve a project server before it uses it.
 
 <a id="how-a-verified-run-works"></a>
 

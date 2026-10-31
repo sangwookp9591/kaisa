@@ -249,7 +249,12 @@ fn json_rules(contents: &str, mcp: bool) -> io::Result<Vec<(RiskRule, String)>> 
     let mut rules = Vec::new();
     for (key, value) in root.entries() {
         if mcp {
-            if key == "mcpServers" && !value.entries().is_empty() {
+            if key == "mcpServers"
+                && value
+                    .entries()
+                    .iter()
+                    .any(|(name, server)| !is_kaisas_own_server(name, server))
+            {
                 rules.push((RiskRule::RepositoryMcpServer, "mcpServers".to_owned()));
             }
             continue;
@@ -297,6 +302,30 @@ fn json_rules(contents: &str, mcp: bool) -> io::Result<Vec<(RiskRule, String)>> 
         }
     }
     Ok(rules)
+}
+
+/// True for exactly the entry `kaisa init` writes, `"kaisa": {"command": "kaisa", "args":
+/// ["mcp", "serve"]}`: Kaisa's own stdio server, which can only start goals and read their
+/// results (it has no tool to merge, approve or publish). It adds no authority, so it is not
+/// a repository server in the sense of [`RiskRule::RepositoryMcpServer`].
+///
+/// Anything else is still flagged: a different name, command, extra arguments, an `env`, or any
+/// other key. The command is the bare name `kaisa`, which the agent's launcher resolves on the
+/// person's `PATH`; on Windows a launcher may also look in the working directory, where a
+/// repository could plant its own `kaisa.exe`, so there nothing is exempt.
+fn is_kaisas_own_server(name: &str, server: &Json) -> bool {
+    if cfg!(windows) || name != "kaisa" {
+        return false;
+    }
+    let entries = server.entries();
+    let command = entries.iter().find(|(key, _)| key == "command");
+    let args = entries.iter().find(|(key, _)| key == "args");
+    entries.len() == 2
+        && command.and_then(|(_, value)| value.string()) == Some("kaisa")
+        && matches!(args, Some((_, Json::Array(items)))
+            if items.len() == 2
+                && items[0].string() == Some("mcp")
+                && items[1].string() == Some("serve"))
 }
 
 fn invalid_json() -> io::Error {
@@ -631,6 +660,65 @@ mod tests {
             vec![(".mcp.json", RiskRule::RepositoryMcpServer)],
             "a repository server adds tools regardless of its command"
         );
+    }
+
+    #[cfg(not(windows))]
+    /// The `.mcp.json` text with `server` as the entry named `name`, then `extra` entries.
+    fn mcp_with(name: &str, server: &str, extra: &str) -> String {
+        format!(r#"{{"mcpServers":{{"{name}":{server}{extra}}}}}"#)
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn kaisas_own_mcp_server_entry_is_not_flagged_but_nothing_like_it_is() {
+        let own = r#"{"command":"kaisa","args":["mcp","serve"]}"#;
+        let looks_alike = [
+            mcp_with(
+                "kaisa",
+                r#"{"command":"./kaisa","args":["mcp","serve"]}"#,
+                "",
+            ),
+            mcp_with(
+                "kaisa",
+                r#"{"command":"kaisa","args":["mcp","serve","--x"]}"#,
+                "",
+            ),
+            mcp_with(
+                "kaisa",
+                r#"{"command":"kaisa","args":["mcp","serve"],"env":{"A":"b"}}"#,
+                "",
+            ),
+            mcp_with("kaisa-tools", own, ""),
+            mcp_with("kaisa", own, r#","other":{"command":"tool-server"}"#),
+            // Two entries under one name: whichever the agent keeps, one of them is not Kaisa's.
+            mcp_with("kaisa", own, r#","kaisa":{"command":"evil"}"#),
+        ];
+        let repository = a_repository_with_one_commit_on_main();
+        write_settings(
+            repository.path(),
+            ".mcp.json",
+            &mcp_with("kaisa", own, ""),
+            "own",
+        );
+        assert!(
+            scan_settings(repository.path())
+                .expect("settings can be scanned")
+                .is_empty(),
+            "the entry Kaisa itself writes adds no authority"
+        );
+        for text in looks_alike {
+            let repository = a_repository_with_one_commit_on_main();
+            write_settings(repository.path(), ".mcp.json", &text, "look-alike");
+            assert_eq!(
+                scan_settings(repository.path())
+                    .expect("settings can be scanned")
+                    .iter()
+                    .map(|finding| finding.rule)
+                    .collect::<Vec<_>>(),
+                vec![RiskRule::RepositoryMcpServer],
+                "only exactly Kaisa's own entry is exempt: {text}"
+            );
+        }
     }
 
     #[test]

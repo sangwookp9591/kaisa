@@ -7,13 +7,19 @@ use std::io;
 use std::io::Write;
 
 mod agent;
+mod claude_code;
 mod delivery;
 mod goal;
 mod local_agent;
+mod mcp_serve;
 mod policy;
 mod verified;
 mod watch;
 
+pub use claude_code::{
+    PROJECT_MCP_PATH, PlannedAction, PlannedFile, SLASH_COMMAND_PATH, USER_SCOPE_REGISTRATION,
+    claude_code_integration, claude_code_project_server,
+};
 pub use delivery::{EXIT_WAITING_FOR_HUMAN, report_delivery, report_verified_outcome};
 
 /// Exit status for a command that completed successfully.
@@ -81,6 +87,7 @@ Usage:
                            the result, and only a verified candidate is delivered
   kaisa watch              attempts, their state, tokens and cost, from the ledger
   kaisa review             approve results       (planned)
+  kaisa mcp serve          let Claude Code start and follow goals (claude mcp add kaisa -- kaisa mcp serve)
 
 More commands:
   kaisa agent add|list     register a personal agent or a local model server
@@ -120,21 +127,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
-        Some("mcp") => match (args.get(1).map(String::as_str), args.get(2)) {
-            (Some("--attempt"), Some(directory)) => {
-                match kaisa_mcp::bridge(std::path::Path::new(directory), out) {
-                    Ok(()) => Ok(EXIT_SUCCESS),
-                    Err(error) => {
-                        writeln!(err, "kaisa mcp: {error}")?;
-                        Ok(EXIT_FAILURE)
-                    }
-                }
-            }
-            _ => {
-                writeln!(err, "usage: kaisa mcp --attempt <attempt directory>")?;
-                Ok(EXIT_USAGE)
-            }
-        },
+        Some("mcp") => mcp_serve::run(&args[1..], out, err),
         Some(command) if PLANNED_COMMANDS.contains(&command) => {
             writeln!(
                 err,
