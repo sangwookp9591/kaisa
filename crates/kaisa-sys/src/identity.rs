@@ -72,22 +72,30 @@ fn start_of(pid: u32) -> io::Result<Option<u64>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    linux_start_from_stat(&stat)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_start_from_stat(stat: &str) -> io::Result<Option<u64>> {
     // The command name (field 2) may contain spaces and parentheses; fields resume after the
     // last `)`. Field 3 is then the first, so field 22 is the twentieth.
     let after_name: &str = stat
         .rsplit_once(')')
         .map(|(_, rest)| rest)
         .ok_or_else(|| io::Error::other("unexpected /proc stat format"))?;
-    after_name
-        .split_whitespace()
-        .nth(START_TIME_AFTER_NAME)
+    let mut fields = after_name.split_whitespace();
+    if fields.next() == Some("Z") {
+        return Ok(None);
+    }
+    fields
+        .nth(START_TIME_AFTER_NAME - 1)
         .and_then(|field| field.parse().ok())
         .map(Some)
         .ok_or_else(|| io::Error::other("no start time in /proc stat"))
 }
 
 /// Index of the start-time field among the fields after the command name.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const START_TIME_AFTER_NAME: usize = 19;
 
 /// Microseconds since the epoch at which `pid` started (`proc_pidinfo`, BSD info).
@@ -209,6 +217,39 @@ mod tests {
     const AGENT_LIFETIME_SECONDS: &str = "30";
     /// A pid far above any the test runner will hand out.
     const UNUSED_PID: u32 = 999_999;
+
+    fn owner_stat(state: &str) -> String {
+        let mut fields = vec!["0"; super::START_TIME_AFTER_NAME + 1];
+        fields[0] = state;
+        fields[super::START_TIME_AFTER_NAME] = "12345";
+        format!("42 (owner with ) parentheses) {}", fields.join(" "))
+    }
+
+    #[test]
+    fn a_linux_zombie_owner_is_gone_even_before_its_parent_reaps_it() {
+        let zombie = owner_stat("Z");
+        assert_eq!(
+            super::linux_start_from_stat(&zombie).expect("valid stat"),
+            None,
+            "a zombie cannot own or resume Kaisa recovery"
+        );
+    }
+
+    #[test]
+    fn a_linux_sleeping_owner_keeps_its_start_identity() {
+        let sleeping = owner_stat("S");
+        let start = sleeping
+            .split_whitespace()
+            .last()
+            .expect("start field")
+            .parse()
+            .expect("clock ticks");
+        assert_eq!(
+            super::linux_start_from_stat(&sleeping).expect("valid stat"),
+            Some(start),
+            "an idle live owner must still protect its attempt"
+        );
+    }
 
     #[test]
     fn a_running_process_is_recognised_by_its_identity() {

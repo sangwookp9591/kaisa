@@ -60,6 +60,19 @@ fn wait_for_released_lock(owner: &File) -> Result<bool, GoalError> {
     }
 }
 
+fn unidentified_holder_guidance(path: &Path) -> String {
+    let path = quoted_path(path);
+    #[cfg(target_os = "linux")]
+    let find = format!("inspect /proc/locks, or run fuser {path} or lsof {path}");
+    #[cfg(not(target_os = "linux"))]
+    let find = format!("run lsof {path}");
+    format!(
+        "its recorded owner was dead; its agent was checked and ended if running, but the lock \
+         {path} is still held by another recovery or an unidentified holder; {find} to find \
+         the holder, confirm it is safe to end the holder, then end it and rerun Kaisa"
+    )
+}
+
 /// What recovery did with one abandoned attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recovered {
@@ -156,20 +169,20 @@ fn proven_exit(attempt_directory: &Path) -> Result<Result<(ExitStatus, bool), St
         ));
     };
     #[cfg(unix)]
-    let ended: bool = identity
-        .end_tree()
-        .map_err(at("ending the abandoned agent"))?;
+    {
+        let ended = identity
+            .end_tree()
+            .map_err(at("ending the abandoned agent"))?;
+        Ok(Ok((ExitStatus::Terminated, ended)))
+    }
     #[cfg(not(unix))]
-    let ended: bool = {
-        if identity
-            .is_running()
-            .map_err(at("inspecting the abandoned agent"))?
-        {
-            return Ok(Err("its agent is still running".to_owned()));
-        }
-        false
-    };
-    Ok(Ok((ExitStatus::Terminated, ended)))
+    {
+        // A root's identity says nothing about descendants in the lost Windows Job Object.
+        let _ = identity;
+        Ok(Err(
+            "Kaisa cannot prove the agent's job tree has ended on Windows".to_owned(),
+        ))
+    }
 }
 
 /// Quotes a path for a Unix shell, or PowerShell on Windows, in manual cleanup guidance.
@@ -190,6 +203,16 @@ fn quoted_path(path: &Path) -> String {
 pub fn recover_abandoned(
     repository: &Path,
     state_directory: &Path,
+) -> Result<Vec<Recovered>, GoalError> {
+    recover_with_exit_proof(repository, state_directory, &proven_exit)
+}
+
+type ExitProof = Result<Result<(ExitStatus, bool), String>, GoalError>;
+
+fn recover_with_exit_proof(
+    repository: &Path,
+    state_directory: &Path,
+    prove_exit: &dyn Fn(&Path) -> ExitProof,
 ) -> Result<Vec<Recovered>, GoalError> {
     let database: PathBuf = state_directory.join("kaisa.db");
     if !database.exists() {
@@ -224,7 +247,7 @@ pub fn recover_abandoned(
                     "recorded by an older Kaisa; Kaisa cannot prove its owner is gone (no owner lock). \
                      After confirming its owner and agent have stopped, inspect worktree {} on \
                      branch kaisa/{} and commit any uncommitted changes there; committed changes \
-                     stay on that branch. Then remove the worktree manually: git -C {} worktree remove {}. \
+                     stay on that branch; do not delete the branch. Then remove the worktree manually: git -C {} worktree remove {}. \
                      The next run recognises the removed worktree and records cleanup without changing the branch",
                     state_directory.join("worktrees").join(row.attempt.as_str()).display(),
                     row.attempt,
@@ -267,7 +290,7 @@ pub fn recover_abandoned(
                 // can take it after the real owner dies. End only its recorded agent tree,
                 // then reacquire the same lock before preserving or mutating any state.
                 let directory = state_directory.join("attempts").join(row.attempt.as_str());
-                match proven_exit(&directory)? {
+                match prove_exit(&directory).unwrap_or_else(|error| Err(error.to_string())) {
                     Ok(proof) => earlier_exit = Some(proof),
                     Err(reason) => {
                         recovered.push(kept(format!(
@@ -277,17 +300,27 @@ pub fn recover_abandoned(
                     }
                 }
                 if !wait_for_released_lock(&owner)? {
-                    recovered.push(kept("its recorded owner was dead; its agent was checked and ended if running, but the lock is still held by another recovery or an unidentified holder".to_owned()));
+                    recovered.push(kept(unidentified_holder_guidance(
+                        &owner_directory.join(OWNER_LOCK_FILE),
+                    )));
                     continue;
                 }
             }
             Err(TryLockError::Error(error)) => return Err(at("locking the attempt owner")(error)),
         }
         // Publish this reclaimer while holding the lock, so peers also recognise its life.
+        let recovery_identity = match ProcessIdentity::of(std::process::id()) {
+            Ok(identity) => identity,
+            Err(error) => {
+                recovered.push(kept(format!(
+                    "Kaisa cannot inspect the recovery owner's identity: {error}"
+                )));
+                continue;
+            }
+        };
         record_identity(
             &owner_directory.join(OWNER_IDENTITY_FILE),
-            ProcessIdentity::of(std::process::id())
-                .map_err(at("identifying the recovery owner"))?,
+            recovery_identity,
         )
         .map_err(at("recording the recovery owner"))?;
         // The snapshot may predate another owner's/reclaimer's completion. Refresh while
@@ -328,6 +361,7 @@ pub fn recover_abandoned(
             &row.attempt,
             row.execution,
             earlier_exit,
+            prove_exit,
         )?);
     }
     Ok(recovered)
@@ -340,6 +374,7 @@ fn recover_one(
     attempt: &AttemptId,
     execution: Execution,
     earlier_exit: Option<(ExitStatus, bool)>,
+    prove_exit: &dyn Fn(&Path) -> ExitProof,
 ) -> Result<Recovered, GoalError> {
     let attempt_directory: PathBuf = state_directory.join("attempts").join(attempt.as_str());
     let kept = |reason: &str| Recovered::Kept {
@@ -354,7 +389,7 @@ fn recover_one(
     } else if never_started {
         (ExitStatus::Terminated, false)
     } else {
-        match proven_exit(&attempt_directory)? {
+        match prove_exit(&attempt_directory).unwrap_or_else(|error| Err(error.to_string())) {
             Ok(proof) => proof,
             Err(reason) => return Ok(kept(&reason)),
         }
@@ -466,4 +501,157 @@ fn recognise_user_removal(
         attempt: attempt.clone(),
         branch,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct InterruptedAttempts {
+        directory: PathBuf,
+        attempts: Vec<AttemptId>,
+    }
+
+    impl InterruptedAttempts {
+        fn running_pair() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("kaisa-recovery-{}", crate::ids::fresh_suffix()));
+            std::fs::create_dir_all(&directory).expect("state directory prepared");
+            let attempts = ["att_inaccessible", "att_following"]
+                .into_iter()
+                .map(|text| AttemptId::try_new(text).expect("valid attempt"))
+                .collect::<Vec<_>>();
+            let mut ledger = EventStore::open(&directory.join("kaisa.db")).expect("ledger opens");
+            for attempt in &attempts {
+                let owner = owner_directory(&directory, attempt);
+                std::fs::create_dir_all(&owner).expect("owner directory prepared");
+                File::create(owner.join(OWNER_LOCK_FILE)).expect("dead owner's released lock");
+                record(
+                    &mut ledger,
+                    EventKind::AttemptAdmitted,
+                    attempt.as_str(),
+                    serde_json::json!({"task": "task_recovery"}),
+                )
+                .expect("admitted");
+                record_execution(&mut ledger, attempt, Execution::Running).expect("running");
+            }
+            Self {
+                directory,
+                attempts,
+            }
+        }
+    }
+
+    impl Drop for InterruptedAttempts {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn assert_inspection_error_is_local(held_by_unidentified_holder: bool) {
+        let fixture = InterruptedAttempts::running_pair();
+        let checked = std::cell::RefCell::new(Vec::new());
+        let inaccessible = &fixture.attempts[0];
+        let owner_path = owner_directory(&fixture.directory, inaccessible);
+        let holder = File::open(owner_path.join(OWNER_LOCK_FILE)).expect("holder opens lock");
+        if held_by_unidentified_holder {
+            holder.lock().expect("unidentified holder takes lock");
+            let current = ProcessIdentity::of(std::process::id())
+                .expect("inspectable")
+                .expect("live");
+            let dead_owner = ProcessIdentity {
+                started: current.started.wrapping_add(1),
+                ..current
+            };
+            std::fs::write(owner_path.join(OWNER_IDENTITY_FILE), dead_owner.to_line())
+                .expect("recorded dead owner");
+        }
+        let results = recover_with_exit_proof(&fixture.directory, &fixture.directory, &|path| {
+            checked
+                .borrow_mut()
+                .push(path.file_name().expect("attempt directory").to_owned());
+            if path.ends_with(inaccessible.as_str()) {
+                Err(at("inspecting the abandoned agent")(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "inspection denied",
+                )))
+            } else {
+                Ok(Err("next attempt inspected".to_owned()))
+            }
+        })
+        .expect("one inaccessible identity must not abort recovery");
+        assert_eq!(
+            results.len(),
+            fixture.attempts.len(),
+            "each attempt receives its own outcome"
+        );
+        assert_eq!(
+            checked.borrow().len(),
+            fixture.attempts.len(),
+            "the next attempt is inspected"
+        );
+        assert!(
+            matches!(&results[0], Recovered::Kept { attempt, reason }
+            if attempt == inaccessible && reason.contains("inspection denied")),
+            "the inaccessible attempt is kept with the inspection error: {results:?}"
+        );
+        assert!(
+            matches!(&results[1], Recovered::Kept { reason, .. }
+            if reason == "next attempt inspected"),
+            "recovery continues in order: {results:?}"
+        );
+    }
+
+    #[test]
+    fn an_agent_inspection_error_keeps_that_attempt_and_recovery_checks_the_next() {
+        assert_inspection_error_is_local(false);
+    }
+
+    #[test]
+    fn an_agent_inspection_error_under_a_held_lock_keeps_only_that_attempt() {
+        assert_inspection_error_is_local(true);
+    }
+
+    #[test]
+    fn an_unidentified_lock_holder_gets_a_path_and_instructions_to_end_it_and_rerun() {
+        let path = Path::new("state with spaces/owner.lock");
+        let guidance = unidentified_holder_guidance(path);
+        assert!(
+            guidance.contains(&quoted_path(path)),
+            "the exact lock path must be shell quoted: {guidance}"
+        );
+        assert!(
+            guidance.contains("lsof ")
+                && guidance.contains("end the holder")
+                && guidance.contains("rerun"),
+            "the user needs a way to find and resolve the holder: {guidance}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            guidance.contains("/proc/locks") && guidance.contains("fuser "),
+            "Linux offers lock-specific discovery: {guidance}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_gone_windows_agent_root_keeps_the_attempt_without_job_tree_proof() {
+        let fixture = InterruptedAttempts::running_pair();
+        let directory = fixture
+            .directory
+            .join("attempts")
+            .join(fixture.attempts[0].as_str());
+        std::fs::create_dir_all(&directory).expect("attempt directory prepared");
+        let gone_root = ProcessIdentity {
+            pid: u32::MAX,
+            started: 1,
+        };
+        std::fs::write(directory.join(AGENT_IDENTITY_FILE), gone_root.to_line())
+            .expect("recorded root identity");
+        let proof = proven_exit(&directory).expect("inspection does not abort recovery");
+        assert!(
+            matches!(proof, Err(reason) if reason.contains("cannot prove the agent's job tree has ended on Windows")),
+            "a missing root cannot establish that all descendants have exited"
+        );
+    }
 }

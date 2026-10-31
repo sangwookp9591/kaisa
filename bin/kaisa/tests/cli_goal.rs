@@ -303,6 +303,12 @@ fn watch_shows_each_attempts_state_from_the_ledger() {
         watched.status.success() && line.contains("exited") && line.contains("reclaimed"),
         "the finished attempt is listed as exited and reclaimed: {view:?}"
     );
+    let header = view.lines().next().expect("watch header");
+    assert_eq!(
+        header.find("EXECUTION"),
+        line.find("exited"),
+        "long attempt and task IDs must not move states out of their header columns: {view:?}"
+    );
 }
 
 /// Runs `kaisa agent <args>` against `state`.
