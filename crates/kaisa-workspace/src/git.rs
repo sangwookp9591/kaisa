@@ -104,9 +104,13 @@ impl EmptyHooksDirectory {
                 std::process::id(),
                 NEXT_HOOKS_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
-            let text = path.to_str().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "hooks path is not UTF-8")
-            })?;
+            // The hooks setting is passed to Git as text, so a non-UTF-8 location is refused.
+            if path.to_str().is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "hooks path is not UTF-8",
+                ));
+            }
             let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             let builder = {
@@ -128,9 +132,12 @@ impl EmptyHooksDirectory {
                         let _ = std::fs::remove_dir(&path);
                         return Err(error);
                     }
+                    // The setting names the very directory created above, in the platform's
+                    // spelling (`\` on Windows), so Git and the owner agree on one path.
+                    let setting = format!("core.hooksPath={}", git_cli_path(&hooks_path));
                     return Ok(Self {
                         path: hooks_path,
-                        setting: format!("core.hooksPath={text}/hooks"),
+                        setting,
                         empty_file,
                         git_dir: None,
                     });

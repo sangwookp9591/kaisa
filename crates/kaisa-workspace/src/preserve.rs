@@ -234,11 +234,14 @@ fn expand_files(
         let children = std::fs::read_dir(&absolute).map_err(GitError::Spawn)?;
         for child in children {
             let child = child.map_err(GitError::Spawn)?;
-            let relative = child.path();
-            let relative = relative
-                .strip_prefix(worktree.path())
-                .expect("a child stays relative");
-            expand_files(worktree, &relative.to_string_lossy(), files)?;
+            // Repository paths always use `/`, as Git spells them; joining OS paths would give
+            // `private\key.pem` on Windows, which no flagged-path or ls-tree comparison matches.
+            let relative = format!(
+                "{}/{}",
+                path.trim_end_matches('/'),
+                child.file_name().to_string_lossy()
+            );
+            expand_files(worktree, &relative, files)?;
         }
     } else {
         files.push(path.to_owned());
