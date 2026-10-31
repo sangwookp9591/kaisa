@@ -947,11 +947,20 @@ const DEVELOPER_ATTEMPT: usize = 0;
 const FIRST_REVIEW_ATTEMPT: usize = 1;
 const REVISION_ATTEMPT: usize = 2;
 const LARGE_REVIEW_CONTENT_BYTES: usize = 32 * 1024;
+/// Write the developer content once.
+const ONCE: usize = 1;
 const CHECK_OUTPUT_SECRET: &str = "AKIAABCDEFGHIJKLMNOP";
 const CHECK_OUTPUT_FILE: &str = "check-output.txt";
 
 /// A verified change with controlled source bytes and check output, using only fake agents.
-fn a_review_with_output(bench: &Workbench, content: &str, output: &str) -> VerifiedOutcome {
+/// A verified run whose developer writes `content` repeated `repeat` times (repeated by the fake
+/// agent, so a large file needs no long command line) and whose check prints `output`.
+fn a_review_with_output(
+    bench: &Workbench,
+    content: &str,
+    repeat: usize,
+    output: &str,
+) -> VerifiedOutcome {
     let repository = bench.repository();
     std::fs::write(repository.join(CHECK_OUTPUT_FILE), output).expect("check output fixture");
     git(&repository, &["add", CHECK_OUTPUT_FILE]);
@@ -983,7 +992,14 @@ fn a_review_with_output(bench: &Workbench, content: &str, output: &str) -> Verif
     let developer = |config: &Path| {
         scripted(
             config,
-            &["--fake-write", FIRST_STEP, "--fake-content", content],
+            &[
+                "--fake-write",
+                FIRST_STEP,
+                "--fake-content",
+                content,
+                "--fake-content-repeat",
+                &repeat.to_string(),
+            ],
         )
     };
     let reviewer = |config: &Path| scripted(config, &["--fake-review-require", FIRST_STEP]);
@@ -1012,7 +1028,7 @@ fn a_reviewers_recorded_pack_contains_the_candidate_diff_and_exact_check_results
     let bench = Workbench::new("review-pack-evidence");
     let content = "Session notes for review.\n";
     let output = "project checks passed\n";
-    let outcome = a_review_with_output(&bench, content, output);
+    let outcome = a_review_with_output(&bench, content, ONCE, output);
     let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
     assert!(
         fields
@@ -1040,8 +1056,7 @@ fn a_reviewers_recorded_pack_contains_the_candidate_diff_and_exact_check_results
 #[test]
 fn a_large_candidate_diff_is_cut_with_a_recorded_pack_notice_and_recovery_command() {
     let bench = Workbench::new("review-pack-large");
-    let content = "x".repeat(LARGE_REVIEW_CONTENT_BYTES);
-    let outcome = a_review_with_output(&bench, &content, "passed\n");
+    let outcome = a_review_with_output(&bench, "x", LARGE_REVIEW_CONTENT_BYTES, "passed\n");
     let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
     assert!(
         fields
@@ -1053,7 +1068,7 @@ fn a_large_candidate_diff_is_cut_with_a_recorded_pack_notice_and_recovery_comman
         fields.iter().any(|(kind, text)| kind == "diff"
             && text.contains("Diff truncated")
             && text.contains("git diff")
-            && text.len() < content.len()),
+            && text.len() < LARGE_REVIEW_CONTENT_BYTES),
         "the bounded patch must explain how to read the complete diff in the worktree"
     );
 }
@@ -1061,7 +1076,7 @@ fn a_large_candidate_diff_is_cut_with_a_recorded_pack_notice_and_recovery_comman
 #[test]
 fn a_secret_in_check_output_is_replaced_with_an_omission_note_in_the_review_pack() {
     let bench = Workbench::new("review-pack-secret");
-    let outcome = a_review_with_output(&bench, "notes\n", CHECK_OUTPUT_SECRET);
+    let outcome = a_review_with_output(&bench, "notes\n", ONCE, CHECK_OUTPUT_SECRET);
     let fields = recorded_pack_fields(&bench, &outcome, FIRST_REVIEW_ATTEMPT);
     assert!(
         fields

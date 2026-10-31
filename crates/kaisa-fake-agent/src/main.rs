@@ -277,15 +277,25 @@ fn run() -> Result<(), String> {
         .read_line(&mut first_line)
         .map_err(|error| error.to_string())?;
     let first: Value = serde_json::from_str(&first_line).map_err(|error| error.to_string())?;
-    let pack: String = flag(&args, "--fake-content").unwrap_or_else(|| {
-        first
-            .pointer("/message/content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .take(PACK_ECHO_CHARS)
-            .collect()
-    });
+    // `--fake-content-repeat <n>` repeats `--fake-content`, so a test can ask for a large file
+    // without a command line longer than Windows allows.
+    let repeat: usize = match flag(&args, "--fake-content-repeat") {
+        Some(count) => count
+            .parse()
+            .map_err(|_| format!("--fake-content-repeat is not a count: {count}"))?,
+        None => 1,
+    };
+    let pack: String = flag(&args, "--fake-content")
+        .map(|content| content.repeat(repeat))
+        .unwrap_or_else(|| {
+            first
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(PACK_ECHO_CHARS)
+                .collect()
+        });
 
     let mut bridge = Command::new(command)
         .args(&bridge_args)
