@@ -128,18 +128,84 @@ fn start_of(pid: u32) -> io::Result<Option<u64>> {
 #[cfg(target_os = "macos")]
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
+/// Windows creation time identifies a process even if its pid has since been reused.
+#[cfg(windows)]
+fn start_of(pid: u32) -> io::Result<Option<u64>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
+    };
+
+    #[allow(unsafe_code)]
+    // SAFETY: opening a non-inheritable query handle by pid has no memory preconditions.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        // Access denied is not proof of death. Only an invalid pid is treated as absent.
+        return if error.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: OpenProcess returned a valid handle owned only here, closed by OwnedHandle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    #[allow(unsafe_code)]
+    // SAFETY: this live process handle has SYNCHRONIZE access; zero only polls its state.
+    match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => return Ok(None),
+        WAIT_TIMEOUT => {}
+        _ => return Err(io::Error::last_os_error()),
+    }
+    let empty = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (empty, empty, empty, empty);
+    #[allow(unsafe_code)]
+    // SAFETY: the query handle is live and all four output pointers are distinct FILETIMEs.
+    let read = unsafe {
+        GetProcessTimes(
+            handle.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(
+        (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+    ))
+}
+
 /// Not implemented on this OS yet: every process looks gone, so recovery treats it as lost
-/// track and asks the user rather than guessing (T16.6b, Windows with the keeper).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// track and asks the user rather than guessing (T16.6b).
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn start_of(_pid: u32) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod tests {
     use super::ProcessIdentity;
 
     /// Long enough that the agent is still running when the test ends it.
+    #[cfg(unix)]
     const AGENT_LIFETIME_SECONDS: &str = "30";
     /// A pid far above any the test runner will hand out.
     const UNUSED_PID: u32 = 999_999;
@@ -191,6 +257,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ending_a_recorded_agent_ends_it_and_nothing_else() {
         let mut agent = crate::OwnedProcess::spawn(&crate::ProcessSpec {

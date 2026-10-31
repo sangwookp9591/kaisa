@@ -1,9 +1,9 @@
 //! Attempt ownership and failed-start recovery through the user's CLI.
 
 use std::path::PathBuf;
+use std::process::Command;
 #[cfg(unix)]
-use std::process::{Child, Stdio};
-use std::process::{Command, Output};
+use std::process::{Child, Output, Stdio};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -261,8 +261,8 @@ fn a_second_goal_skips_the_live_owner_and_the_first_preserves_its_written_file()
         "second goal completes independently: {second:?}"
     );
     assert!(
-        !String::from_utf8_lossy(&second.stdout).contains(&attempt),
-        "a live attempt must not be reported as abandoned"
+        String::from_utf8_lossy(&second.stdout).contains("in use by another running Kaisa"),
+        "a skipped live attempt must explain why it was left untouched"
     );
     assert_eq!(
         finished.status.code(),
@@ -380,12 +380,15 @@ fn a_dead_owners_attempt_is_preserved_by_only_one_of_two_recoverers() {
     });
     let abandoned_attempts = [attempt.as_str()];
     assert_eq!(
-        recovered.len(),
+        recovered
+            .iter()
+            .filter(|item| matches!(item, kaisa_daemon::Recovered::Preserved { .. }))
+            .count(),
         abandoned_attempts.len(),
         "only one reclaimer may preserve and remove the dead owner's worktree: {recovered:?}"
     );
     assert!(
-        recovered.iter().all(|item| matches!(
+        recovered.iter().any(|item| matches!(
             item,
             kaisa_daemon::Recovered::Preserved {
                 commit: Some(_),
@@ -443,6 +446,11 @@ fn assert_missing_agent_is_reclaimed(observed: bool) {
         .arg("Try starting a missing agent.")
         .output()
         .expect("kaisa runs");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr)
+            .contains(&bench.root.join("nonexistent-agent").display().to_string()),
+        "a launch failure must name the program the user needs to fix: {failed:?}"
+    );
     let view = bench.watch();
     let leftovers = bench.worktrees();
     let next = bench
@@ -477,4 +485,170 @@ fn a_nonexistent_observed_agent_is_failed_to_start_and_reclaimed_before_the_next
 #[test]
 fn a_nonexistent_unconfined_agent_is_failed_to_start_and_reclaimed_before_the_next_goal() {
     assert_missing_agent_is_reclaimed(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_legacy_worktree_removed_by_the_user_is_reclaimed_once_and_its_branch_is_untouched() {
+    let bench = Workbench::new("legacy-removed");
+    let mut first = RunningGoal::after_writing(&bench);
+    let attempt = first
+        .worktree
+        .file_name()
+        .expect("attempt name")
+        .to_string_lossy()
+        .into_owned();
+    let mut owner = first.child.take().expect("live owner");
+    owner.kill().expect("owner interrupted");
+    owner.wait().expect("owner reaped");
+    first.identity.end_tree().expect("agent ended by the user");
+    std::fs::remove_file(
+        bench
+            .root
+            .join("state/attempts")
+            .join(&attempt)
+            .join("owner.lock"),
+    )
+    .expect("legacy lock absent");
+    let recovered =
+        kaisa_daemon::recover_abandoned(&bench.root.join("repo"), &bench.root.join("state"))
+            .expect("guidance returned");
+    assert!(
+        matches!(recovered.as_slice(), [kaisa_daemon::Recovered::Kept { .. }]),
+        "legacy work must be kept until the user completes cleanup: {recovered:?}"
+    );
+    for args in [
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Kaisa Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "save abandoned work",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&first.worktree)
+                .status()
+                .expect("user git runs")
+                .success(),
+            "the user follows the preservation advice"
+        );
+    }
+    let branch = format!("kaisa/{attempt}");
+    let commit_before = Command::new("git")
+        .args(["rev-parse", &branch])
+        .current_dir(bench.root.join("repo"))
+        .output()
+        .expect("branch read")
+        .stdout;
+    assert!(
+        Command::new("git")
+            .args(["worktree", "remove"])
+            .arg(&first.worktree)
+            .current_dir(bench.root.join("repo"))
+            .status()
+            .expect("user removes worktree")
+            .success(),
+        "clean committed worktree is removable by the advised command"
+    );
+    let recovered =
+        kaisa_daemon::recover_abandoned(&bench.root.join("repo"), &bench.root.join("state"))
+            .expect("manual removal recognised");
+    assert!(
+        recovered
+            .iter()
+            .any(|item| item.summary().contains("removed by the user")),
+        "completed manual cleanup must close the held attempt: {recovered:?}"
+    );
+    let again =
+        kaisa_daemon::recover_abandoned(&bench.root.join("repo"), &bench.root.join("state"))
+            .expect("next recovery succeeds");
+    assert!(
+        again.is_empty(),
+        "manual cleanup advice must be terminal: {again:?}"
+    );
+    assert!(
+        !bench.watch().contains(" held"),
+        "the user must not see a permanently held attempt"
+    );
+    let commit_after = Command::new("git")
+        .args(["rev-parse", &branch])
+        .current_dir(bench.root.join("repo"))
+        .output()
+        .expect("branch read")
+        .stdout;
+    assert_eq!(
+        commit_after, commit_before,
+        "recognising user cleanup must not modify the preserved branch"
+    );
+    assert_first_file_is_preserved(&bench, &attempt);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dead_owners_lock_held_by_its_agent_is_recovered_instead_of_silently_skipped() {
+    let bench = Workbench::new("hostile-holder");
+    let mut first = RunningGoal::after_writing(&bench);
+    let attempt = first
+        .worktree
+        .file_name()
+        .expect("attempt name")
+        .to_string_lossy()
+        .into_owned();
+    let directory = bench.root.join("state/attempts").join(&attempt);
+    let mut owner = first.child.take().expect("live owner");
+    owner.kill().expect("owner interrupted");
+    owner.wait().expect("owner lock released");
+    first
+        .identity
+        .end_tree()
+        .expect("replace the agent with a hostile lock holder");
+    let ready = bench.root.join("hostile-holding");
+    let mut hostile = kaisa_sys::OwnedProcess::spawn(&kaisa_sys::ProcessSpec {
+        program: bench.fake_agent(),
+        args: vec![
+            "--fake-hold-lock".to_owned(),
+            directory.join("owner.lock").display().to_string(),
+            "--lock-ready".to_owned(),
+            ready.display().to_string(),
+        ],
+        working_directory: first.worktree.clone(),
+        env: Vec::new(),
+    })
+    .expect("hostile fake agent starts as an owned group");
+    first.identity = kaisa_sys::ProcessIdentity::of(hostile.id())
+        .expect("holder inspected")
+        .expect("holder lives");
+    std::fs::write(directory.join("agent.identity"), first.identity.to_line())
+        .expect("record the hostile agent's identity");
+    let deadline = Instant::now() + PROCESS_PATIENCE;
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the fake agent must acquire the released owner lock"
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    let recovered =
+        kaisa_daemon::recover_abandoned(&bench.root.join("repo"), &bench.root.join("state"))
+            .expect("dead owner recovered");
+    assert!(
+        recovered
+            .iter()
+            .any(|item| item.summary().contains("owner was dead")
+                && item.summary().contains("was ended")),
+        "a dead owner's hostile holder must be ended and explained: {recovered:?}"
+    );
+    assert!(
+        bench.worktrees().is_empty(),
+        "a read-only advisory lock must not keep an orphan's worktree held forever"
+    );
+    assert_first_file_is_preserved(&bench, &attempt);
+    hostile.wait().expect("ended holder reaped");
 }

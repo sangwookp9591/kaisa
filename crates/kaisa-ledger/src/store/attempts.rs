@@ -6,7 +6,7 @@ use kaisa_domain::{AttemptId, Cleanup, ContentDigest, EventKind, Execution, Sequ
 use rusqlite::{OptionalExtension, params};
 
 use super::error::StoreError;
-use super::event_store::EventStore;
+use super::event_store::{EventStore, read_from_connection};
 
 /// Payload key of the task an admitted attempt belongs to.
 const TASK_KEY: &str = "task";
@@ -40,8 +40,8 @@ impl EventStore {
     /// Returns [`StoreError::CorruptPayload`] if an attempt event cannot be read, or another
     /// [`StoreError`] if reading or writing fails.
     pub fn rebuild_attempts(&mut self) -> Result<(), StoreError> {
-        let events = self.read_from(Sequence::FIRST)?;
         let transaction = self.connection.transaction()?;
+        let events = read_from_connection(&transaction, Sequence::FIRST)?;
         transaction.execute("DELETE FROM attempts", [])?;
         for chained in events {
             let recorded = chained.recorded;

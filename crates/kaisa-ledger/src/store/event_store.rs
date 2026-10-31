@@ -1,9 +1,10 @@
 //! The ledger's single writer.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use kaisa_domain::{Event, RecordedEvent, Sequence};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params};
 
 use super::error::StoreError;
 use super::rows::{StoredRow, decode_row, last_link, stored_sequence};
@@ -41,8 +42,13 @@ const SCHEMA: &str = "
     );
 ";
 
-/// The ledger's event log. Holding an `EventStore` means holding the only write connection;
-/// every mutating method takes `&mut self`.
+/// How long a CLI owner waits for another short ledger write or initial schema setup.
+const WRITE_PATIENCE: Duration = Duration::from_secs(30);
+/// WAL mode negotiation can return BUSY without invoking SQLite's busy handler.
+const CONFIGURE_RETRY: Duration = Duration::from_millis(10);
+
+/// The ledger's event log. Mutating methods serialize their transactions with other
+/// connections before reading anything they will use in a write.
 #[derive(Debug)]
 pub struct EventStore {
     pub(super) connection: Connection,
@@ -57,10 +63,25 @@ impl EventStore {
     ///
     /// Returns [`StoreError::Sqlite`] if the file cannot be opened or configured.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let connection: Connection = Connection::open(path)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        connection.execute_batch(SCHEMA)?;
+        let mut connection: Connection = Connection::open(path)?;
+        // Install this before any pragma or DDL: concurrent first opens also contend.
+        connection.busy_timeout(WRITE_PATIENCE)?;
+        let deadline = Instant::now() + WRITE_PATIENCE;
+        loop {
+            match configure(&connection) {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if matches!(
+                        error.code,
+                        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                    ) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(CONFIGURE_RETRY);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        connection.set_transaction_behavior(TransactionBehavior::Immediate);
         Ok(Self { connection })
     }
 
@@ -116,7 +137,9 @@ impl EventStore {
     /// Returns [`StoreError::Sqlite`] if the transaction fails, or [`StoreError::Corrupt`] if
     /// the last stored row cannot be decoded.
     pub fn append(&mut self, event: Event) -> Result<ChainedEvent, StoreError> {
-        let transaction: Transaction<'_> = self.connection.transaction()?;
+        let transaction: Transaction<'_> = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let chained: ChainedEvent = append_in(&transaction, event)?;
         transaction.commit()?;
         Ok(chained)
@@ -129,21 +152,7 @@ impl EventStore {
     /// Returns [`StoreError::Sqlite`] if the query fails, or [`StoreError::Corrupt`] if a row
     /// cannot be decoded.
     pub fn read_from(&self, from: Sequence) -> Result<Vec<ChainedEvent>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT sequence, kind, subject, payload_version, payload, hash
-             FROM events WHERE sequence >= ?1 ORDER BY sequence",
-        )?;
-        let rows = statement.query_map(params![stored_sequence(from)], |row| {
-            Ok(StoredRow {
-                sequence: row.get(0)?,
-                kind: row.get(1)?,
-                subject: row.get(2)?,
-                payload_version: row.get(3)?,
-                payload: row.get(4)?,
-                hash: row.get(5)?,
-            })
-        })?;
-        rows.map(|row| decode_row(row?)).collect()
+        read_from_connection(&self.connection, from)
     }
 
     /// Re-reads the whole log and checks that it forms an unbroken hash chain from genesis.
@@ -189,6 +198,34 @@ impl EventStore {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         Ok(mode.to_lowercase())
     }
+}
+
+fn configure(connection: &Connection) -> rusqlite::Result<()> {
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    connection.execute_batch(SCHEMA)
+}
+
+/// Reads within the caller's transaction so a projection cannot publish a stale snapshot.
+pub(super) fn read_from_connection(
+    connection: &Connection,
+    from: Sequence,
+) -> Result<Vec<ChainedEvent>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, kind, subject, payload_version, payload, hash
+             FROM events WHERE sequence >= ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![stored_sequence(from)], |row| {
+        Ok(StoredRow {
+            sequence: row.get(0)?,
+            kind: row.get(1)?,
+            subject: row.get(2)?,
+            payload_version: row.get(3)?,
+            payload: row.get(4)?,
+            hash: row.get(5)?,
+        })
+    })?;
+    rows.map(|row| decode_row(row?)).collect()
 }
 
 /// Appends `event` inside an open transaction, so callers can commit it together with other
