@@ -51,7 +51,8 @@ impl Evidence {
 }
 
 /// Runs every test command in `checks` on a clean checkout of `candidate`, noting which check
-/// definitions it changed since `base`.
+/// definitions it changed since `base`. Each check gets a private temporary directory beneath
+/// `attempt_directory`; only it and the disposable checkout are writable.
 ///
 /// # Errors
 ///
@@ -60,6 +61,7 @@ impl Evidence {
 pub fn run_trusted_checks(
     repository: &Path,
     state_directory: &Path,
+    attempt_directory: &Path,
     base: &str,
     candidate: &Candidate,
     checks: &[DetectedCommand],
@@ -81,13 +83,19 @@ pub fn run_trusted_checks(
             || checkout.path().to_owned(),
             |relative| checkout.path().join(relative.as_str()),
         );
+        let temporary = CheckTemporary::create(attempt_directory)
+            .map_err(at("preparing the check temporary directory"))?;
         let spec = ProcessSpec {
             program: PathBuf::from(program),
             args: args.to_vec(),
             working_directory: directory,
-            env: Vec::new(),
+            env: ["TMPDIR", "TEMP", "TMP"]
+                .into_iter()
+                .map(|key| (key.to_owned(), temporary.0.to_string_lossy().into_owned()))
+                .collect(),
         };
-        let sandbox = check_sandbox(checkout.path()).map_err(at("building the check sandbox"))?;
+        let sandbox = check_sandbox(checkout.path(), &temporary.0)
+            .map_err(at("building the check sandbox"))?;
         let run: CapturedRun = run_captured(
             &spec,
             &sandbox.confinement(),
@@ -108,7 +116,24 @@ pub fn run_trusted_checks(
     Ok(evidence)
 }
 
-/// The sandbox a check runs in: it may change only its own checkout and has no network.
+/// A private directory per check, reclaimed even when starting the check fails.
+struct CheckTemporary(PathBuf);
+
+impl CheckTemporary {
+    fn create(attempt_directory: &Path) -> std::io::Result<Self> {
+        let path = attempt_directory.join(format!("check-tmp_{}", fresh_suffix()));
+        kaisa_sys::ensure_private_directory(&path)?;
+        Ok(Self(path.canonicalize()?))
+    }
+}
+
+impl Drop for CheckTemporary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The sandbox a check runs in: writes only its disposable checkout and private temp, no network.
 enum CheckSandbox {
     // macOS always confines checks; Linux falls back here on kernels without Landlock.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -135,8 +160,8 @@ impl CheckSandbox {
     }
 }
 
-fn check_sandbox(checkout: &Path) -> std::io::Result<CheckSandbox> {
-    let writable: Vec<PathBuf> = vec![checkout.canonicalize()?];
+fn check_sandbox(checkout: &Path, temporary: &Path) -> std::io::Result<CheckSandbox> {
+    let writable: Vec<PathBuf> = vec![checkout.canonicalize()?, temporary.canonicalize()?];
     #[cfg(target_os = "macos")]
     {
         Ok(CheckSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {

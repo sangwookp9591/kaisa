@@ -25,6 +25,8 @@ pub fn claude_brokered_argv(launch: &ClaudeLaunch<'_>) -> Vec<String> {
         "-p",
         "--tools",
         "",
+        "--allowedTools",
+        "mcp__kaisa__*",
         "--strict-mcp-config",
         "--mcp-config",
         &launch.mcp_config.to_string_lossy(),
@@ -48,6 +50,25 @@ pub fn claude_brokered_argv(launch: &ClaudeLaunch<'_>) -> Vec<String> {
 #[must_use]
 pub fn first_message(pack: &ContextPack) -> String {
     json!({"type": "user", "message": {"role": "user", "content": pack.render()}}).to_string()
+}
+
+/// Tool names Claude reported as denied in result events, in first-seen order.
+/// A zero process exit does not imply that its requested tools were permitted.
+#[must_use]
+pub fn claude_permission_denials(transcript: &str) -> Vec<String> {
+    let mut tools = Vec::new();
+    for result in events(transcript).filter(|event| event_type(event) == Some("result")) {
+        if let Some(denials) = result.get("permission_denials").and_then(Value::as_array) {
+            for denial in denials {
+                if let Some(name) = denial.get("tool_name").and_then(Value::as_str)
+                    && !tools.iter().any(|tool| tool == name)
+                {
+                    tools.push(name.to_owned());
+                }
+            }
+        }
+    }
+    tools
 }
 
 /// What Claude Code finally answered in a stream-json `transcript`: the `result` text of its
@@ -117,6 +138,23 @@ mod tests {
             ),
             (Some(""), true),
             "a brokered agent has no tools but Kaisa's, and no MCP servers but the bridge"
+        );
+    }
+
+    #[test]
+    fn a_brokered_launch_preapproves_only_kaisas_mcp_tools() {
+        let argv = claude_brokered_argv(&a_sonnet_launch());
+        let allowed = argv.windows(2).find(|pair| pair[0] == "--allowedTools");
+        assert_eq!(
+            allowed.map(|pair| pair[1].as_str()),
+            Some("mcp__kaisa__*"),
+            "headless Claude must be allowed to call the attempt's bridge"
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            "preapproving the bridge must not bypass other permission checks"
         );
     }
 

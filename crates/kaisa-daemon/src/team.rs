@@ -315,6 +315,13 @@ fn run_verified_goal_inner(
         let evidence: Vec<Evidence> = run_trusted_checks(
             request.repository,
             request.state_directory,
+            &request.state_directory.join("attempts").join(
+                attempts
+                    .last()
+                    .expect("the developer attempt was recorded")
+                    .attempt
+                    .as_str(),
+            ),
             &original_base.commit,
             &candidate,
             request.checks,
