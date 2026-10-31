@@ -174,9 +174,27 @@ pub fn inventory(worktree: &Worktree, policy: &IgnoredPolicy) -> Result<Inventor
             "-z",
             "--untracked-files=all",
             "--ignored=matching",
+            "--ignore-submodules=all",
         ],
     )?;
-    let entries = parse_status(&output).map_err(WorktreeError::Status)?;
+    let mut entries = parse_status(&output).map_err(WorktreeError::Status)?;
+    // Ignoring submodules must not make their unscannable contents disposable.
+    // Read only the parent index, never the nested repository's config or status.
+    let index = run_git_for_preservation(worktree.path(), &hooks, &["ls-files", "--stage", "-z"])?;
+    for record in index
+        .split(|byte| *byte == 0)
+        .filter(|record| record.starts_with(b"160000 "))
+    {
+        if let Some(separator) = record.iter().position(|byte| *byte == b'\t') {
+            let path = String::from_utf8_lossy(&record[separator + 1..]).into_owned();
+            if !entries.iter().any(|entry| entry.path == path) {
+                entries.push(crate::status::StatusEntry {
+                    path,
+                    kind: crate::status::EntryKind::Tracked,
+                });
+            }
+        }
+    }
     Ok(plan_inventory(&entries, policy))
 }
 

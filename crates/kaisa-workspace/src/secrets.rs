@@ -20,6 +20,14 @@ pub enum SecretKind {
     GitHubToken,
     /// An Anthropic API key.
     AnthropicKey,
+    /// A Slack token.
+    SlackToken,
+    /// A Google API key.
+    GoogleKey,
+    /// An OpenAI API key.
+    OpenAiKey,
+    /// A JSON Web Token.
+    Jwt,
     /// The file could not be scanned (too large or unreadable), so it is treated as if it held
     /// a secret rather than committed unseen.
     Unscannable,
@@ -58,9 +66,11 @@ pub(crate) fn denied_filename(path: &str) -> bool {
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
-    [".p12", ".pfx", ".jks", ".keystore"]
+    [".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".kdbx"]
         .iter()
         .any(|extension| name.ends_with(extension))
+        || [".env", ".npmrc", ".netrc"].contains(&name.as_str())
+        || name.starts_with(".env.")
         || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
             .iter()
             .any(|key| {
@@ -81,7 +91,7 @@ fn has_aws_secret_assignment(text: &str) -> bool {
                 .bytes()
                 .take_while(|b| b.is_ascii_alphanumeric() || *b == b'/' || *b == b'+')
                 .count()
-                == 40
+                > 0
     })
 }
 
@@ -122,6 +132,26 @@ pub fn scan(text: &str) -> Vec<SecretKind> {
     }
     if has_prefixed_token(text, "sk-ant-", MIN_TOKEN_BODY) {
         found.push(SecretKind::AnthropicKey);
+    }
+    if has_prefixed_token(text, "xox", MIN_TOKEN_BODY) {
+        found.push(SecretKind::SlackToken);
+    }
+    if has_prefixed_token(text, "AIza", MIN_TOKEN_BODY) {
+        found.push(SecretKind::GoogleKey);
+    }
+    if has_prefixed_token(text, "sk-", MIN_TOKEN_BODY) {
+        found.push(SecretKind::OpenAiKey);
+    }
+    if text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.')
+        .any(|token| {
+            let parts: Vec<_> = token.split('.').collect();
+            parts.len() == 3
+                && parts[0].starts_with("eyJ")
+                && parts.iter().all(|part| !part.is_empty())
+        })
+    {
+        found.push(SecretKind::Jwt);
     }
     found
 }
@@ -178,8 +208,48 @@ mod tests {
 
         assert_eq!(
             scan(&config),
-            vec![SecretKind::AnthropicKey],
+            vec![SecretKind::AnthropicKey, SecretKind::OpenAiKey],
             "an agent that wrote a key into .env must not get it committed"
         );
+    }
+    #[test]
+    fn common_credential_filenames_and_token_shapes_are_flagged() {
+        let filenames = [
+            ".env",
+            ".env.local",
+            "config/.npmrc",
+            ".netrc",
+            "state.tfstate",
+            "vault.kdbx",
+        ];
+        for path in filenames {
+            assert!(
+                super::denied_filename(path),
+                "credential filename {path} must require manual preservation"
+            );
+        }
+        let tokens = [
+            (format!("xoxb-{}", "a".repeat(24)), SecretKind::SlackToken),
+            (format!("AIza{}", "a".repeat(35)), SecretKind::GoogleKey),
+            (format!("sk-proj-{}", "a".repeat(24)), SecretKind::OpenAiKey),
+            (
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature".to_owned(),
+                SecretKind::Jwt,
+            ),
+            (
+                "AWS_SECRET_ACCESS_KEY=shortButSensitive".to_owned(),
+                SecretKind::AwsSecretKey,
+            ),
+            (
+                format!("AWS_SECRET_ACCESS_KEY={}", "a".repeat(60)),
+                SecretKind::AwsSecretKey,
+            ),
+        ];
+        for (text, kind) in tokens {
+            assert!(
+                scan(&text).contains(&kind),
+                "credential shape {kind:?} must not enter history"
+            );
+        }
     }
 }

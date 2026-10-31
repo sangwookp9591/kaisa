@@ -1,12 +1,13 @@
 //! Running the `git` CLI (architecture §5.5: mutations always go through `git` itself).
 //!
-//! Confined agents can write the worktree, including its `.git` pointer and attributes,
-//! but cannot write repository metadata outside that tree. Repository, worktree, global
-//! and system configuration there is user-trusted; configured filters (including LFS)
-//! may execute. Attributes alone cannot define executable filter commands. Observed agents
-//! already have user authority and cannot be contained by preservation. Pin Git to the
-//! recorded metadata path instead of following the agent-writable `.git` pointer; disable
-//! hooks, fsmonitor and signing because preservation does not need these executions.
+//! Confined agents cannot write root `.git`, `.gitattributes` or `.gitmodules` controls
+//! through broker writes or confined execution (F2c). Nested controls with those names
+//! remain intentionally writable; nested repository configuration is untrusted and must
+//! never be consulted by preservation. Disable submodule inspection and recursion.
+//! Repository metadata outside the tree and global/system configuration are user-trusted;
+//! configured filters (including LFS) may execute. Observed agents already have user
+//! authority. Pin Git to recorded metadata as defense in depth against pointer changes;
+//! disable hooks, fsmonitor and signing because preservation does not need them.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -191,11 +192,15 @@ fn preservation_command(directory: &Path, hooks: &EmptyHooksDirectory) -> Comman
             "commit.gpgsign=false",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "diff.ignoreSubmodules=all",
+            "-c",
+            "submodule.recurse=false",
             "--literal-pathspecs",
         ]);
     if let Some(gitdir) = &hooks.git_dir {
-        command.arg(format!("--git-dir={}", gitdir.display()));
-        command.arg(format!("--work-tree={}", directory.display()));
+        command.arg(format!("--git-dir={}", git_cli_path(gitdir)));
+        command.arg(format!("--work-tree={}", git_cli_path(directory)));
     }
     for key in [
         "GIT_DIR",
@@ -208,6 +213,37 @@ fn preservation_command(directory: &Path, hooks: &EmptyHooksDirectory) -> Comman
         command.env_remove(key);
     }
     command
+}
+
+/// Canonical paths retain extended Windows prefixes for identity comparisons;
+/// only Git CLI arguments use ordinary drive/UNC spelling.
+fn git_cli_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        ordinary_windows_git_path(&text)
+    }
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
+    }
+}
+
+#[cfg(any(windows, test))]
+fn ordinary_windows_git_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\")
+        && drive.as_bytes().get(1..3) == Some(b":\\")
+        && drive
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        return drive.to_owned();
+    }
+    path.to_owned()
 }
 
 /// Stage literal paths without growing the process argument vector. The private file
@@ -394,5 +430,21 @@ mod tests {
             expected,
             "explicit git-dir must prevent a pointer race from redirecting Git"
         );
+    }
+    #[test]
+    fn extended_windows_git_paths_use_ordinary_drive_and_unc_arguments() {
+        let spellings = [
+            (r"\\?\C:\repo\.git", r"C:\repo\.git"),
+            (r"\\?\UNC\server\share\repo", r"\\server\share\repo"),
+            (r"C:\repo\.git", r"C:\repo\.git"),
+            ("/unix/repo/.git", "/unix/repo/.git"),
+        ];
+        for (canonical, ordinary) in spellings {
+            assert_eq!(
+                super::ordinary_windows_git_path(canonical),
+                ordinary,
+                "Git arguments must use ordinary spelling while stored canonical identity remains intact"
+            );
+        }
     }
 }
