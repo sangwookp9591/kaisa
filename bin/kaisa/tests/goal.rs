@@ -352,76 +352,272 @@ fn an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind
     );
 }
 
-/// What the first session learned about the login code.
-const TOKEN_LESSON: &str =
-    "The login flow must wait for the token refresh before reading the session.";
+/// A passing trusted command's process exit.
+const SUCCESSFUL_CHECK_EXIT: i32 = 0;
+/// An approving fake review reports no findings.
+const NO_REVIEW_FINDINGS: usize = 0;
+/// The initial candidate exists before any revisions.
+const ORIGINAL_CANDIDATES: usize = 1;
+
+/// Runs the actual CLI, with a trusted file check and an independent fake reviewer.
+fn a_verified_cli_session(bench: &Workbench, review_requires: &str) -> std::process::Output {
+    let (program, flag, check) = if cfg!(windows) {
+        (
+            "cmd",
+            "/c",
+            format!(
+                "if exist {} (exit 0) else (exit 1)",
+                NOTES.replace('/', "\\")
+            ),
+        )
+    } else {
+        ("sh", "-c", format!("test -f {NOTES}"))
+    };
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &the_fake_agent().to_string_lossy(),
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            NOTES,
+            "--reviewer-arg",
+            "--fake-review-require",
+            "--reviewer-arg",
+            review_requires,
+            "--check-program",
+            program,
+            "--check-arg",
+            flag,
+            "--check-arg",
+            &check,
+            GOAL,
+        ])
+        .current_dir(bench.repository())
+        .env("KAISA_STATE_DIR", bench.state())
+        .output()
+        .expect("the CLI runs")
+}
+
+/// Reads the real process's hash-chained history, verifying it before inspecting receipts.
+fn verified_history(bench: &Workbench) -> Vec<kaisa_domain::RecordedEvent> {
+    let ledger =
+        kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("the ledger opens");
+    ledger
+        .verify()
+        .expect("verification receipts preserve the hash chain");
+    ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("readable")
+        .into_iter()
+        .map(|chained| chained.recorded)
+        .collect()
+}
 
 #[test]
 fn a_second_session_needs_no_re_explanation() {
+    use kaisa_domain::EventKind;
     let bench = Workbench::new("second-session");
-    let state: PathBuf = bench.state();
-    std::fs::create_dir_all(&state).expect("writable");
-    let mut ledger =
-        kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
-    let first_session_candidate = kaisa_workspace::Candidate {
-        commit: "1f2e3d4c5b6a79881726354453627180918a7b6c".to_owned(),
-        tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
-    };
-    let taught = kaisa_daemon::learn_from_delivery(
-        &mut ledger,
-        &kaisa_daemon::Delivery::Deliver { reduced: false },
-        &first_session_candidate,
-        TOKEN_LESSON,
-        &["src".to_owned()],
-    )
-    .expect("recorded")
-    .expect("a delivered lesson is trusted");
-    drop(ledger);
-    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
-    let launch = |mcp_config: &Path| ProcessSpec {
-        program: the_fake_agent(),
-        args: vec![
-            "--mcp-config".to_owned(),
-            mcp_config.to_string_lossy().into_owned(),
-            "--fake-write".to_owned(),
-            NOTES.to_owned(),
-        ],
-        working_directory: std::env::temp_dir(),
-        env: Vec::new(),
-    };
-
-    let outcome: GoalOutcome = run_goal(&GoalRequest {
-        repository: &bench.repository(),
-        goal: "Fix the login token refresh race.",
-        base: "HEAD",
-        state_directory: &state,
-        write_set: &write_set,
-        role: kaisa_domain::Role::Developer,
-        launch: &launch,
-        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
-        confine_agent: true,
-        egress_hosts: &[],
-        agent_writable: &[],
-        local_model_port: None,
-        observed: false,
-        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
-    })
-    .expect("the goal runs");
-    let ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("reopens");
-    let pack: Vec<u8> = ledger
-        .context_pack(&kaisa_domain::ContentDigest::try_new(&outcome.context_pack).expect("digest"))
-        .expect("readable")
-        .expect("the attempt's pack is stored");
-    let given = ledger.injections_for(&outcome.attempt).expect("readable");
-
+    let first = a_verified_cli_session(&bench, NOTES);
     assert!(
-        String::from_utf8_lossy(&pack).contains(TOKEN_LESSON),
-        "the second session starts from what the first one learned"
+        first.status.success(),
+        "the first CLI run delivers: {first:?}"
+    );
+    let history = verified_history(&bench);
+    let promoted = history
+        .iter()
+        .find(|recorded| recorded.event.kind == EventKind::KnowledgePromoted)
+        .expect("the delivery path must teach a lesson without a direct learning call");
+    let taught: serde_json::Value = serde_json::from_str(&promoted.event.payload).expect("JSON");
+    let lesson = taught["text"].as_str().expect("lesson text");
+    let before_second = history.last().expect("recorded run").sequence;
+    assert!(
+        lesson.contains(GOAL) && lesson.contains(NOTES),
+        "the lesson describes the verified goal and observed changed paths: {taught}"
+    );
+
+    let second = a_verified_cli_session(&bench, NOTES);
+    assert!(
+        second.status.success(),
+        "the second CLI run delivers: {second:?}"
+    );
+    let ledger = kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("reopens");
+    let history = verified_history(&bench);
+    let packed = history
+        .iter()
+        .find(|recorded| {
+            recorded.sequence > before_second
+                && recorded.event.kind == EventKind::ContextPackRecorded
+        })
+        .expect("second session pack");
+    let payload: serde_json::Value = serde_json::from_str(&packed.event.payload).expect("JSON");
+    let digest = kaisa_domain::ContentDigest::try_new(payload["digest"].as_str().expect("digest"))
+        .expect("valid digest");
+    let pack = ledger
+        .context_pack(&digest)
+        .expect("readable")
+        .expect("stored pack");
+    let attempt = kaisa_domain::AttemptId::try_new(&packed.event.subject).expect("attempt");
+    assert!(
+        String::from_utf8_lossy(&pack).contains(&lesson.replace('\n', " ")),
+        "the second CLI process starts from the first delivery's lesson"
     );
     assert_eq!(
-        given,
-        vec![taught],
-        "the lesson given to the attempt is on its record, to be scored against its outcome"
+        ledger.injections_for(&attempt).expect("readable"),
+        vec![kaisa_domain::ContentDigest::try_new(&promoted.event.subject).expect("lesson digest")],
+        "the lesson in the second pack has an accountable knowledge.injected event"
+    );
+
+    let receipts: Vec<_> = history
+        .iter()
+        .filter(|recorded| {
+            recorded.sequence < promoted.sequence
+                && matches!(
+                    recorded.event.kind,
+                    EventKind::CandidateFrozen
+                        | EventKind::CheckEvidence
+                        | EventKind::ReviewVerdict
+                        | EventKind::GateDecided
+                )
+        })
+        .collect();
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|recorded| recorded.event.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            EventKind::CandidateFrozen,
+            EventKind::CheckEvidence,
+            EventKind::ReviewVerdict,
+            EventKind::GateDecided
+        ],
+        "freeze, check, review and delivery receipts must precede lesson promotion in execution order"
+    );
+    for recorded in &receipts {
+        let receipt: serde_json::Value =
+            serde_json::from_str(&recorded.event.payload).expect("JSON");
+        assert_eq!(
+            receipt["candidate_tree"], taught["source_tree"],
+            "every receipt and the learned lesson must refer to the same frozen content"
+        );
+        match recorded.event.kind {
+            EventKind::CandidateFrozen => {
+                let commit = receipt["commit"].as_str().expect("commit");
+                assert_eq!(
+                    git(
+                        &bench.repository(),
+                        &["rev-parse", &format!("{commit}^{{tree}}")]
+                    )
+                    .trim(),
+                    taught["source_tree"].as_str().expect("tree"),
+                    "the frozen commit really names the receipt's tree"
+                );
+            }
+            EventKind::CheckEvidence => {
+                assert!(
+                    receipt["command"]
+                        .as_array()
+                        .is_some_and(|command| !command.is_empty())
+                        && receipt["exit"]["code"] == serde_json::json!(SUCCESSFUL_CHECK_EXIT),
+                    "the evidence records the actual passing command and exit: {receipt}"
+                );
+            }
+            EventKind::ReviewVerdict => {
+                assert!(
+                    receipt["approve"] == true
+                        && receipt["blocking"] == false
+                        && receipt["finding_count"] == serde_json::json!(NO_REVIEW_FINDINGS)
+                        && receipt["reviewer_attempt"].as_str()
+                            == Some(recorded.event.subject.as_str()),
+                    "approval records who reviewed and what they found: {receipt}"
+                );
+            }
+            EventKind::GateDecided => assert!(
+                receipt["decision"] == "Deliver"
+                    && receipt["reason"]
+                        .as_str()
+                        .is_some_and(|reason| !reason.is_empty()),
+                "the durable gate explains why the candidate was delivered: {receipt}"
+            ),
+            _ => unreachable!("filtered receipt kinds"),
+        }
+    }
+}
+
+/// The documented failure exit for exhausted revisions.
+const REVISIONS_EXHAUSTED: i32 = 4;
+/// One revision after the original developer attempt.
+const ONE_REVISION: usize = 1;
+/// A path the developer never creates, so every independent review blocks.
+const MISSING_REVIEW_REQUIREMENT: &str = "src/missing.md";
+
+#[test]
+fn exhausted_revisions_record_the_loop_and_exit_four_without_teaching_a_lesson() {
+    use kaisa_domain::EventKind;
+    let bench = Workbench::new("exhausted-revisions");
+    let policy = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args(["policy", "set", "revision_limit", &ONE_REVISION.to_string()])
+        .env("KAISA_STATE_DIR", bench.state())
+        .output()
+        .expect("policy runs");
+    assert!(
+        policy.status.success(),
+        "the revision limit is set: {policy:?}"
+    );
+    let run = a_verified_cli_session(&bench, MISSING_REVIEW_REQUIREMENT);
+    assert_eq!(
+        run.status.code(),
+        Some(REVISIONS_EXHAUSTED),
+        "README and CI contracts reserve exit 3 for a human decision: {run:?}"
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(&format!("{MISSING_REVIEW_REQUIREMENT} is missing"))
+            && stdout.contains("Next: run kaisa again")
+            && stdout.contains("preserved branches"),
+        "exhaustion prints the remaining finding and actions available in M1: {stdout}"
+    );
+    let history = verified_history(&bench);
+    let revisions: Vec<_> = history
+        .iter()
+        .filter(|event| event.event.kind == EventKind::RevisionStarted)
+        .collect();
+    assert_eq!(
+        revisions.len(),
+        ONE_REVISION,
+        "only the permitted revision starts"
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|event| event.event.kind == EventKind::KnowledgePromoted),
+        "undelivered candidates never become lessons"
+    );
+    let gates: Vec<serde_json::Value> = history
+        .iter()
+        .filter(|event| event.event.kind == EventKind::GateDecided)
+        .map(|event| serde_json::from_str(&event.event.payload).expect("JSON"))
+        .collect();
+    assert_eq!(
+        gates.len(),
+        ONE_REVISION + ORIGINAL_CANDIDATES,
+        "the original and revised candidates each get a durable gate decision"
+    );
+    assert!(
+        gates.iter().all(|gate| gate["decision"] == "revision"),
+        "blocking reviews remain undelivered, including at the revision limit: {gates:?}"
+    );
+    assert!(
+        history
+            .iter()
+            .filter(|event| event.event.kind == EventKind::ReviewVerdict)
+            .all(|event| {
+                let verdict: serde_json::Value =
+                    serde_json::from_str(&event.event.payload).expect("JSON");
+                verdict["approve"] == false && verdict["blocking"] == true
+            }),
+        "blocking review verdicts are retained for both candidates"
     );
 }
 

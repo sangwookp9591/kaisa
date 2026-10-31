@@ -5,12 +5,14 @@
 use std::path::{Path, PathBuf};
 
 use kaisa_context::DetectedCommand;
-use kaisa_domain::{ReviewVerdict, Role, WriteSet};
+use kaisa_domain::{EventKind, ReviewVerdict, Role, WriteSet};
+use kaisa_ledger::EventStore;
 use kaisa_sys::ProcessExit;
 use kaisa_workspace::{Candidate, CandidateCheckout, RiskFinding, freeze_candidate};
+use serde_json::json;
 
 use crate::gate::{Delivery, decide_delivery};
-use crate::goal::{AgentLauncher, GoalError, GoalOutcome, GoalRequest, at, run_goal};
+use crate::goal::{AgentLauncher, GoalError, GoalOutcome, GoalRequest, at, record, run_goal};
 use crate::ids::fresh_suffix;
 use crate::review::verdict_in_answer;
 use crate::revision::{RevisionBudget, revision_goal};
@@ -164,22 +166,24 @@ fn candidate_settings_risks(
 ///
 /// Returns [`GoalError`] if a step cannot run; a failing agent or check is an outcome.
 pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcome, GoalError> {
+    std::fs::create_dir_all(request.state_directory)
+        .map_err(at("preparing the state directory"))?;
+    EventStore::open(&request.state_directory.join("kaisa.db"))
+        .and_then(|mut ledger| ledger.record_policy(request.policy))
+        .map_err(at("recording the run's policy"))?;
     // An agent loads these settings when it starts, so they are judged before any agent runs.
     let risks = kaisa_workspace::scan_settings(request.repository)
         .map_err(at("scanning the repository's agent settings"))?;
     if !risks.is_empty() {
+        let delivery = settings_widen_authority("the repository's", &risks);
+        record_gate(request, &delivery, None, None)?;
         return Ok(VerifiedOutcome {
-            delivery: settings_widen_authority("the repository's", &risks),
+            delivery,
             candidate: None,
             attempts: Vec::new(),
             revisions: 0,
         });
     }
-    std::fs::create_dir_all(request.state_directory)
-        .map_err(at("preparing the state directory"))?;
-    kaisa_ledger::EventStore::open(&request.state_directory.join("kaisa.db"))
-        .and_then(|mut ledger| ledger.record_policy(request.policy))
-        .map_err(at("recording the run's policy"))?;
     let original_base: Candidate =
         freeze_candidate(request.repository, "HEAD").map_err(at("resolving the base"))?;
     let mut budget = RevisionBudget::new(request.policy.policy().revision_limit);
@@ -208,21 +212,64 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
         attempts.push(developed);
         let revisions: u32 = budget.used();
-        let finish = |delivery: Delivery, candidate: Option<Candidate>, attempts| VerifiedOutcome {
-            delivery,
-            candidate,
-            attempts,
-            revisions,
-        };
+        let finish =
+            |delivery: Delivery, candidate: Option<Candidate>, attempts: Vec<GoalOutcome>| {
+                record_gate(request, &delivery, candidate.as_ref(), attempts.last())?;
+                if let Some(candidate) = &candidate
+                    && matches!(delivery, Delivery::Deliver { .. })
+                {
+                    let scope = kaisa_workspace::changed_paths(
+                        request.repository,
+                        &original_base.commit,
+                        candidate,
+                    )
+                    .map_err(at("listing learned paths"))?;
+                    // Record only observed facts from the verified run, never an agent's claim.
+                    let lesson = format!(
+                        "Verified goal: {}\nChanged paths: {}\nPassed checks: {:?}",
+                        request.goal,
+                        scope.join(", "),
+                        request
+                            .checks
+                            .iter()
+                            .filter(|check| check.purpose == kaisa_context::Purpose::Test)
+                            .map(|check| &check.argv)
+                            .collect::<Vec<_>>()
+                    );
+                    let mut ledger = EventStore::open(&request.state_directory.join("kaisa.db"))
+                        .map_err(at("opening the learning ledger"))?;
+                    crate::learn::learn_from_delivery(
+                        &mut ledger,
+                        &delivery,
+                        candidate,
+                        &lesson,
+                        &scope,
+                    )
+                    .map_err(at("learning from delivery"))?;
+                }
+                Ok(VerifiedOutcome {
+                    delivery,
+                    candidate,
+                    attempts,
+                    revisions,
+                })
+            };
         let Some(commit) = commit.filter(|_| agent_ok) else {
-            return Ok(finish(
+            return finish(
                 Delivery::Refuse("the developer agent produced no successful change".to_owned()),
                 None,
                 attempts,
-            ));
+            );
         };
         let candidate: Candidate =
             freeze_candidate(request.repository, &commit).map_err(at("freezing the candidate"))?;
+        record_verification(
+            request,
+            EventKind::CandidateFrozen,
+            &candidate.tree,
+            json!({"commit": candidate.commit, "candidate_tree": candidate.tree,
+                "developer_attempt": attempts.last().map(|attempt| attempt.attempt.as_str())}),
+        )?;
         // Brokered writes were checked one by one; this also catches an observed agent's, and
         // covers every revision since the original base.
         let outside: Vec<String> =
@@ -235,23 +282,23 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 })
                 .collect();
         if !outside.is_empty() {
-            return Ok(finish(
+            return finish(
                 Delivery::NeedsPerson(format!(
                     "the candidate changed paths outside its write set: {}",
                     outside.join(", ")
                 )),
                 Some(candidate),
                 attempts,
-            ));
+            );
         }
         // Every later agent starts from this candidate, so its settings are judged again first.
         let risks: Vec<RiskFinding> = candidate_settings_risks(request, &candidate)?;
         if !risks.is_empty() {
-            return Ok(finish(
+            return finish(
                 settings_widen_authority("the candidate's", &risks),
                 Some(candidate),
                 attempts,
-            ));
+            );
         }
         let evidence: Vec<Evidence> = run_trusted_checks(
             request.repository,
@@ -260,6 +307,21 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             &candidate,
             request.checks,
         )?;
+        for piece in &evidence {
+            let exit = match piece.exit {
+                Some(ProcessExit::Code(code)) => json!({"code": code}),
+                Some(ProcessExit::Terminated) => json!({"terminated": true}),
+                None => json!({"deadline_exceeded": true}),
+            };
+            record_verification(
+                request,
+                EventKind::CheckEvidence,
+                &candidate.tree,
+                json!({"candidate_tree": piece.candidate_tree, "command": piece.check,
+                    "exit": exit, "output_digest": piece.output_digest,
+                    "confined": piece.confined, "definitions_changed": piece.definitions_changed}),
+            )?;
+        }
         if let Some(first_pass) = request.first_pass {
             let glanced: GoalOutcome = run_goal(&GoalRequest {
                 repository: request.repository,
@@ -277,9 +339,10 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                 observed: false,
                 reduced_mode: request.reduced_mode,
             })?;
+            record_review(request, &candidate, &glanced, true)?;
             if let Some(failure) = reviewer_failure(&glanced) {
                 attempts.push(glanced);
-                return Ok(finish(failure, Some(candidate), attempts));
+                return finish(failure, Some(candidate), attempts);
             }
             let glance: Option<ReviewVerdict> =
                 verdict_from(request.state_directory, &glanced, &candidate.tree);
@@ -291,8 +354,14 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
                     decide_delivery(&candidate, &evidence, Some(&glance))
             {
                 if !budget.take() {
-                    return Ok(finish(Delivery::Revise(reasons), Some(candidate), attempts));
+                    return finish(Delivery::Revise(reasons), Some(candidate), attempts);
                 }
+                record_revision(
+                    request,
+                    &candidate,
+                    &Delivery::Revise(reasons.clone()),
+                    budget.used(),
+                )?;
                 base = candidate.commit.clone();
                 instruction = revision_goal(request.goal, &reasons);
                 continue;
@@ -314,9 +383,10 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
             observed: false,
             reduced_mode: request.reduced_mode,
         })?;
+        record_review(request, &candidate, &reviewed, false)?;
         if let Some(failure) = reviewer_failure(&reviewed) {
             attempts.push(reviewed);
-            return Ok(finish(failure, Some(candidate), attempts));
+            return finish(failure, Some(candidate), attempts);
         }
         let verdict: Option<ReviewVerdict> =
             verdict_from(request.state_directory, &reviewed, &candidate.tree);
@@ -324,12 +394,91 @@ pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcom
         let delivery: Delivery = decide_delivery(&candidate, &evidence, verdict.as_ref());
         match delivery {
             Delivery::Revise(reasons) if budget.take() => {
+                record_revision(
+                    request,
+                    &candidate,
+                    &Delivery::Revise(reasons.clone()),
+                    budget.used(),
+                )?;
                 base = candidate.commit.clone();
                 instruction = revision_goal(request.goal, &reasons);
             }
-            other => return Ok(finish(other, Some(candidate), attempts)),
+            other => return finish(other, Some(candidate), attempts),
         }
     }
+}
+
+/// Opens the writer only between attempts, never while `run_goal` owns its ledger.
+fn record_verification(
+    request: &VerifiedRequest<'_>,
+    kind: EventKind,
+    subject: &str,
+    payload: serde_json::Value,
+) -> Result<(), GoalError> {
+    let mut ledger = EventStore::open(&request.state_directory.join("kaisa.db"))
+        .map_err(at("opening the verification ledger"))?;
+    record(&mut ledger, kind, subject, payload)
+}
+
+fn record_gate(
+    request: &VerifiedRequest<'_>,
+    delivery: &Delivery,
+    candidate: Option<&Candidate>,
+    attempt: Option<&GoalOutcome>,
+) -> Result<(), GoalError> {
+    let (decision, reason) = match delivery {
+        Delivery::Deliver { .. } => (
+            "Deliver",
+            "fresh passing checks and an approving review".to_owned(),
+        ),
+        Delivery::Refuse(reason) => ("Refuse", reason.clone()),
+        Delivery::NeedsPerson(reason) => ("NeedsPerson", reason.clone()),
+        Delivery::Revise(reasons) => ("revision", format!("{reasons:?}")),
+    };
+    record_verification(
+        request,
+        EventKind::GateDecided,
+        candidate.map_or("preflight", |candidate| candidate.tree.as_str()),
+        json!({"decision": decision, "reason": reason,
+            "candidate_tree": candidate.map(|candidate| &candidate.tree),
+            "attempt": attempt.map(|attempt| attempt.attempt.as_str())}),
+    )
+}
+
+fn record_revision(
+    request: &VerifiedRequest<'_>,
+    candidate: &Candidate,
+    delivery: &Delivery,
+    revision: u32,
+) -> Result<(), GoalError> {
+    record_gate(request, delivery, Some(candidate), None)?;
+    record_verification(
+        request,
+        EventKind::RevisionStarted,
+        &candidate.tree,
+        json!({"candidate_tree": candidate.tree, "base_commit": candidate.commit,
+            "revision": revision, "revision_limit": request.policy.policy().revision_limit}),
+    )
+}
+
+fn record_review(
+    request: &VerifiedRequest<'_>,
+    candidate: &Candidate,
+    review: &GoalOutcome,
+    first_pass: bool,
+) -> Result<(), GoalError> {
+    let verdict = verdict_from(request.state_directory, review, &candidate.tree);
+    let usable = reviewer_failure(review).is_none();
+    record_verification(
+        request,
+        EventKind::ReviewVerdict,
+        review.attempt.as_str(),
+        json!({"candidate_tree": candidate.tree, "reviewer_attempt": review.attempt.as_str(),
+            "first_pass": first_pass, "valid": usable && verdict.is_some(),
+            "approve": verdict.as_ref().filter(|_| usable).map(|verdict| verdict.approves(&candidate.tree)),
+            "blocking": verdict.as_ref().map(|verdict| !verdict.blocking().is_empty()),
+            "finding_count": verdict.as_ref().map(|verdict| verdict.findings.len())}),
+    )
 }
 
 #[cfg(test)]

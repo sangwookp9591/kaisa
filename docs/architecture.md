@@ -589,6 +589,9 @@ Candidate ──► Checks ──► Review ──► Security review ──► 
                      Human Gate (with the findings, the diffs and the evidence)
 ```
 
+M1: an exhausted revision budget ends as `not delivered` (exit 4), with the remaining findings
+and next steps printed. The Human Gate handoff above belongs to the milestone that adds `kaisa review`.
+
 | Stage | Who | Output | Blocking when |
 |---|---|---|---|
 | Checks | Kaisa runs the trusted commands (step 3 below), including the impact set's tests (§5.2) | `CheckReport` per command: exit, duration, log digest | any command fails, or tampering is detected |
@@ -608,6 +611,8 @@ produce a valid verdict counts as "no review", never as approval.
 criteria and enter its context pack (§5.9). The revision budget is per Task; a finding that repeats
 with the same id and location after a revision goes straight to a human, because the loop is not
 converging. Revisions are charged to the Mission budget like any attempt.
+M1 bounds revisions by the budget and ends with exit 4; repeat-finding escalation and the human
+handoff await `kaisa review`.
 
 **Eligibility is computed once (v0.6.1, review M7).** The daemon derives each candidate's state from
 its evidence and every screen shows that state; no client recomputes it:
