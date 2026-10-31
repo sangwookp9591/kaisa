@@ -72,9 +72,11 @@ failed` (for example, 7 of the 9 tests in `--test goal`). `scripts/check.sh` alr
 
 ## Before every commit
 
-Run `scripts/check.sh` (or `scripts/check.sh --fix` to format first). It runs exactly what CI runs:
-stable and nightly rustfmt, clippy with `-D warnings`, the tests, and compile-only cross-checks for
-Windows and Linux. It stops at the first failure.
+Run `scripts/check.sh` (or `scripts/check.sh --fix` to format first). It runs the same format, lint and
+test steps as CI: stable and nightly rustfmt, clippy with `-D warnings` and the tests, plus compile-only
+cross-checks for Windows and Linux that CI does not need because it builds natively. CI also runs
+`cargo-deny` and a smoke run of the binary, which `scripts/check.sh` does not. It stops at the first
+failure. There is no benchmark or footprint step in either (architecture §15, §16).
 
 Capture its exit code and commit only on zero, for example
 `scripts/check.sh --fix > check.log 2>&1; ec=$?`. Never pipe it into another command before an

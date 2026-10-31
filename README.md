@@ -7,12 +7,16 @@ attempt its own copy of your repository and keeps the agent inside an OS sandbox
 against your tests and an independent reviewer, sends it back for revision when the review finds a
 blocking problem, and asks you only when a human decision is actually needed.
 
-> **Status: M0 and M1 run end to end with real Claude Code and Codex on macOS; some M0/M1 tasks are
-> built but not yet connected** (marked ◐ in [`docs/tasks/`](docs/tasks/)). CI runs on macOS, Linux
-> and Windows for every commit; real-agent runs have been checked on macOS only. Some protections are still *reduced* on some platforms;
-> the [protection status](#protection-status) table says exactly which. Performance and security
-> properties are published only after they have been measured and tested on every supported
-> platform. Task-level progress lives in [`docs/tasks/`](docs/tasks/).
+> **Status: M0 and M1 are partly done.** A goal runs end to end: on macOS, real Claude Code and Codex
+> CLIs have completed verified runs. Several designed parts are built and tested but not yet used by a
+> run, and some are not built; they are marked ◐ in [`docs/tasks/`](docs/tasks/) and listed under
+> [Current differences from the design](#current-differences-from-the-design). CI runs on macOS,
+> Linux and Windows for every commit. Real-agent runs have been done on macOS only, and before the
+> later fixes for state isolation, child environments, descendant cleanup and attempt locks; those
+> fixes are tested with scripted agents, and the real-agent runs have not been repeated since. Some
+> protections are *reduced* on some platforms; the [protection status](#protection-status) table says
+> exactly which. Performance and security properties are published only after they have been measured
+> and tested on every supported platform.
 
 ---
 
@@ -23,16 +27,17 @@ blocking problem, and asks you only when a human decision is actually needed.
 | You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
 | Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
 | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
-| A single agent loses track of a long task | Planned tasks, a reviewer, bounded revisions and project memory carry the context |
+| A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
 
 ## What works today
 
-Checked with logged-in Claude Code and Codex CLIs on macOS: a verified fix, a second session that
-recalls the first one's lesson, Codex developing with Claude reviewing, a goal that weakens tests
-(stops for a person), a change to what the checks run (stops for a person) and `--confine-claude`.
-A delivered result stays on its `kaisa/att_…` branch; the last line of the output says how to
-bring it in.
+Checked on macOS with logged-in Claude Code and Codex CLIs: a verified fix, a second session that
+recalls the first one's lesson, Codex developing with Claude reviewing, a change to what the checks
+run (stops for a person) and `--confine-claude`. A goal that weakens tests also stops for a person;
+that is tested with scripted agents, and the one real-agent run of it, made before the fix, delivered
+the change. A delivered result stays on its `kaisa/att_…` branch; the last line of the output says
+how to bring it in.
 
 ```bash
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
@@ -50,8 +55,17 @@ A goal ends with one of these results, which scripts and CI can rely on:
 |---|---|
 | `0` | verified: the candidate passed fresh checks and the review |
 | `3` | waiting for you: a person must decide, and Kaisa says why |
-| `4` | not delivered: no fresh passing evidence, or revisions ran out |
-| `64` | usage error |
+| `4` | not delivered: no fresh passing evidence, revisions ran out, or the agent could not be started |
+| `2` | the word is a command that is not implemented yet |
+| `64` | usage error, including an unknown option |
+
+Words the docs name as commands (`review`, `run`, `gc`, `wrap`, `handoff` and the rest of the planned
+list) never start a run. `kaisa review the parser` exits `2` and prints the quoted form,
+`kaisa "review the parser"`. An unknown option such as `--n 3` exits `64` and names the option. A goal
+that must contain `--word` can follow `--`: `kaisa -- fix the --verbose bug`. Run `kaisa` from a
+subdirectory and it uses the enclosing git repository and says so in one line:
+`using the git repository at <root>`. `kaisa watch` only reads the ledger; it creates and changes
+nothing in the state directory.
 
 ### How a verified run works
 
@@ -64,11 +78,17 @@ A goal ends with one of these results, which scripts and CI can rely on:
    A shortfall stops the run with exit `3` and names what is missing, unless a documented default
    policy covers it (the output names it, for example `claude-reduced-until-T16.0`) or you accept it for a limited time with
    `--accept-reduced <write,tcp,udp,state-read,descendants> --accept-until <unix time in ms>`.
-   Decisions written for the old four capability codes no longer cover unconfined runs; they must
-   also accept `state-read`.
+   Limits of the OS itself are admitted without a Decision but always labelled: `descendants` on macOS
+   and Linux, and also `state-read` on Linux (output: `admitted on documented platform limits
+   (platform-limit)`). A Decision has to name every other missing capability. An unconfined run misses
+   all five, so on macOS and Windows a Decision written for the old four codes
+   (`write,tcp,udp,descendants`) no longer covers it; add `state-read`.
 3. **Freeze.** The result becomes an immutable candidate (commit and tree digest).
 4. **Check.** Your project's test command runs on a clean checkout of the candidate, in the sandbox,
-   with no agent involved. A candidate that changes its own check definitions needs a person. If a check
+   with no agent involved. A candidate that changes what the checks run always needs a person: check-definition
+   files (`package.json`, `Cargo.toml`, `Makefile`, `conftest.py` and similar), CI pipeline files (`.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile` and similar),
+   and a test command that can no longer fail (`--passWithNoTests`, `--exit-zero`, `|| true`). Deleted
+   or disabled tests stop for a person too. No setting turns this off. If a check
    changes the candidate's source files, Kaisa refuses all evidence and the run is not delivered.
 5. **First pass (optional).** If you registered a T0 local model, it reviews first. Its blocking
    findings send the candidate back without spending the full review; its approval is only advisory.
@@ -81,25 +101,89 @@ A goal ends with one of these results, which scripts and CI can rely on:
    repository only.
 
 Before any agent starts, Kaisa scans the repository's agent settings and stops if they would widen
-an agent's authority; the frozen candidate's own settings are scanned again before a reviewer or a
+an agent's authority (for example `enableAllProjectMcpServers: true` or a non-empty
+`enabledMcpjsonServers` in `.claude/settings.json` or `.claude/settings.local.json`); the frozen candidate's own settings are scanned again before a reviewer or a
 revision starts in it. Every run records the policy snapshot it ran under. A run interrupted by a
 crash is found and tidied on the next `kaisa` start; an attempt in an unknown state is never retried
-without proof.
+without proof. Each attempt holds an owner lock, so a second `kaisa` process skips a live attempt
+instead of ending its agent. An attempt left by an older Kaisa has no lock; it is kept, with the
+branch, the worktree and a `git worktree remove` command printed for you to run once you have
+confirmed its agent is gone. An agent program that cannot be started ends the goal with exit `4`, and
+its attempt is reclaimed (`watch` shows `exited:failed-to-start`).
 
 ### Protection status
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Scripted and brokered agents confined | ✓ Seatbelt | ✓ Landlock | ✓ AppContainer |
-| Trusted checks confined | ✓ | ✓ | reduced (labelled) |
+| Scripted and brokered agents confined | ✓ Seatbelt; label `descendants` | ✓ Landlock; labels `state-read`, `descendants` | ✓ AppContainer |
+| Trusted checks confined | ✓; same labels as above | ✓; same labels as above | reduced (labelled) |
 | Claude Code confined | reduced until T16.0 (default policy `claude-reduced-until-T16.0`) | reduced until T16.0 (same policy) | reduced until T16.0 (same policy) |
 | Codex | observed (writes checked against the write set afterwards; default policy `observed-checked-afterwards`) | observed | observed |
-| Local model (first-pass review) | ✓ confined, loopback only | ✓ confined, loopback only | reduced (AppContainer has no loopback; default policy `windows-local-model-loopback`) |
+| Local model (first-pass review) | ✓ confined, loopback only; label `descendants` | ✓ confined, loopback only; labels `state-read`, `descendants` | reduced (AppContainer has no loopback; default policy `windows-local-model-loopback`) |
 
 *Reduced* runs are always labelled in the output, with the name of the policy or Decision that allowed
-them. Any other shortfall stops the run until you accept it with `--accept-reduced` and `--accept-until`. `kaisa --confine-claude "<goal>"` tries a confined
+them. A label `descendants` means cleanup ends an agent's attached child processes by walking the
+process tree, but a daemon that has already detached from it can survive. A label `state-read` means
+the OS cannot hide Kaisa's state directory from the process. Any other shortfall stops the run until
+you accept it with `--accept-reduced` and `--accept-until`. `kaisa --confine-claude "<goal>"` tries a confined
 Claude Code run; the steps to verify it on a machine with a logged-in CLI are in
 [`docs/research/brokered-mode-spike.md`](docs/research/brokered-mode-spike.md#closing-a-row-t35).
+
+What the sandbox hides, as built:
+
+- **macOS.** A confined process cannot read Kaisa's state directory (the ledger, other attempts'
+  tokens and logs) and cannot reach the keychain services. It may read its own worktree, scratch and
+  bridge files, and the metadata of the folders above them. One exception: a confined Claude Code agent
+  keeps login-keychain access for its own OAuth login. That is access to the keychain service, not to one
+  item; the output prints a `trial:` line and the ledger records it. Trusted checks and broker `exec`
+  keep the keychain denied.
+- **Linux.** Landlock leaves reads open, so a confined process can read Kaisa's state. The run is
+  labelled `state-read`.
+- **Windows.** AppContainer grants only the agent's own worktree, attempt directory and scratch. The
+  Windows code is compile-checked locally and tested by CI on Windows; it was not exercised by hand.
+
+**Child environment.** Agents, trusted checks and the local-model bridge start with an allow-listed
+environment, not a copy of your shell's. It carries locale, `PATH` and home locations, the usual
+toolchain locations (Cargo and Rustup, Node and its package managers, Go, Java, Python, Ruby, .NET,
+Deno), TLS certificate settings, `TZ`, and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY` and the lowercase forms). When the egress broker is in use it replaces the
+proxy variables and clears `NO_PROXY`. Each agent adapter adds only its own variables: Claude Code its
+Anthropic, Bedrock, Vertex, Foundry and AWS inputs; Codex its `OPENAI_*` and `CODEX_*` inputs. Not
+passed: `GIT_*`, `SSH_AUTH_SOCK`, `LD_*` and `DYLD_*`, `CARGO_TARGET_DIR`, `RUSTFLAGS`, and another
+provider's keys. If your test command needs a variable that is not on the list, the check sees it
+unset. A Codex setup with a custom provider names its extra variables in
+`KAISA_PASS_ENV=OPENROUTER_API_KEY,AZURE_HEADER` (comma-separated names; Codex only; Kaisa does not read
+them from Codex's configuration).
+
+**Policy.** `kaisa policy show` and `kaisa policy set <key> <value>` manage your personal
+`policy.json`. The keys `require_person_when_tests_weaken` and
+`require_person_when_check_definitions_change` accept only `true`, because that gate is always
+enforced; `set … false` exits `64`. A `policy.json` from an earlier version that has either key set to
+`false` is refused, not obeyed. `kaisa policy` prints the file, the key and the repair (edit that line to
+`true`, or delete the file) and exits `1`; a goal stops before it starts, exit `1`, naming the key.
+
+## Current differences from the design
+
+[`docs/architecture.md`](docs/architecture.md) describes the target design. This is what the code does
+today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
+
+- **No daemon, keeper or control server.** `kaisa "<goal>"` runs the engine inside the CLI process.
+  There is no `kaisa daemon`, `kaisa keeper` or control endpoint. A crashed run is cleaned up by the
+  next `kaisa` start; a still-running agent is ended, not reattached.
+- **Captured output, not a PTY.** Agents run with captured stdio. `kaisa wrap`, attach and steer do not
+  exist.
+- **Small ledger.** The SQLite ledger has four tables (`events`, `attempts`, `context_packs`,
+  `outbox`); everything else is folded from events. The outbox is built and tested but not on the run
+  path. There is no single OS-level ledger writer.
+- **Index, impact sets and route decisions** are built but a run does not use them.
+- **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
+  off" label yet.
+- **Messages are English only.** There is no `ko`/`en` message catalog yet.
+- **Missions** (`run_mission`) are not reachable from the CLI.
+- **Trusted checks** are derived from the repository's working tree when the run starts, not from the
+  base revision.
+- **Concurrent goals.** An owner lock keeps a second `kaisa` process from ending a live attempt's agent.
+  Running several goals at once on one repository is otherwise not a tested workflow.
 
 ## Planned
 
@@ -136,12 +220,13 @@ binary, `kaisa`, with no Node, Python or Electron runtime.
 
 ```bash
 cargo build                  # build everything
-scripts/check.sh             # exactly what CI runs: rustfmt (stable and nightly), clippy, tests,
-                             # and Windows/Linux cross-checks
+scripts/check.sh             # what CI runs for format, lint and tests (rustfmt stable and nightly,
+                             # clippy, tests), plus Windows/Linux cross-checks; CI adds cargo-deny
 scripts/check.sh --fix       # format first, then check
 ```
 
-CI runs the same checks on macOS, Linux and Windows, plus `cargo-deny` for licences and advisories.
+CI runs the format, lint and test steps on macOS, Linux and Windows, plus `cargo-deny` for licences and
+advisories. It runs no benchmark or footprint job.
 
 ## Principles
 
