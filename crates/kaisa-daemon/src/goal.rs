@@ -661,6 +661,7 @@ mod tests {
             }),
             missing,
             observed: false,
+            truncated: false,
         }
     }
 
