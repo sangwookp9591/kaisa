@@ -883,6 +883,11 @@ fn a_trial_run_is_labelled() {
         stdout.contains("trial (T16.0)") && stdout.contains("api.anthropic.com"),
         "the person is told this is a trial and what Claude Code may reach: {stdout:?}"
     );
+    #[cfg(target_os = "macos")]
+    assert!(
+        stdout.contains("confined Claude agent can reach the login keychain"),
+        "the macOS trial must disclose its agent-only keychain exception: {stdout:?}"
+    );
 }
 
 /// Exit status of a run that waits for a person (CI contract code 3).

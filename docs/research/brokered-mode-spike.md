@@ -70,7 +70,9 @@ On a machine with Claude Code logged in:
 
 1. Run the brokered command above; the session's tools must be exactly `["mcp__kaisa__kaisa_echo"]`.
 2. In a scratch git repository, run `kaisa --confine-claude "Add a NOTES.md that says hello"`.
-   Kaisa prints `trial (T16.0): ...` with the hosts and session paths it allows.
+   Kaisa prints `trial (T16.0): ...` with the hosts and session paths it allows. On macOS, the confined
+   Claude agent also retains login-keychain access for its OAuth credential; a run-output notice and
+   ledger field disclose this exception, while trusted checks and broker exec keep keychain access denied.
 3. The row closes if the run ends `verified` with the note on its branch. If Claude Code fails to start or
    cannot reach its provider, record the error and which path or host it needed; that is the
    allow-list finding T16.0 is waiting for.

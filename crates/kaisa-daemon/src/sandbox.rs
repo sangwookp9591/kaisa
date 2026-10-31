@@ -140,6 +140,7 @@ pub(crate) fn agent_sandbox(
     agent_writable: &[PathBuf],
     broker_socket: &Path,
     egress_port: Option<u16>,
+    needs_keychain_login: bool,
 ) -> std::io::Result<AgentSandbox> {
     let mut writable: Vec<PathBuf> = vec![scratch.canonicalize()?];
     // A path the agent may create (a session file) need not exist yet.
@@ -173,6 +174,7 @@ pub(crate) fn agent_sandbox(
         let mut policy = kaisa_sys::SeatbeltPolicy {
             readable,
             writable,
+            needs_keychain_login,
             broker_socket: Some(socket),
             broker_port: egress_port,
             ..kaisa_sys::SeatbeltPolicy::default()
@@ -182,7 +184,12 @@ pub(crate) fn agent_sandbox(
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = (state_directory, worktree, broker_socket);
+        let _ = (
+            state_directory,
+            worktree,
+            broker_socket,
+            needs_keychain_login,
+        );
         let existing: Vec<PathBuf> = writable.into_iter().filter(|path| path.exists()).collect();
         Ok(match kaisa_sys::write_ruleset(&existing, egress_port)? {
             Some(ruleset) => AgentSandbox::Landlock(ruleset),
@@ -197,6 +204,7 @@ pub(crate) fn agent_sandbox(
             writable,
             broker_socket,
             egress_port,
+            needs_keychain_login,
         );
         Ok(AgentSandbox::Unconfined)
     }
@@ -246,10 +254,39 @@ mod tests {
 
     use super::{AgentSandbox, beyond_admitted, expected_missing};
 
+    /// Commands whose logical path resolution walks the protected state ancestors.
+    #[cfg(target_os = "macos")]
+    fn commands_walking_state_ancestors(
+        directory: &std::path::Path,
+    ) -> Vec<kaisa_sys::ProcessSpec> {
+        std::fs::create_dir_all(directory.join("sub")).expect("nested checkout directory");
+        let mut commands = vec![kaisa_sys::ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "cd sub && pwd".into()],
+            working_directory: directory.to_owned(),
+            env: Vec::new(),
+        }];
+        // Node is optional on developer hosts; the shell regression always runs.
+        if let Some(node) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join("node"))
+                .find(|path| path.is_file())
+        }) {
+            commands.push(kaisa_sys::ProcessSpec {
+                program: node,
+                args: vec!["-e".into(), "require('fs').realpathSync('.')".into()],
+                working_directory: directory.to_owned(),
+                env: Vec::new(),
+            });
+        }
+        commands
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_confined_agent_reads_its_bridge_and_worktree_but_not_daemon_or_other_attempt_secrets() {
-        use kaisa_sys::{ProcessExit, ProcessSpec, run_captured};
+        const SUCCESS: kaisa_sys::ProcessExit = kaisa_sys::ProcessExit::Code(0);
+        use kaisa_sys::{ProcessSpec, run_captured};
         let root =
             std::env::temp_dir().join(format!("kaisa-agent-read-isolation-{}", std::process::id()));
         let state = root.join("state");
@@ -282,6 +319,7 @@ mod tests {
             &[],
             &attempt.join("broker.sock"),
             None,
+            false,
         )
         .expect("agent sandbox");
         let read = |path: &std::path::Path| {
@@ -305,7 +343,7 @@ mod tests {
         for secret in &denied {
             assert_ne!(
                 read(secret),
-                ProcessExit::Code(0),
+                SUCCESS,
                 "agent constructor must hide {secret:?}"
             );
         }
@@ -315,17 +353,75 @@ mod tests {
         {
             assert_eq!(
                 read(file),
-                ProcessExit::Code(0),
+                SUCCESS,
                 "the relay and agent still need {file:?}"
             );
         }
+        let claude_sandbox = super::agent_sandbox(
+            &state,
+            &worktree,
+            &scratch,
+            &[],
+            &attempt.join("broker.sock"),
+            None,
+            true,
+        )
+        .expect("Claude sandbox");
+        let super::AgentSandbox::Seatbelt(claude_policy) = &claude_sandbox else {
+            panic!("macOS uses Seatbelt");
+        };
+        assert!(
+            claude_policy.needs_keychain_login,
+            "only the adapter-declared Claude agent receives login keychain access"
+        );
+        let profile = kaisa_sys::seatbelt_profile(claude_policy);
+        assert!(
+            !profile.contains("(deny mach-lookup") && !profile.contains("Library/Keychains"),
+            "Claude login must retain keychain services and file reads"
+        );
+        let secret_read = ProcessSpec {
+            program: "/bin/cat".into(),
+            args: vec![denied[0].to_string_lossy().into_owned()],
+            working_directory: worktree.clone(),
+            env: Vec::new(),
+        };
+        let result = run_captured(
+            &secret_read,
+            &claude_sandbox.confinement(),
+            b"",
+            std::time::Duration::from_secs(10),
+            4096,
+        )
+        .expect("confined secret read");
+        assert_ne!(
+            result.exit,
+            Some(SUCCESS),
+            "Claude login access must not reopen Kaisa state"
+        );
         let alias = worktree.join("stolen-token");
         std::os::unix::fs::symlink(&denied[1], &alias).expect("hostile symlink");
         assert_ne!(
             read(&alias),
-            ProcessExit::Code(0),
+            SUCCESS,
             "a worktree symlink must not reopen state"
         );
+        for command in commands_walking_state_ancestors(&worktree) {
+            let result = kaisa_sys::run_captured(
+                &command,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("path-walking command exits");
+            assert_eq!(
+                result.exit,
+                Some(SUCCESS),
+                "ancestor metadata must permit {:?}: {}",
+                command.args,
+                String::from_utf8_lossy(&result.output)
+            );
+        }
         std::fs::remove_dir_all(root).expect("remove isolated state");
     }
 

@@ -332,6 +332,34 @@ fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Ve
 mod tests {
     use super::linux_check_writable;
 
+    /// Commands whose logical path resolution walks the protected state ancestors.
+    #[cfg(target_os = "macos")]
+    fn commands_walking_state_ancestors(
+        directory: &std::path::Path,
+    ) -> Vec<kaisa_sys::ProcessSpec> {
+        std::fs::create_dir_all(directory.join("sub")).expect("nested checkout directory");
+        let mut commands = vec![kaisa_sys::ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "cd sub && pwd".into()],
+            working_directory: directory.to_owned(),
+            env: Vec::new(),
+        }];
+        // Node is optional on developer hosts; the shell regression always runs.
+        if let Some(node) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join("node"))
+                .find(|path| path.is_file())
+        }) {
+            commands.push(kaisa_sys::ProcessSpec {
+                program: node,
+                args: vec!["-e".into(), "require('fs').realpathSync('.')".into()],
+                working_directory: directory.to_owned(),
+                env: Vec::new(),
+            });
+        }
+        commands
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_trusted_check_cannot_read_state_secrets_but_can_read_its_checkout() {
@@ -375,6 +403,23 @@ mod tests {
             SUCCESS,
             "checks still need their candidate source"
         );
+        for command in commands_walking_state_ancestors(&checkout) {
+            let result = kaisa_sys::run_captured(
+                &command,
+                &sandbox.confinement(),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("path-walking command exits");
+            assert_eq!(
+                result.exit,
+                Some(SUCCESS),
+                "ancestor metadata must permit {:?}: {}",
+                command.args,
+                String::from_utf8_lossy(&result.output)
+            );
+        }
         std::fs::remove_dir_all(state).expect("remove isolated check state");
     }
 

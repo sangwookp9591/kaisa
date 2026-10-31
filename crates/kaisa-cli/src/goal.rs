@@ -364,6 +364,11 @@ impl GoalCommand {
             .map(|trial| trial.egress_hosts.iter().map(String::as_str).collect())
             .unwrap_or_default();
         if let Some(trial) = &trial {
+            #[cfg(target_os = "macos")]
+            writeln!(
+                out,
+                "trial: this confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot."
+            )?;
             writeln!(
                 out,
                 "trial (T16.0): Claude Code runs confined; it may reach {} and change {}",
