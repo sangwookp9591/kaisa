@@ -4,7 +4,7 @@
 //! its worktree is reclaimed. The commit uses Kaisa's own identity and skips repository hooks:
 //! preservation must not run code from the repository it is preserving.
 
-use crate::git::run_git;
+use crate::git::{GitError, run_git_for_preservation};
 use crate::inventory::Inventory;
 use crate::receipt::PreservationReceipt;
 use crate::secrets::{SecretKind, scan};
@@ -41,13 +41,35 @@ pub fn preserve_as_commit(
     worktree: &Worktree,
     inventory: &Inventory,
 ) -> Result<Preservation, WorktreeError> {
-    let mut paths: Vec<&str> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
+    let mut covered: Vec<String> = Vec::new();
     let mut flagged: Vec<(String, Vec<SecretKind>)> = Vec::new();
     for entry in &inventory.preserve {
-        match secrets_in(worktree, &entry.path) {
-            Some(kinds) if !kinds.is_empty() => flagged.push((entry.path.clone(), kinds)),
-            _ => paths.push(entry.path.as_str()),
+        let mut files = Vec::new();
+        expand_files(worktree, &entry.path, &mut files)?;
+        let mut all_clean = true;
+        for path in files {
+            match secrets_in(worktree, &path) {
+                Some(kinds) if !kinds.is_empty() => {
+                    all_clean = false;
+                    flagged.push((path, kinds));
+                }
+                _ => {
+                    covered.push(path.clone());
+                    paths.push(path);
+                }
+            }
         }
+        if all_clean {
+            covered.push(entry.path.clone());
+        }
+    }
+    // A previous agent may already have staged credentials. Restore their HEAD versions
+    // in the index without touching the files that a person must still preserve separately.
+    if !flagged.is_empty() {
+        let mut reset = vec!["reset", "--quiet", "HEAD", "--"];
+        reset.extend(flagged.iter().map(|(path, _)| path.as_str()));
+        run_git_for_preservation(worktree.path(), &reset)?;
     }
     if paths.is_empty() {
         return Ok(Preservation {
@@ -57,25 +79,59 @@ pub fn preserve_as_commit(
     }
     // `--force` because ignored files that the policy treats as user data must be kept too.
     let mut add: Vec<&str> = vec!["add", "--all", "--force", "--"];
-    add.extend(&paths);
-    run_git(worktree.path(), &add)?;
+    add.extend(paths.iter().map(String::as_str));
+    run_git_for_preservation(worktree.path(), &add)?;
     let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
     let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
     commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
-    run_git(worktree.path(), &commit)?;
-    let head: Vec<u8> = run_git(worktree.path(), &["rev-parse", "HEAD"])?;
+    run_git_for_preservation(worktree.path(), &commit)?;
+    let head: Vec<u8> = run_git_for_preservation(worktree.path(), &["rev-parse", "HEAD"])?;
     let head: String = String::from_utf8_lossy(&head).trim().to_owned();
     Ok(Preservation {
-        receipt: PreservationReceipt::committed(&head, &paths),
+        receipt: PreservationReceipt::committed(
+            &head,
+            &covered.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
         flagged,
     })
+}
+
+/// Expand directory inventory entries before scanning or staging. Symlinks are leaves;
+/// following a directory link here could walk outside the attempt's worktree.
+fn expand_files(
+    worktree: &Worktree,
+    path: &str,
+    files: &mut Vec<String>,
+) -> Result<(), WorktreeError> {
+    let absolute = worktree.path().join(path);
+    if absolute
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        let children = std::fs::read_dir(&absolute).map_err(GitError::Spawn)?;
+        for child in children {
+            let child = child.map_err(GitError::Spawn)?;
+            let relative = child.path();
+            let relative = relative
+                .strip_prefix(worktree.path())
+                .expect("a child stays relative");
+            expand_files(worktree, &relative.to_string_lossy(), files)?;
+        }
+    } else {
+        files.push(path.to_owned());
+    }
+    Ok(())
 }
 
 /// The credentials found in the file at `path`, or `None` for an entry that is not a readable
 /// file (a deletion). A file too large or unreadable to scan is reported as flagged.
 fn secrets_in(worktree: &Worktree, path: &str) -> Option<Vec<SecretKind>> {
     let file = worktree.path().join(path);
-    let metadata = std::fs::metadata(&file).ok()?;
+    let metadata = match std::fs::symlink_metadata(&file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(vec![SecretKind::Unscannable]),
+    };
     if !metadata.is_file() {
         return None;
     }
@@ -228,5 +284,142 @@ mod tests {
             check_deletion(&before, &preservation.receipt).is_err(),
             "an unpreserved credential file must not be deleted silently either"
         );
+    }
+    const IGNORED_KEY_FILE: &str = "private/nested/key.pem";
+    const IGNORED_NOTE_FILE: &str = "private/notes.txt";
+
+    fn an_attempt_with_ignored_private_data(repository: &TemporaryRepository) -> Worktree {
+        repository.commit_file(".gitignore", "private/\n", "ignore private data");
+        let worktree = a_worktree_for_attempt_41a(repository);
+        the_agent_writes(&worktree, IGNORED_KEY_FILE, LEFTOVER_KEY);
+        the_agent_writes(&worktree, IGNORED_NOTE_FILE, "notes worth preserving\n");
+        worktree
+    }
+
+    fn committed_files(worktree: &Worktree) -> String {
+        git_text(worktree.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
+            .expect("the preservation commit can be inspected")
+    }
+
+    #[test]
+    fn an_ignored_directory_with_a_private_key_commits_only_scanned_clean_files() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = an_attempt_with_ignored_private_data(&repository);
+        let before = what_needs_preserving(&worktree);
+        assert!(
+            before.preserve.iter().any(|entry| entry.path == "private/"),
+            "the regression must exercise git's collapsed ignored directory inventory"
+        );
+
+        let preservation =
+            preserve_as_commit(&worktree, &before).expect("clean notes are preserved");
+        let committed = committed_files(&worktree);
+
+        assert!(
+            !committed.lines().any(|path| path == IGNORED_KEY_FILE),
+            "expanding ignored directories must prevent a nested PEM key entering history"
+        );
+        assert!(
+            committed.lines().any(|path| path == IGNORED_NOTE_FILE),
+            "clean ignored user data must still be preserved"
+        );
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, _)| path == IGNORED_KEY_FILE),
+            "the report must name the nested key without recording its contents"
+        );
+        assert!(
+            check_deletion(&before, &preservation.receipt).is_err(),
+            "a partially preserved directory must keep reclamation blocked"
+        );
+    }
+
+    #[test]
+    fn an_ignored_directory_with_only_clean_files_has_full_receipt_coverage() {
+        let repository = a_repository_with_one_commit_on_main();
+        repository.commit_file(".gitignore", "private/\n", "ignore private data");
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, IGNORED_NOTE_FILE, "notes worth preserving\n");
+        let before = what_needs_preserving(&worktree);
+
+        let preservation = preserve_as_commit(&worktree, &before).expect("notes are preserved");
+
+        assert_eq!(
+            check_deletion(&before, &preservation.receipt),
+            Ok(()),
+            "every child of the collapsed directory was scanned and committed"
+        );
+    }
+
+    #[test]
+    fn an_already_staged_private_key_is_removed_from_the_preservation_index() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, KEY_FILE, LEFTOVER_KEY);
+        git_text(worktree.path(), &["add", "--", KEY_FILE]).expect("the agent staged its key");
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "pub fn refresh() {}\n");
+
+        let preservation = preserve_as_commit(&worktree, &what_needs_preserving(&worktree))
+            .expect("clean source is preserved");
+
+        assert!(
+            !committed_files(&worktree)
+                .lines()
+                .any(|path| path == KEY_FILE),
+            "a pre-staged secret must be removed before committing the whole index"
+        );
+        assert!(
+            preservation
+                .flagged
+                .iter()
+                .any(|(path, _)| path == KEY_FILE),
+            "unstaging must keep the secret named in the preservation report"
+        );
+        assert!(
+            worktree.path().join(KEY_FILE).exists(),
+            "removing a secret from the index must retain its working copy"
+        );
+    }
+
+    #[cfg(unix)]
+    fn install_marker_hooks(repository: &TemporaryRepository) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks = repository.path().join(".git/marker-hooks");
+        std::fs::create_dir_all(&hooks).expect("the hook directory is writable");
+        for name in ["prepare-commit-msg", "post-commit", "post-index-change"] {
+            let hook = hooks.join(name);
+            std::fs::write(&hook, format!("#!/bin/sh\nprintf hook > {name}-was-run\n"))
+                .expect("a marker hook can be installed");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("the hook can be made executable");
+        }
+        git_text(
+            repository.path(),
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+        )
+        .expect("the repository uses its marker hooks");
+        hooks
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preservation_with_repository_hooks_never_runs_commit_or_index_hooks() {
+        let repository = a_repository_with_one_commit_on_main();
+        let worktree = a_worktree_for_attempt_41a(&repository);
+        the_agent_writes(&worktree, NEW_SOURCE_FILE, "pub fn refresh() {}\n");
+        let before = what_needs_preserving(&worktree);
+        install_marker_hooks(&repository);
+
+        preserve_as_commit(&worktree, &before)
+            .expect("preservation bypasses every repository hook");
+
+        for name in ["prepare-commit-msg", "post-commit", "post-index-change"] {
+            assert!(
+                !worktree.path().join(format!("{name}-was-run")).exists(),
+                "{name} must not execute during preservation"
+            );
+        }
     }
 }

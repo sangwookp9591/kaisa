@@ -63,6 +63,17 @@ pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitErr
     }
 }
 
+/// Preservation never executes repository hooks, including hooks not covered by
+/// `commit --no-verify`. Git treats the null device as an empty hooks directory.
+pub(crate) fn run_git_for_preservation(
+    directory: &Path,
+    args: &[&str],
+) -> Result<Vec<u8>, GitError> {
+    let mut configured = vec!["-c", "core.hooksPath=/dev/null", "--literal-pathspecs"];
+    configured.extend_from_slice(args);
+    run_git(directory, &configured)
+}
+
 /// Runs git and returns its stdout as trimmed text.
 ///
 /// # Errors
