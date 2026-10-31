@@ -5,6 +5,7 @@
 #[cfg(any(unix, windows))]
 use std::path::{Path, PathBuf};
 
+use kaisa_domain::ContainmentCapability;
 use kaisa_sys::Confinement;
 
 /// The OS sandbox the agent's own process runs in.
@@ -104,6 +105,22 @@ impl AgentSandbox {
         }
     }
 
+    /// What this sandbox cannot guarantee: everything when unconfined, and on Linux whatever
+    /// the kernel's Landlock ABI and the datagram filter leave open (D02).
+    pub(crate) fn missing(&self) -> Vec<ContainmentCapability> {
+        match self {
+            Self::Unconfined => ContainmentCapability::ALL.to_vec(),
+            #[cfg(target_os = "macos")]
+            Self::Seatbelt(_) => Vec::new(),
+            #[cfg(target_os = "linux")]
+            Self::Landlock(ruleset) => {
+                kaisa_domain::landlock_missing(Some(ruleset.abi), ruleset.udp_confined())
+            }
+            #[cfg(windows)]
+            Self::AppContainer(_) => Vec::new(),
+        }
+    }
+
     /// Releases what the sandbox granted on the way out (Windows ACEs and profile).
     pub(crate) fn release(self) {
         #[cfg(windows)]
@@ -156,5 +173,79 @@ pub(crate) fn agent_sandbox(
     {
         let _ = (writable, broker_socket, egress_port);
         Ok(AgentSandbox::Unconfined)
+    }
+}
+
+/// What an attempt will be missing before its sandbox is built: everything if it is not to be
+/// confined, otherwise what this machine's sandbox cannot give. The sandbox actually built is
+/// checked again before the agent starts ([`AgentSandbox::missing`]).
+pub(crate) fn expected_missing(confine: bool) -> Vec<ContainmentCapability> {
+    if !confine {
+        return ContainmentCapability::ALL.to_vec();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        kaisa_domain::landlock_missing(kaisa_sys::landlock_abi(), kaisa_sys::udp_filter_supported())
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        Vec::new()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        ContainmentCapability::ALL.to_vec()
+    }
+}
+
+/// What `actual` lacks beyond what the attempt was admitted without: a sandbox that turned out
+/// weaker than admitted must not start (D02).
+pub(crate) fn beyond_admitted(
+    actual: &[ContainmentCapability],
+    admitted: &[ContainmentCapability],
+) -> Vec<ContainmentCapability> {
+    actual
+        .iter()
+        .copied()
+        .filter(|capability| !admitted.contains(capability))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use kaisa_domain::ContainmentCapability;
+
+    use super::{AgentSandbox, beyond_admitted, expected_missing};
+
+    #[test]
+    fn an_unconfined_sandbox_is_missing_every_capability() {
+        assert_eq!(
+            AgentSandbox::Unconfined.missing(),
+            ContainmentCapability::ALL.to_vec(),
+            "a run without an OS sandbox must never be labelled confined"
+        );
+    }
+
+    #[test]
+    fn an_attempt_not_to_be_confined_expects_to_miss_every_capability() {
+        assert_eq!(
+            expected_missing(false),
+            ContainmentCapability::ALL.to_vec(),
+            "admission sees the whole gap before the agent starts"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_weaker_than_admitted_shows_what_it_lacks_beyond_the_admission() {
+        let admitted = vec![ContainmentCapability::UdpEgress];
+        let actual = vec![
+            ContainmentCapability::TcpEgress,
+            ContainmentCapability::UdpEgress,
+        ];
+
+        assert_eq!(
+            beyond_admitted(&actual, &admitted),
+            vec![ContainmentCapability::TcpEgress],
+            "only what nobody accepted stops the start"
+        );
     }
 }

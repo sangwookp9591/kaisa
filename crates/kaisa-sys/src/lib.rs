@@ -41,7 +41,7 @@ pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting
 pub use control_pipe::ControlPipe;
 pub use identity::ProcessIdentity;
 #[cfg(target_os = "linux")]
-pub use landlock::{LandlockRuleset, write_ruleset};
+pub use landlock::{LandlockRuleset, landlock_abi, udp_filter_supported, write_ruleset};
 #[cfg(unix)]
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec};

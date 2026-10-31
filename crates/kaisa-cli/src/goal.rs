@@ -8,7 +8,10 @@ use kaisa_agents::{ClaudeLaunch, claude_brokered_argv};
 use kaisa_daemon::{
     GoalOutcome, GoalRequest, VerifiedRequest, run_goal, run_verified_goal, whole_repository,
 };
-use kaisa_domain::{Role, WriteSet};
+use kaisa_domain::{
+    ContainmentCapability, DefaultReducedPolicy, ReducedModeBasis, ReducedModeDecision, Role,
+    WriteSet, codes,
+};
 use kaisa_sys::{ProcessExit, ProcessSpec};
 
 /// Default model and effort until the router (M1) chooses them.
@@ -36,6 +39,63 @@ fn codex_args() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How to run anyway when containment falls short: shown with every refusal.
+const ACCEPT_HINT: &str = "to run anyway, accept what is missing until a deadline: \
+--accept-reduced <write,tcp,udp,descendants> --accept-until <unix time in ms>";
+
+/// A person's `--accept-reduced <codes> --accept-until <ms>`, as typed.
+#[derive(Default)]
+struct AcceptReduced {
+    capabilities: Option<String>,
+    until: Option<String>,
+}
+
+impl AcceptReduced {
+    /// The scoped, expiring Decision the person gave, `None` if they gave none, or what is
+    /// wrong with it (a usage error).
+    fn decision(&self) -> Result<Option<ReducedModeDecision>, String> {
+        let (capabilities, until) = match (&self.capabilities, &self.until) {
+            (None, None) => return Ok(None),
+            (Some(capabilities), Some(until)) => (capabilities, until),
+            _ => {
+                return Err(
+                    "--accept-reduced and --accept-until go together: a Decision names what it \
+                     accepts and when it ends"
+                        .to_owned(),
+                );
+            }
+        };
+        let mut accepts_missing: Vec<ContainmentCapability> = Vec::new();
+        for code in capabilities.split(',').map(str::trim) {
+            match ContainmentCapability::from_code(code) {
+                Some(capability) => accepts_missing.push(capability),
+                None => {
+                    return Err(format!(
+                        "unknown capability {code:?}; use {}",
+                        codes(&ContainmentCapability::ALL)
+                    ));
+                }
+            }
+        }
+        let expires_at_ms: u64 = until
+            .parse()
+            .map_err(|_| format!("--accept-until {until:?} is not a Unix time in milliseconds"))?;
+        Ok(Some(ReducedModeDecision {
+            accepts_missing,
+            expires_at_ms,
+        }))
+    }
+}
+
+/// Milliseconds since the Unix epoch, the ledger's clock.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Parsed `kaisa [--agent-program <path>] [--agent-arg <arg>]… [--reviewer-arg <arg>]…
 /// [--check-program <path> [--check-arg <arg>]…] "<goal>"`.
 pub(crate) struct GoalCommand {
@@ -49,6 +109,9 @@ pub(crate) struct GoalCommand {
     /// `--confine-claude`: a T16.0 trial that runs Claude Code confined, with its provider and
     /// session files allowed, instead of reduced.
     confine_claude: bool,
+    /// `--accept-reduced … --accept-until …`: the person's Decision for a run that cannot be
+    /// fully contained (D02).
+    accept: AcceptReduced,
 }
 
 impl GoalCommand {
@@ -64,6 +127,7 @@ impl GoalCommand {
         let mut reviewer_args: Vec<String> = Vec::new();
         let mut check: Option<Vec<String>> = None;
         let mut confine_claude = false;
+        let mut accept = AcceptReduced::default();
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
@@ -76,6 +140,10 @@ impl GoalCommand {
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
                 "--confine-claude" => confine_claude = true,
+                "--accept-reduced" => {
+                    accept.capabilities = Some(words.next().cloned().unwrap_or_default())
+                }
+                "--accept-until" => accept.until = Some(words.next().cloned().unwrap_or_default()),
                 "--check-program" => check = words.next().map(|program| vec![program.clone()]),
                 "--check-arg" => {
                     if let (Some(check), Some(arg)) = (check.as_mut(), words.next()) {
@@ -91,7 +159,22 @@ impl GoalCommand {
             reviewer_args,
             check,
             confine_claude,
+            accept,
         })
+    }
+
+    /// What admits this goal's attempts if their containment falls short: the person's
+    /// Decision; otherwise, for Claude Code run reduced as documented, the default policy that
+    /// says so (T16.0); otherwise nothing. Observed attempts are admitted on their own default
+    /// policy by the daemon.
+    fn reduced_mode(&self, decision: Option<ReducedModeDecision>) -> ReducedModeBasis {
+        match decision {
+            Some(decision) => ReducedModeBasis::Decision(decision),
+            None if self.agent.program.is_none() && !self.confine_claude => {
+                ReducedModeBasis::DefaultPolicy(DefaultReducedPolicy::ClaudeReducedUntilT16)
+            }
+            None => ReducedModeBasis::None,
+        }
     }
 
     /// Codex as an observed developer: no bridge, its own workspace sandbox, the plain pack on
@@ -183,6 +266,7 @@ impl GoalCommand {
         repository: &Path,
         state: &Path,
         write_set: &WriteSet,
+        reduced_mode: &ReducedModeBasis,
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> io::Result<u8> {
@@ -277,6 +361,7 @@ impl GoalCommand {
             agent_writable: trial
                 .as_ref()
                 .map_or(&[][..], |trial| trial.writable.as_slice()),
+            reduced_mode,
         }) {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
@@ -286,10 +371,7 @@ impl GoalCommand {
                 writeln!(out, "{line}")?;
                 Ok(status)
             }
-            Err(error) => {
-                writeln!(err, "kaisa: {error}")?;
-                Ok(crate::EXIT_FAILURE)
-            }
+            Err(error) => report_error(&error, out, err),
         }
     }
 
@@ -302,6 +384,26 @@ impl GoalCommand {
             )?;
             return Ok(crate::EXIT_USAGE);
         }
+        let decision: Option<ReducedModeDecision> = match self.accept.decision() {
+            Ok(decision) => decision,
+            Err(problem) => {
+                writeln!(err, "kaisa: {problem}")?;
+                return Ok(crate::EXIT_USAGE);
+            }
+        };
+        if let Some(expired) = decision
+            .as_ref()
+            .filter(|decision| decision.expires_at_ms <= now_ms())
+        {
+            writeln!(
+                out,
+                "waiting for you: your Decision accepting {} ended at {} ms; give a new one\n{ACCEPT_HINT}",
+                codes(&expired.accepts_missing),
+                expired.expires_at_ms
+            )?;
+            return Ok(crate::EXIT_WAITING_FOR_HUMAN);
+        }
+        let reduced_mode: ReducedModeBasis = self.reduced_mode(decision);
         let Some(repository) = repository_root() else {
             writeln!(err, "kaisa: run this inside a git repository")?;
             return Ok(crate::EXIT_USAGE);
@@ -326,7 +428,7 @@ impl GoalCommand {
         }
         writeln!(out, "▶ {}", self.goal)?;
         if self.verified() {
-            return self.run_verified(&repository, &state, &write_set, out, err);
+            return self.run_verified(&repository, &state, &write_set, &reduced_mode, out, err);
         }
         match run_goal(&GoalRequest {
             repository: &repository,
@@ -344,17 +446,30 @@ impl GoalCommand {
             agent_writable: &[],
             local_model_port: None,
             observed: self.agent.codex,
+            reduced_mode: &reduced_mode,
         }) {
             Ok(outcome) => {
                 writeln!(out, "{}", outcome.summary())?;
                 Ok(exit_status(&outcome))
             }
-            Err(error) => {
-                writeln!(err, "kaisa: {error}")?;
-                Ok(crate::EXIT_FAILURE)
-            }
+            Err(error) => report_error(&error, out, err),
         }
     }
+}
+
+/// A run that could not be admitted waits for a person (exit 3) and says what is missing;
+/// any other failure is a failure.
+fn report_error(
+    error: &kaisa_daemon::GoalError,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> io::Result<u8> {
+    if error.not_admitted() {
+        writeln!(out, "waiting for you: {}\n{ACCEPT_HINT}", error.detail)?;
+        return Ok(crate::EXIT_WAITING_FOR_HUMAN);
+    }
+    writeln!(err, "kaisa: {error}")?;
+    Ok(crate::EXIT_FAILURE)
 }
 
 /// CI contract (user-flows F26): 0 when the agent finished and its work is preserved, 4 when
@@ -380,6 +495,8 @@ fn repository_root() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use kaisa_domain::{DefaultReducedPolicy, ReducedModeBasis};
+
     use super::codex_args;
 
     #[test]
@@ -394,6 +511,55 @@ mod tests {
         assert!(
             parsed.confine_claude && parsed.goal == "Add notes",
             "the trial switch is a flag, not part of the goal"
+        );
+    }
+
+    fn a_goal_with(flags: &[&str]) -> super::GoalCommand {
+        let mut words: Vec<String> = flags.iter().map(|word| (*word).to_owned()).collect();
+        words.push("Add notes".to_owned());
+        super::GoalCommand::parse(&words).expect("a goal is given")
+    }
+
+    #[test]
+    fn claude_by_default_is_admitted_on_the_documented_default_policy() {
+        let claude_by_default = a_goal_with(&[]);
+
+        assert_eq!(
+            claude_by_default.reduced_mode(None),
+            ReducedModeBasis::DefaultPolicy(DefaultReducedPolicy::ClaudeReducedUntilT16),
+            "Claude Code stays reduced until T16.0, and the ledger names the policy that says so"
+        );
+    }
+
+    #[test]
+    fn a_confined_claude_trial_has_no_default_policy_to_fall_back_on() {
+        let trial = a_goal_with(&["--confine-claude"]);
+
+        assert_eq!(
+            trial.reduced_mode(None),
+            ReducedModeBasis::None,
+            "a run asked to be confined must not be admitted weaker without a Decision"
+        );
+    }
+
+    #[test]
+    fn a_scripted_agent_has_no_default_policy_to_fall_back_on() {
+        let scripted = a_goal_with(&["--agent-program", "agent"]);
+
+        assert_eq!(
+            scripted.reduced_mode(None),
+            ReducedModeBasis::None,
+            "only the documented Claude Code default may admit a reduced run without a Decision"
+        );
+    }
+
+    #[test]
+    fn a_decision_needs_both_what_it_accepts_and_when_it_ends() {
+        let without_deadline = a_goal_with(&["--accept-reduced", "udp"]);
+
+        assert!(
+            without_deadline.accept.decision().is_err(),
+            "a Decision without an expiry would be a permanent weakening"
         );
     }
 

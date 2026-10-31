@@ -98,6 +98,9 @@ struct PathBeneathAttr {
 #[derive(Debug)]
 pub struct LandlockRuleset {
     fd: OwnedFd,
+    /// The kernel's Landlock ABI the ruleset was built for; it decides which writes and which
+    /// connections the ruleset can confine (see `kaisa_domain::landlock_missing`).
+    pub abi: i64,
     /// True when outgoing TCP is limited to the broker (ABI 4 and later).
     pub tcp_confined: bool,
     /// The seccomp program that refuses internet datagram sockets, when the architecture is
@@ -172,6 +175,19 @@ fn udp_filter() -> Option<Vec<libc::sock_filter>> {
     ])
 }
 
+/// The kernel's Landlock ABI version, or `None` when Landlock is unavailable, so a run can be
+/// admitted on what the kernel can actually confine before its sandbox is built.
+#[must_use]
+pub fn landlock_abi() -> Option<i64> {
+    abi_version()
+}
+
+/// True when this architecture has the seccomp filter that refuses internet datagram sockets.
+#[must_use]
+pub fn udp_filter_supported() -> bool {
+    udp_filter().is_some()
+}
+
 /// The kernel's Landlock ABI version, or `None` when Landlock is unavailable.
 fn abi_version() -> Option<i64> {
     #[allow(unsafe_code)]
@@ -189,7 +205,8 @@ fn abi_version() -> Option<i64> {
 
 /// Builds a ruleset that lets processes write only beneath `writable` and `/dev`. Returns
 /// `None` when the kernel has no Landlock, so the caller can report a reduced mode instead of
-/// pretending to be confined (P13).
+/// pretending to be confined (P13). Below ABI 3 truncation is not handled and below ABI 4 TCP
+/// is not, so the ruleset's `abi` must decide what the run is labelled as missing.
 ///
 /// # Errors
 ///
@@ -244,6 +261,7 @@ pub fn write_ruleset(
     let owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(fd) };
     let ruleset = LandlockRuleset {
         fd: owned,
+        abi,
         tcp_confined,
         udp_filter: udp_filter(),
     };

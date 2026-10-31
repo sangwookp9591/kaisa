@@ -31,6 +31,8 @@ pub struct MissionRequest<'request> {
     pub kaisa_executable: &'request Path,
     /// Whether agents run confined.
     pub confine_agent: bool,
+    /// What may admit an attempt whose containment falls short (D02).
+    pub reduced_mode: &'request kaisa_domain::ReducedModeBasis,
 }
 
 /// How a mission ended.
@@ -132,6 +134,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
             agent_writable: &[],
             local_model_port: None,
             observed: false,
+            reduced_mode: request.reduced_mode,
         })?;
         let succeeded: bool =
             outcome.exit == Some(ProcessExit::Code(0)) && outcome.kept_back.is_empty();
