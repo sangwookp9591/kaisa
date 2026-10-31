@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | v0.6.1 — **M0 implemented; M1 engine implemented** ([`tasks/M1.md`](tasks/M1.md), CI green on 3 OSes). M1 user flows are partly done (see the task file's flow coverage). Open: T16.0 (confined Claude Code on Linux and Windows) |
+| Status | v0.6.1 — **M0 and M1 partly implemented.** A goal runs end to end, but several designed parts are not on the run path and some differ from this text; §17 lists them, and [`tasks/M0.md`](tasks/M0.md) and [`tasks/M1.md`](tasks/M1.md) mark each with ◐. This document stays the target design. Open: T16.0 (confined Claude Code on Linux and Windows) |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
 | Date | 2026-10-30 (status updated 2026-10-31) |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
@@ -199,6 +199,8 @@ the protocol version. It holds no secret, and the sandbox profile makes it unrea
 - Read-only commands never start the daemon (P14).
 - Every command supports `--json`, `--help` and the `ko`/`en` locales.
 
+> **Current state.** There is no `kaisa daemon`, `kaisa keeper` or control endpoint, and no `--json` or `ko`/`en` catalog yet. `kaisa "<goal>"` runs the engine inside the CLI process; `watch`, `agent`, `policy` and the goal work. The commands in the table above that do not work yet are reserved: a reserved word exits 2 and prints how to quote a goal, and an unknown option exits 64, so neither can start a run (§17).
+
 ---
 
 ## 5. Engine cores
@@ -213,6 +215,8 @@ the protocol version. It holds no secret, and the sandbox profile makes it unrea
 - **Exit records.** When the agent exits, the keeper writes an **exit record** to the attempt directory with an fsync: the exit status, the time and the incarnation.
 - **Daemon restarts.** If the daemon restarts, it finds keepers by their per-attempt sockets and reconnects.
 - **Keeper loss.** If a keeper is lost, the process state stays `Unknown` until it can be proven otherwise. It is never converted into a retry or a destructive GC.
+
+> **Current state.** The keeper is a library, not a process. The CLI process owns the PTY-less captured child, takes an exclusive per-attempt owner lock, and writes the exit record itself. Recovery on the next `kaisa` start takes that lock first, skips a live owner, and ends (does not reattach) a leftover agent whose identity it can prove. Without proof the attempt is kept untouched, with its existing recorded execution state, and reported for a person. An attempt made before owner locks is kept for a person.
 
 **Containment of descendants**
 
@@ -392,6 +396,8 @@ Workers keep running during a coordinator handoff, because the daemon and their 
   - Upgrade and recovery tests replay recorded event logs from earlier versions.
 - **Disk full.** The writer refuses new runs, keeps the effects of running ones journaled, and opens a Gate.
 
+> **Current state.** Every process opens `kaisa.db` itself; there is no single-writer actor or OS lock on the ledger. The hash chain works. There are no signed checkpoints, upcasting or disk-full gate. `kaisa watch` opens the file read-only (SQLite may still create or update `-shm` sidecars beside a live WAL database).
+
 ### 5.5 Workspace: isolation and preservation
 
 **Worktrees.**
@@ -532,6 +538,12 @@ row on CI.
 If a capability is missing, the run either refuses to start or runs in a **reduced** mode. Reduced mode is labelled on the run and needs
 a human Gate. It is never silent (P13).
 
+> **Current state of the matrix.**
+> - *Capabilities.* The code names five: `write`, `tcp`, `udp`, `state-read` (Kaisa state and other attempts' tokens unreadable) and `descendants`. A run missing any is refused unless a documented default policy covers it, a scoped and expiring Decision names it, or it is a **platform limit**.
+> - *Platform limits.* Known OS limits are admitted without a Decision as `platform-limit` and labelled for the run's whole life: macOS `descendants`; Linux `state-read` and `descendants`; Windows none. So a Decision must list every missing capability that is not a platform limit. An unconfined run misses all five; the old four codes `write,tcp,udp,descendants` still cover it on Linux but not on macOS or Windows, where `state-read` must be added.
+> - *Descendants.* There is no cgroup leaf or `kqueue` watch. On Unix, cleanup stops the leader, walks the process tree by parent id until no new descendant appears, and kills what it found, then the group. This ends attached children, including ones that started a new session. A daemon that detached before the walk, or a process Kaisa cannot inspect, can survive. Windows keeps its Job Object.
+> - *State and keychain.* On macOS the Seatbelt profile makes the state directory unreadable to a confined agent, trusted check or broker `exec`, apart from the attempt's own bridge files, and denies the keychain services. A confined Claude Code agent alone keeps login-keychain access for its OAuth login; this is access to the service, not to one item, and the output and ledger disclose it. Landlock cannot hide reads, so Linux labels `state-read`. The exclusion is path-based.
+
 **Write-set confinement (v0.6.1, review B1).** The write set is enforced by the OS for every process
 the attempt starts — the agent, `exec`, interpreters, build scripts and test runners alike:
 - Write access is granted to the write-set paths and to the attempt's **scratch area** only. The
@@ -571,6 +583,10 @@ because the OS layers alone cannot filter by domain. All direct network access i
 **Project-settings risk scanner.** Taken from ruflo ADR-509. Before an attempt starts, and during `kaisa init`, Kaisa scans the
 agent's project configs. It **refuses** auto-approval keys such as `enableAllProjectMcpServers`,
 blanket allow-lists, and hooks that call outside the repo, unless a human approves them.
+
+> **Current state.** The scanner reads Claude Code's `.claude/settings*.json` and Codex's `.codex/config.toml`. For Claude Code it flags `enableAllProjectMcpServers: true` and a non-empty `enabledMcpjsonServers` as well as the other rules. The first scan reads the working tree; the frozen candidate's own settings are scanned again before a reviewer or revision starts. There is no human approval path yet: in a verified goal a flagged repository stops with exit 3, naming each finding.
+
+**Child environments.** Every child Kaisa starts (agent, trusted check, local-model bridge) gets an allow-list built in `kaisa-sys`: locale, `PATH` and home locations, toolchain locations (Cargo, Rustup, Node, Go, Java, Python, Ruby, .NET, Deno and version managers), TLS certificate settings, XDG directories, `TZ`, and the proxy variables. Each agent adapter declares its own credential and endpoint variables (Claude Code: Anthropic, Bedrock, Vertex, Foundry, AWS; Codex: a fixed list of OpenAI and Codex names). A broker-backed attempt replaces the proxy variables and clears `NO_PROXY`. By default the base environment excludes `GIT_*`, `SSH_AUTH_SOCK`, `LD_*`, `DYLD_*`, `CARGO_TARGET_DIR`, `RUSTFLAGS` and other providers' keys. `KAISA_PASS_ENV=NAME,NAME` explicitly forwards any valid named variable to the Codex adapter only, including otherwise excluded ones; names are not read from Codex's own configuration.
 
 ### 5.8 Verification loop and delivery gate (review M6, v0.6)
 
@@ -667,6 +683,8 @@ is recorded as an override.
 2. **Isolated checkout.** Check the snapshot out into a clean, read-only verification workspace. It is not the attempt's worktree.
 3. **Trusted checks.** Take the verifier commands from the project config **at the base revision**, not from the candidate.
    Run them under the verification sandbox profile.
+
+   > **Current state.** The commands come from the profile detected in the repository's working tree when the run starts, not from `git show <base>`. The check runs on a clean checkout of the candidate in the OS sandbox with the allow-listed environment (§5.7).
 4. **Tamper detection.** Taken from ruflo ADR-503. Compare the candidate with its base and flag any of these:
    - deleted or weakened tests;
    - new `.skip` or `only` markers;
@@ -675,6 +693,8 @@ is recorded as an override.
    - edits to test scripts or CI config.
 
    A flagged candidate gets the verdict `Tampered`, which never counts as a pass.
+
+   > **Current state.** The gate does not name `Tampered`; it stops the run for a person (exit 3) and names the signal. Two stops cannot be switched off by any policy value; when the relevant gate is reached they require a person (3), while earlier execution, evidence or review failures (absent or invalid evidence, a missing or stale verdict, an unsuccessful developer) end as not delivered (4) first: weakened tests (deleted or disabled tests, `.skip` and `.only` markers, tests commented out, tautological assertions, and newly added `--passWithNoTests`, `--pass-with-no-tests`, `--exit-zero`, `|| true` or `|| exit 0` on a test-running entry of `package.json`, `Makefile`, `justfile` or `tox.ini`, including indented multi-line recipes), and changed check definitions (the named manifest and test-config files, plus CI pipeline files: `.github/workflows/**`, `.buildkite/**`, `.circleci/config.yml`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.travis.yml`, `Jenkinsfile`). Changed paths are read NUL-delimited, so non-ASCII names count. The policy keys `require_person_when_tests_weaken` and `require_person_when_check_definitions_change` exist but accept only `true`. Detection is lexical: other spellings of a swallowed exit, `.github/actions/**` and other CI systems are not caught, and there is no presence-checked Decision to override a stop yet.
 5. **Independent review.** The reviewer is a different model from the implementer. It gets the requirements, the diff and the logs, and never the implementer's conclusions.
    Repository instructions and extracted facts count as untrusted input.
 6. **Receipt.** A verification receipt binds the snapshot digest, the environment digest, the log digests and the verdicts.
@@ -863,6 +883,8 @@ failover = "preserve"     # §5.5 protocol
 | Exhausted | Usage-limit errors that match the catalog `quota_signals` | Failover with a cooldown. Hand back only after `min_dwell`. |
 | Unknown | Unclassified errors | Retry once, then open a Gate. |
 
+This **Unknown** is a class of *quota signal*: an error the adapter could not sort into throttle or exhausted. It is a failed call, and one bounded retry of the call is safe. It is not the **Unknown** execution state of §5.1 (`Unknown{stage}`), where Kaisa cannot tell whether an attempt or an effect started or finished. That state is never retried automatically (P8, §5.2, M1 exit criteria); it is resolved by proof (an exit record) or by a person. Quota classification arrives in M2; M1 has only the execution-state rule.
+
 - Signals come from the adapter's structured channels: stream events and exit codes. Stderr matching is a labelled fallback, because an agent could spoof it.
 
 **Admission control and enforcement**
@@ -949,6 +971,8 @@ same ledger, outbox and authority rules as the engine cores.
 
 **Localization and the plain-language renderer.** Used by U5 and U11.
 - **Message catalog.** Every user-facing string comes from a catalog in Fluent format, with `ko` and `en` from M0.
+
+  > **Current state.** There is no Fluent catalog and no `kaisa-i18n` crate; messages are English strings in the code. NFR-05 requires the `ko`/`en` catalog, so this is a gap, not a decision.
 - **Rendering.** A renderer maps ledger events to plain sentences, for example `coordinator_handoff` becomes "Claude ran out of quota, so GPT took over planning; nothing was lost." Internal terms (epoch, generation, lease) appear only with `--verbose` or `--json`.
 - **Fix options.** Every blocking event type must declare at least one fix option. CI fails if one does not, which enforces "no unexplained blocks" (user-flows §10).
 
@@ -1129,6 +1153,8 @@ mode; the hierarchy and the admission rules do not change.
 ---
 
 ## 7. Data model (projection tables, v1)
+
+> **Current state.** The ledger has four SQLite tables: `events`, `attempts`, `context_packs` and `outbox`. Missions, tasks, gates, knowledge and the rest are folded from events when read. The outbox is not on the run path. The listing below is the designed projection.
 
 ```
 missions(id, goal, state, budget_id, policy_version, root_run_id, delivered_receipt)
@@ -1420,7 +1446,7 @@ Versions were checked on crates.io, npm and ziglang.org on 2026-10-30.
 | Orphaned resources after the chaos suite | 0 | GC diff |
 | Work lost after the chaos suite | 0 bytes not covered by a receipt | preservation audit |
 | Coordinator handoff (signal → successor reconciled) | < 60 s, excluding agent startup | failover tests |
-| Per-role tool catalog + preamble | < 2k tokens | CI footprint report |
+| Per-role tool catalog + preamble | < 2k tokens | CI footprint report (current state: no such job yet, see §16) |
 | Light (read-only) attempt overhead, excluding the agent CLI | < 4 MB, no worktree | load tests |
 | 100 concurrent scripted agents on the reference host | daemon RSS < 200 MB, event append p99 < 5 ms, admission decision < 50 ms | scale benchmark (CI nightly, 10/50/100/200 agents) |
 | Context-pack assembly on a 10k-file repository | p95 < 300 ms | criterion |
@@ -1473,6 +1499,8 @@ Stability is validated **after implementation** with:
 - **Cross-OS CI.** Every PR runs on macOS, Linux and Windows. CI also runs the catalog and schema digest checks and the
   footprint report.
 
+  > **Current state.** CI runs rustfmt, clippy, the workspace tests, a smoke run of the binary and `cargo-deny`. The catalog digest is covered by an ordinary test; there is no schema digest check, and there is no benchmark or footprint job, so no §15 number is measured in CI yet.
+
 ---
 
 ## 17. Milestones
@@ -1481,12 +1509,50 @@ Each milestone ends with a measured go/no-go review. Staffing and duration estim
 here. The flows each milestone must complete end to end are listed in [`user-flows.md`](user-flows.md) §9. Its
 usability targets (§10) are part of every milestone's exit criteria.
 
-**Implementation status (2026-10-31).** M0 is done on all three OSes. M1's engine scope below is done and
-its exit criteria each have a test that passes on all three OSes ([`tasks/M1.md`](tasks/M1.md)). Decisions made
-while building it: light work (F37) is a first-pass review on a registered T0 local model, advisory except for
-blocking findings; an observed agent (Codex) is checked against its write set after it finishes, before the
-delivery gate; the personal policy is a validated `policy.json` in the state directory, snapshotted and recorded
-per run. Still reduced: Claude Code everywhere until T16.0, and checks and local models on Windows.
+**Implementation status (2026-10-31).** M0 and M1 are **partly done**. A goal runs end to end: Kaisa
+prepares a worktree, runs an agent confined or observed, freezes the candidate, runs trusted checks,
+asks a reviewer, revises within a limit, delivers only on fresh passing evidence and learns a lesson.
+It has run with real Claude Code and Codex on macOS; real-agent runs are not done on Linux or Windows,
+and not since the state-isolation, environment, descendant and attempt-lock fixes. CI runs the
+tests, with scripted agents, on all three OSes. The tests behind each exit criterion are listed in
+[`tasks/M0.md`](tasks/M0.md) and [`tasks/M1.md`](tasks/M1.md); the items marked ◐ there do not pass
+that bar yet, so no exit criterion below is claimed met on every OS. The table below remains the
+target.
+
+*Deliberate differences from the design, as of this date.* They are current state, not changes to the
+design above.
+
+- **Processes.** No separate daemon or keeper process and no control server: the CLI runs the engine in
+  its own process (§4, §5.1). "Daemon restart keeps attempts" is today "the next `kaisa` start ends a
+  leftover agent it can prove is its own, preserves the work and reclaims it".
+- **Terminals.** Agents run with captured stdio, not a PTY. There is no attach, steer or `wrap`.
+- **Ledger.** Four SQLite tables (`events`, `attempts`, `context_packs`, `outbox`); everything else is
+  folded from events. §7 lists the designed projection. No single-writer actor, signed checkpoint or
+  upcasting yet (§5.4).
+- **Outbox.** The intent and completion primitives work but spawn, worktree and removal do not go
+  through them. There are no cursors, request receipts or epoch fences (§5.2).
+- **Index, impact and route.** The repository index and impact sets are built but a run does not use
+  them; packs carry an empty impact set. Model routing is used by a run, but `route.decided` is not
+  recorded and the task signals are approximate.
+  `run_mission` is not called from the CLI.
+- **Messages.** English only. There is no `ko`/`en` message catalog and no `--json` yet (§5.11).
+- **Retrieval.** BM25 over lessons only. There is no vector index and no "vector search off" label.
+- **Containment.** See the current-state note in §5.7: platform-limit admission, `state-read`, a
+  process-tree walk instead of cgroups, and Claude Code unconfined by default (T16.0).
+- **Exit codes.** 0, 3, 4 and 64 work, with 2 for a reserved command word and 1 for infrastructure or configuration failure. 5 and 6 do not exist. `--agent-program` without `--reviewer-arg` runs no checks or review and can exit 0.
+- **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`, several
+  candidates, the TUI and console.
+
+*Decisions made while building.* Light work (F37) is a first-pass review on a registered T0 local model,
+advisory except for blocking findings. An observed agent (Codex) is checked against its write set after
+it finishes, before the delivery gate. The personal policy is a validated `policy.json` in the state
+directory, snapshotted and recorded per run; the two person-gate keys accept only `true`. Still
+reduced: Claude Code everywhere until T16.0, and checks and local models on Windows.
+
+*Two meanings of "Unknown".* The M1 exit criterion "Unknown is never retried" is about the execution
+state `Unknown{stage}` (§5.1): an attempt or effect whose outcome is not known is never run again
+automatically. The "Unknown" row of §5.10's signal table is a quota-signal class, an unsorted error from
+an agent call, for which one bounded retry is allowed. The two do not conflict.
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|

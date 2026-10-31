@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Status | v1.1 draft (team-intelligence requirements added) · M0/M1: under repair after an audit (2026-10-31) |
+| Status | v1.1 draft (team-intelligence requirements added) · M0/M1: partly done after an audit (2026-10-31); see [architecture §17](architecture.md#17-milestones) |
 | Date | 2026-10-30 |
 | Sources | [`user-flows.md`](user-flows.md) v0.2 (what users do) · [`architecture.md`](architecture.md) v0.6 (how it works) · [`research/ruflo-control.md`](research/ruflo-control.md) |
-| Task breakdown | [`tasks/M0.md`](tasks/M0.md) (under repair after the 2026-10-31 audit; open items marked ◐) · [`tasks/M1.md`](tasks/M1.md) (under repair after the audit; user flows partly done) |
+| Task breakdown | [`tasks/M0.md`](tasks/M0.md) (partly done; open items marked ◐) · [`tasks/M1.md`](tasks/M1.md) (partly done; open items marked ◐; user flows partly done) |
 
 ## 1. Problem
 
