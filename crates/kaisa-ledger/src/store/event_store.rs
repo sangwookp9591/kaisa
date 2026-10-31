@@ -64,6 +64,50 @@ impl EventStore {
         Ok(Self { connection })
     }
 
+    /// Opens an existing ledger for reading only, leaving the state directory's file set and
+    /// the database bytes unchanged. A missing file is an error rather than a new empty ledger.
+    ///
+    /// - With no `-wal` sidecar next to the file no writer is live and everything is in the main
+    ///   file, so it is opened `immutable=1`: SQLite then creates no `-wal` or `-shm`, and the
+    ///   directory may be read-only.
+    /// - With a `-wal` sidecar a writer may be live and its newest commits are only in that
+    ///   file, so an immutable open would show a stale view. A plain read-only open is used; it
+    ///   creates nothing new. If that fails (for example a read-only directory with no `-shm`),
+    ///   the open falls back to `immutable=1`, which then shows the main file without the
+    ///   commits still waiting in the WAL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the file does not exist or cannot be opened.
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let flags: rusqlite::OpenFlags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push("-wal");
+        let live_writer_may_exist: bool = Path::new(&sidecar).exists();
+        if live_writer_may_exist {
+            if let Ok(connection) = Connection::open_with_flags(path, flags)
+                && connection
+                    .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .is_ok()
+            {
+                return Ok(Self { connection });
+            }
+        } else if !path.exists() {
+            // Report a missing file as the plain open does, instead of a URI error.
+            return Ok(Self {
+                connection: Connection::open_with_flags(path, flags)?,
+            });
+        }
+        let connection: Connection = Connection::open_with_flags(
+            immutable_uri(path),
+            flags | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        Ok(Self { connection })
+    }
+
     /// Records `event` at the next sequence, linked to the previous event's hash. Assigning the
     /// sequence, computing the hash and inserting the row happen in one transaction.
     ///
@@ -172,4 +216,25 @@ pub(super) fn append_in(
         ],
     )?;
     Ok(ChainedEvent { recorded, hash })
+}
+
+/// The SQLite URI that opens `path` with `immutable=1`: unreserved characters and `/` stay,
+/// everything else is percent-encoded, and a Windows drive path gets its leading `/`.
+fn immutable_uri(path: &Path) -> String {
+    let text: String = path.to_string_lossy().replace('\\', "/");
+    let text: String = if text.as_bytes().get(1) == Some(&b':') {
+        format!("/{text}")
+    } else {
+        text
+    };
+    let mut uri: String = String::from("file:");
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }
