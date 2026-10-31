@@ -32,7 +32,13 @@ pub enum ExecSandbox {
     /// A Landlock ruleset with its UDP filter (Linux).
     #[cfg(target_os = "linux")]
     Landlock(kaisa_sys::LandlockRuleset),
-    /// No OS sandbox; the run must be labelled reduced (Windows until T15.5).
+    /// The attempt's AppContainer (Windows).
+    #[cfg(windows)]
+    AppContainer(kaisa_sys::AppContainerProfile),
+    /// Isolation could not be applied; exec must fail closed.
+    #[cfg(windows)]
+    Unavailable(String),
+    /// No OS sandbox; the run must be labelled reduced.
     Unconfined,
 }
 
@@ -95,6 +101,15 @@ impl FileBroker {
             ExecSandbox::Seatbelt(policy) => Confinement::Seatbelt(policy),
             #[cfg(target_os = "linux")]
             ExecSandbox::Landlock(ruleset) => Confinement::Landlock(ruleset),
+            #[cfg(windows)]
+            ExecSandbox::AppContainer(profile) => Confinement::AppContainer(profile),
+            #[cfg(windows)]
+            ExecSandbox::Unavailable(reason) => return ToolOutcome::Refused(reason.clone()),
+            #[cfg(windows)]
+            ExecSandbox::Unconfined => {
+                return ToolOutcome::Refused("exec requires the attempt's AppContainer".to_owned());
+            }
+            #[cfg(not(windows))]
             ExecSandbox::Unconfined => Confinement::Unconfined,
         };
         match run_captured(&spec, &confinement, &[], EXEC_DEADLINE, EXEC_OUTPUT_CAP) {
@@ -103,26 +118,28 @@ impl FileBroker {
         }
     }
 
-    /// The on-disk path for `relative`, refused if it leaves the worktree through a symbolic
-    /// link. `existing_ancestor_only` checks the nearest existing ancestor (for new files).
+    /// Resolves each existing component, including directory aliases. Missing suffixes are
+    /// appended to the canonical ancestor; dangling links are refused rather than created.
     fn resolve(&self, relative: &RepoPath) -> Result<PathBuf, String> {
-        let target: PathBuf = self.root.join(relative.as_str());
-        let mut probe: &Path = &target;
-        while !probe.exists() {
-            probe = probe
-                .parent()
-                .ok_or_else(|| format!("{relative} has no existing parent"))?;
+        let mut resolved = self.root.clone();
+        for component in Path::new(relative.as_str()).components() {
+            resolved.push(component);
+            match std::fs::symlink_metadata(&resolved) {
+                Ok(_) => {
+                    resolved = resolved.canonicalize().map_err(|error| {
+                        format!("{relative} cannot be resolved through a symbolic link: {error}")
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("{relative} cannot be resolved: {error}")),
+            }
+            if !resolved.starts_with(&self.root) {
+                return Err(format!(
+                    "{relative} leads outside the repository through a symbolic link"
+                ));
+            }
         }
-        let resolved: PathBuf = probe
-            .canonicalize()
-            .map_err(|error| format!("{relative} cannot be resolved: {error}"))?;
-        if resolved.starts_with(&self.root) {
-            Ok(target)
-        } else {
-            Err(format!(
-                "{relative} leads outside the repository through a symbolic link"
-            ))
-        }
+        Ok(resolved)
     }
 
     fn read(&self, arguments: &Value) -> ToolOutcome {
@@ -154,12 +171,6 @@ impl FileBroker {
             Ok(path) => path,
             Err(reason) => return ToolOutcome::Refused(reason),
         };
-        if !self.write_set.permits(&path) {
-            return ToolOutcome::Refused(format!(
-                "{path} is outside your write set. If the change really needs it, ask your \
-                 coordinator to widen the write set; do not work around this."
-            ));
-        }
         let Some(content) = arguments.get("content").and_then(Value::as_str) else {
             return ToolOutcome::Refused("fs_write needs a string `content`".to_owned());
         };
@@ -167,10 +178,35 @@ impl FileBroker {
             Ok(file) => file,
             Err(reason) => return ToolOutcome::Refused(reason),
         };
+        let actual = match file.strip_prefix(&self.root).ok().and_then(|relative| {
+            relative
+                .to_str()
+                .and_then(|text| RepoPath::try_new(text).ok())
+        }) {
+            Some(actual) => actual,
+            None => return ToolOutcome::Refused(format!("{path} is not a repository path")),
+        };
+        if !self.write_set.permits(&actual) {
+            return ToolOutcome::Refused(format!(
+                "{path} is outside your write set. If the change really needs it, ask your \
+                 coordinator to widen the write set; do not work around this."
+            ));
+        }
         if let Some(parent) = file.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
             return ToolOutcome::Refused(format!("{path} cannot be written: {error}"));
+        }
+        // Recheck after creating parents, immediately before opening the actual target.
+        // This reduces the race window; directory-handle-relative I/O would be needed to
+        // eliminate concurrent ancestor replacement entirely.
+        if self.resolve(&path).as_ref() != Ok(&file) {
+            return ToolOutcome::Refused(format!("{path} changed while it was being resolved"));
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&file)
+            && metadata.file_type().is_symlink()
+        {
+            return ToolOutcome::Refused(format!("{path} became a symbolic link"));
         }
         match std::fs::write(&file, content) {
             Ok(()) => ToolOutcome::Done(format!(
@@ -314,6 +350,130 @@ mod tests {
         assert!(
             matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("symbolic link")),
             "a link planted in the worktree must not open the rest of the disk, got {outcome:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn auth_alias(worktree: &ScratchWorktree, target: &str) {
+        std::os::unix::fs::symlink(target, worktree.root.join("src/auth/link"))
+            .expect("the attempt can plant an alias");
+    }
+
+    #[cfg(unix)]
+    fn write_through_auth_alias(broker: &mut FileBroker, suffix: &str) -> ToolOutcome {
+        broker.call(
+            "fs_write",
+            &json!({
+                "path": format!("src/auth/link{suffix}"), "content": "changed"
+            }),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_write_set_to_an_unowned_directory_refuses_the_write() {
+        let worktree = ScratchWorktree::new("alias-unowned");
+        auth_alias(&worktree, "../billing");
+        let mut broker = a_broker_owning_auth(&worktree);
+
+        let outcome = write_through_auth_alias(&mut broker, "/new/invoice.rs");
+
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("outside your write set")),
+            "the canonical billing target is unowned even though the alias is owned: {outcome:?}"
+        );
+        assert!(
+            !worktree.root.join("src/billing/new").exists(),
+            "refusing an alias must happen before creating unowned parent directories"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_inside_the_write_set_refuses_the_write() {
+        let worktree = ScratchWorktree::new("alias-dangling");
+        auth_alias(&worktree, "missing.rs");
+        let mut broker = a_broker_owning_auth(&worktree);
+
+        let outcome = write_through_auth_alias(&mut broker, "");
+
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("symbolic link")),
+            "a dangling link must be refused even when its missing target would be owned: {outcome:?}"
+        );
+        assert!(
+            !worktree.root.join("src/auth/missing.rs").exists(),
+            "a dangling link must never create its missing target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_an_owned_directory_writes_and_reads_the_actual_target() {
+        let worktree = ScratchWorktree::new("alias-owned");
+        std::fs::create_dir(worktree.root.join("src/auth/owned")).expect("owned directory");
+        auth_alias(&worktree, "owned");
+        let mut broker = a_broker_owning_auth(&worktree);
+
+        let written = write_through_auth_alias(&mut broker, "/new/session.rs");
+        let read = broker.call("fs_read", &json!({"path": "src/auth/link/new/session.rs"}));
+
+        assert!(
+            matches!(written, ToolOutcome::Done(_)),
+            "owned aliases remain writable: {written:?}"
+        );
+        assert!(
+            matches!(&read, ToolOutcome::Done(content) if content == "changed"),
+            "reads follow the same canonical target: {read:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_exec_runs_inside_the_sandbox() {
+        let worktree = ScratchWorktree::new("exec");
+        let profile = kaisa_sys::AppContainerProfile::ensure(&format!(
+            "kaisa.broker.exec.{}",
+            std::process::id()
+        ))
+        .expect("an attempt profile can be created");
+        profile
+            .grant(&worktree.root, kaisa_sys::ContainerAccess::ReadExecute)
+            .expect("worktree is readable");
+        let identity =
+            kaisa_sys::AppContainerProfile::from_sid_string(&profile.sid_string().expect("SID"))
+                .expect("broker opens the attempt identity");
+        let mut broker =
+            a_broker_owning_auth(&worktree).with_exec(super::ExecSandbox::AppContainer(identity));
+        let command = json!({"argv": [r"C:\Windows\System32\cmd.exe", "/d", "/c",
+            format!("echo broker-contained & echo changed > \"{}\"", worktree.root.join("src/billing/invoice.rs").display())]});
+
+        let outcome = broker.call("exec", &command);
+        let _ = profile.revoke(&worktree.root);
+        let _ = profile.delete();
+
+        assert!(
+            matches!(&outcome, ToolOutcome::Done(output) if output.contains("broker-contained")),
+            "the contained command must actually run: {outcome:?}"
+        );
+        assert!(
+            !worktree.root.join("src/billing/invoice.rs").exists(),
+            "the broker command cannot write outside the attempt's grants"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unconfined_windows_exec_is_refused() {
+        let worktree = ScratchWorktree::new("exec-unconfined");
+        let mut broker = a_broker_owning_auth(&worktree).with_exec(super::ExecSandbox::Unconfined);
+        let outcome = broker.call(
+            "exec",
+            &json!({"argv": ["cmd.exe", "/c", "echo unconfined"]}),
+        );
+        assert!(
+            matches!(&outcome, ToolOutcome::Refused(reason) if reason.contains("AppContainer")),
+            "Windows exec must fail closed without isolation: {outcome:?}"
         );
     }
 

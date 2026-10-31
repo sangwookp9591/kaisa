@@ -38,6 +38,7 @@ pub struct BrokerEndpoint {
     config: BridgeConfig,
     token: AttemptToken,
     base: String,
+    container_sid: Option<String>,
 }
 
 impl BrokerEndpoint {
@@ -69,6 +70,7 @@ impl BrokerEndpoint {
             config: BridgeConfig::load(attempt_directory)?,
             token: AttemptToken::load(attempt_directory)?,
             base: base.clone(),
+            container_sid: sid,
         };
         std::fs::write(attempt_directory.join(BROKER_ENDPOINT_FILE), base)?;
         Ok(endpoint)
@@ -122,7 +124,7 @@ impl BrokerEndpoint {
             );
             return Ok(());
         }
-        attempt_server(&self.config)?
+        attempt_server(&self.config, self.container_sid.as_deref())?
             .serve(reader, &mut writer)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
     }
