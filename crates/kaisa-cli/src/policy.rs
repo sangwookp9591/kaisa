@@ -172,12 +172,31 @@ fn run_in_state(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> io::Result<u8> {
+    // Damaged or no-longer-admitted policy files are the person's to repair: say what is wrong
+    // here, where the file is, and how, rather than leaving the binary to exit silently.
+    let loaded = match args {
+        [command, ..] if command == "show" || command == "set" => match load(state) {
+            Ok(policy) => Some(policy),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                writeln!(
+                    err,
+                    "kaisa: {}: {error}\nrepair: edit that file so the named rule is true (or \
+                     delete it to return to the defaults), then run the command again",
+                    state.join(POLICY_FILE).display()
+                )?;
+                return Ok(crate::EXIT_FAILURE);
+            }
+            Err(error) => return Err(error),
+        },
+        _ => None,
+    };
     match args {
         [command] if command == "show" => {
-            out.write_all(load(state)?.canonical_text().as_bytes())?;
+            let policy = loaded.unwrap_or_else(Policy::personal_default);
+            out.write_all(policy.canonical_text().as_bytes())?;
         }
         [command, key, value] if command == "set" => {
-            let mut policy = load(state)?;
+            let mut policy = loaded.unwrap_or_else(Policy::personal_default);
             if let Err(problem) = change(&mut policy, key, value) {
                 writeln!(err, "kaisa policy set: {problem}\n{USAGE}")?;
                 return Ok(crate::EXIT_USAGE);
@@ -425,6 +444,40 @@ mod tests {
                 error.to_string().contains(key),
                 "the error names {key}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn the_policy_command_explains_an_older_file_that_switched_the_gate_off() {
+        let state = PersonalState::new();
+        for key in [
+            "require_person_when_tests_weaken",
+            "require_person_when_check_definitions_change",
+        ] {
+            let mut policy = serde_json::json!({
+                "revision_limit": 2, "allowed_egress_hosts": [], "confine_agents": true,
+                "min_grade_for_security_review": "T3",
+                "require_person_when_check_definitions_change": true,
+                "require_person_when_tests_weaken": true,
+            });
+            policy[key] = serde_json::json!(false);
+            std::fs::write(state.0.join(POLICY_FILE), policy.to_string())
+                .expect("the scenario installs an older policy");
+            for words in [vec!["show"], vec!["set", "revision_limit", "3"]] {
+                let (status, out, diagnostic) = state.command(&words);
+                assert_eq!(
+                    status,
+                    crate::EXIT_FAILURE,
+                    "{words:?} refuses the old file"
+                );
+                assert!(out.is_empty(), "nothing is printed as a policy: {out:?}");
+                assert!(
+                    diagnostic.contains(key)
+                        && diagnostic.contains(POLICY_FILE)
+                        && diagnostic.contains("repair:"),
+                    "{words:?} names {key}, the file and the repair: {diagnostic}"
+                );
+            }
         }
     }
 

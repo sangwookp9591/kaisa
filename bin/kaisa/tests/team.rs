@@ -812,6 +812,45 @@ fn editing_only_the_ci_pipeline_exits_three_naming_the_file_despite_review_appro
 }
 
 #[test]
+fn editing_only_a_ci_pipeline_with_a_non_ascii_name_exits_three_naming_the_file() {
+    // Git quotes this path as ".github/workflows/\352\262\200..." unless asked for NUL output.
+    const PIPELINE: &str = ".github/workflows/검사.yml";
+    let (outcome, _, learned) = a_change_to(
+        "ci-unicode-edit",
+        PIPELINE,
+        ".github",
+        "steps:\n  - run: cargo test\n",
+        "steps:\n  - run: cargo test || true\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(
+        exit,
+        kaisa_cli::EXIT_WAITING_FOR_HUMAN,
+        "a non-ASCII pipeline name must not escape the CI gate: {text}"
+    );
+    assert!(text.contains(PIPELINE), "the stop names the file: {text}");
+    assert!(!learned, "an unconfirmed pipeline edit teaches nothing");
+}
+
+#[test]
+fn swallowing_failures_in_a_multiline_makefile_recipe_exits_three_as_a_weakened_test() {
+    let (outcome, evidence, learned) = a_change_to(
+        "makefile-or-true",
+        "Makefile",
+        "Makefile",
+        "test:\n\tjest\n",
+        "test:\n\tjest || true\n",
+    );
+    let (text, exit) = kaisa_cli::report_delivery(&outcome.delivery);
+    assert_eq!(exit, kaisa_cli::EXIT_WAITING_FOR_HUMAN, "{text}");
+    assert!(
+        text.contains("weakened_tests") && text.contains("|| true"),
+        "the stop reports the specific signal, not only a changed Makefile: {text}"
+    );
+    assert!(evidence.contains("|| true") && !learned);
+}
+
+#[test]
 fn adding_pass_with_no_tests_to_the_test_script_exits_three_as_a_weakened_test() {
     let (outcome, evidence, learned) = a_change_to(
         "pass-with-no-tests",

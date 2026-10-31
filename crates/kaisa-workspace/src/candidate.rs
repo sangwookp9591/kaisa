@@ -94,22 +94,33 @@ pub fn changed_check_definitions(
     base: &str,
     candidate: &Candidate,
 ) -> Result<Vec<String>, GitError> {
-    let names: String = git_text(
+    // NUL-delimited: without -z Git quotes non-ASCII and control-character paths
+    // (`".github/workflows/\352..."`), which would no longer match a directory name.
+    let names: Vec<u8> = run_git(
         repository,
         &[
             "diff",
             "--name-only",
             "--no-renames",
+            "-z",
             base,
             &candidate.commit,
             "--",
         ],
     )?;
-    Ok(names
-        .lines()
+    Ok(split_nul_paths(&names)
+        .into_iter()
         .filter(|path| is_check_definition(path))
-        .map(str::to_owned)
         .collect())
+}
+
+/// Splits Git's `-z` output into exact paths, in Git's order.
+fn split_nul_paths(output: &[u8]) -> Vec<String> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
 }
 
 /// Deterministic, conservative signals that a candidate weakened its tests.
@@ -185,18 +196,45 @@ const PASS_REGARDLESS: [&str; 6] = [
     "||true",
 ];
 
-/// Occurrences of `signal` in the entries of `script` that run tests. Entries are lines and,
-/// within a minified JSON object, quote-comma separated members, so an unrelated command that
-/// ends in `|| true` is not mistaken for a weakened test.
+/// Occurrences of `signal` in the commands of `script` that run tests. Entries are lines and,
+/// within a minified JSON object, quote-comma separated members. A line also counts when it is
+/// an indented recipe line under a test target or section (Makefile `test:`, justfile `test:`,
+/// tox `[testenv]` `commands`), so `test:\n\tjest || true` is recognised while an unrelated
+/// command that ends in `|| true` elsewhere is not mistaken for a weakened test.
 fn pass_regardless_count(script: &str, signal: &str) -> usize {
     let script = script.to_ascii_lowercase();
     let signal = signal.to_ascii_lowercase();
-    script
-        .lines()
-        .flat_map(|line| line.split("\","))
-        .filter(|entry| entry.contains("test") || entry.contains("mocha"))
-        .map(|entry| entry.matches(&signal).count())
-        .sum()
+    // `section` is the latest `[ini section]` or `target:` header; `commands` is true after a
+    // tox `commands =` key, whose continuation lines are indented.
+    let (mut section_tests, mut target_tests) = (false, false);
+    let mut total = 0;
+    for line in script.lines() {
+        let trimmed = line.trim();
+        let indented = line.starts_with(['\t', ' ']);
+        if !indented && !trimmed.is_empty() {
+            let names_tests = |text: &str| text.contains("test") || text.contains("mocha");
+            if trimmed.starts_with('[') {
+                // `[testenv]` is tox's default environment, which runs the tests; in
+                // `[testenv:lint]` only the part after the colon says what it runs.
+                let bare_testenv = trimmed == "[testenv]";
+                let named = trimmed.strip_prefix("[testenv:").unwrap_or(trimmed);
+                section_tests = bare_testenv || names_tests(named);
+                target_tests = false;
+            } else if trimmed.starts_with("commands") {
+                target_tests = section_tests;
+            } else {
+                // `test:` / `test-all: deps` (Makefile, justfile): the name before the colon.
+                let name = trimmed.split(':').next().unwrap_or_default();
+                target_tests = trimmed.contains(':') && names_tests(name);
+            }
+        }
+        for entry in line.split("\",") {
+            if target_tests || entry.contains("test") || entry.contains("mocha") {
+                total += entry.matches(&signal).count();
+            }
+        }
+    }
+    total
 }
 
 /// Reports each pass-regardless signal that `after` has more of than `before`, so that a
@@ -1024,6 +1062,82 @@ mod tests {
             assert!(
                 check_definitions_changed_by(path).is_empty(),
                 "{path} does not define the project's checks"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ci_file_whose_name_git_would_quote_is_still_a_check_definition() {
+        for path in [
+            ".github/workflows/검사.yml",
+            ".github/workflows/caf\u{e9}.yml",
+            ".github/workflows/tab\there.yml",
+            ".buildkite/\"quoted\".yml",
+        ] {
+            #[cfg(not(unix))]
+            if path.contains(['\t', '"']) {
+                continue;
+            }
+            assert_eq!(
+                check_definitions_changed_by(path),
+                vec![path.to_owned()],
+                "{path:?} is a CI definition under Git's default path quoting"
+            );
+        }
+    }
+
+    #[test]
+    fn nul_delimited_paths_keep_their_exact_bytes() {
+        assert_eq!(
+            super::split_nul_paths("a b.yml\0 lead\nnl.yml\0검사.yml\0".as_bytes()),
+            vec!["a b.yml", " lead\nnl.yml", "검사.yml"],
+            "no trimming, quoting or newline splitting"
+        );
+    }
+
+    #[test]
+    fn a_swallowed_failure_in_a_multiline_test_recipe_is_a_weakened_signal() {
+        for (path, before, after) in [
+            ("Makefile", "test:\n\tjest\n", "test:\n\tjest || true\n"),
+            ("justfile", "test:\n    jest\n", "test:\n    jest || true\n"),
+            (
+                "tox.ini",
+                "[testenv]\ncommands =\n    pytest\n",
+                "[testenv]\ncommands =\n    pytest || true\n",
+            ),
+            (
+                "Makefile",
+                "check: build\n\tcargo x\n",
+                "check: build\n\tcargo x\n.PHONY: all\ntest-unit:\n\tgo run ./... --exit-zero\n",
+            ),
+        ] {
+            let findings = weakening_for(path, before, Some(after));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.starts_with(&format!("{path}:"))),
+                "{path} recipe now swallows test failures: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_swallowed_failure_in_a_non_test_recipe_is_not_a_weakened_signal() {
+        for (path, before, after) in [
+            (
+                "Makefile",
+                "clean:\n\trm -rf dist\n",
+                "clean:\n\trm -rf dist || true\n",
+            ),
+            (
+                "tox.ini",
+                "[testenv:lint]\ncommands =\n    flake8\n",
+                "[testenv:lint]\ncommands =\n    flake8 || true\n",
+            ),
+        ] {
+            assert!(
+                weakening_for(path, before, Some(after)).is_empty(),
+                "{path}: only recipes that run tests can weaken them"
             );
         }
     }
