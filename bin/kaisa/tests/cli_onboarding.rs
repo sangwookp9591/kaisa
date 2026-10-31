@@ -457,8 +457,11 @@ fn a_goal_uses_the_configured_test_without_a_check_program_override() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text(&output).contains("verified:"),
-        "success must be a verified result"
+        text(&output)
+            .lines()
+            .any(|line| line.starts_with("verified")),
+        "success must be a verified result (on Windows the check is labelled reduced): {}",
+        text(&output)
     );
     if cfg!(windows) {
         project.configured_check("cmd", &["/c", "exit 1"]);
