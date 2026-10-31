@@ -19,7 +19,7 @@
 
 **A control plane for coding agents that hands you only what already passed your tests and an independent review.**
 
-[See it run](#see-it-run) · [Quick start](#quick-start) · [How a verified run works](#how-a-verified-run-works) · [Protection status](#protection-status) · [Docs](#documentation)
+[See it run](#see-it-run) · [Install](#install) · [First run](#first-run) · [Quick start](#quick-start) · [How a verified run works](#how-a-verified-run-works) · [Protection status](#protection-status) · [Docs](#documentation)
 
 </div>
 
@@ -80,6 +80,86 @@ the review may even approve it, and Kaisa still refuses to deliver: the candidat
 | ✅ | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
 | 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
 | 📊 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
+
+<a id="install"></a>
+
+## 📦 Install
+
+Kaisa has no packaged release yet: there is no Homebrew formula, winget package or signed binary
+(planned, FR-01). You build it from source with Cargo. It is one binary, `kaisa`; SQLite is compiled in.
+
+**You need**
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Rust toolchain | [rustup](https://rustup.rs), then Rust **1.99.1** (pinned in `rust-toolchain.toml`) | same | same |
+| C compiler (for the bundled SQLite and BLAKE3) | Xcode Command Line Tools: `xcode-select --install` | `build-essential` / `gcc` | Visual Studio Build Tools (C++ workload) |
+| git | 2.x | 2.x | Git for Windows |
+| An agent CLI, logged in | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`): the default developer and reviewer. Optional: [Codex CLI](https://github.com/openai/codex) (`codex`) for `--agent codex`, and an OpenAI-compatible local model server for the first-pass review | same | same |
+| Sandbox | Seatbelt, built in (macOS 14+) | Landlock: kernel 6.2+ confines every write, 6.7+ also TCP; older kernels run reduced and say so | AppContainer (Windows 11 / Server 2022) |
+
+**Install**
+
+```bash
+rustup toolchain install 1.99.1
+
+# from GitHub
+cargo +1.99.1 install --locked --git https://github.com/sangwookp9591/kaisa kaisa
+
+# or from a clone (rust-toolchain.toml selects 1.99.1 inside the checkout)
+git clone https://github.com/sangwookp9591/kaisa
+cd kaisa
+cargo install --locked --path bin/kaisa
+
+kaisa --version
+```
+
+`cargo install` puts `kaisa` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows), which rustup
+adds to your `PATH`. The `+1.99.1` matters for the GitHub install: outside the checkout Cargo uses your
+default toolchain, and an older one stops with a `rust-version` error.
+
+<a id="first-run"></a>
+
+### First run
+
+```bash
+claude                                  # once: log in to Claude Code (and `codex login` for Codex)
+cd ~/code/my-project                    # any git repository with at least one commit
+kaisa "fix the flaky date test"         # develop → check → review → verified, or it tells you why not
+kaisa watch                             # what ran, its state, tokens and cost
+git merge --ff-only kaisa/att_…         # bring a verified result in (the last output line says exactly how)
+```
+
+Kaisa finds the test command itself from the repository root: `cargo test --workspace` for
+`Cargo.toml`, the `test` script of `package.json` (npm, pnpm, yarn or bun, from the lockfile),
+`python -m pytest` when `pyproject.toml` mentions pytest, and `go test ./...` for `go.mod`. A goal in
+a repository where none is found is not delivered (exit `4`, "no trusted check produced evidence"):
+Kaisa never calls unchecked work verified.
+
+Kaisa keeps its state (ledger, attempt worktrees, policy, agents) outside your repository:
+
+| macOS | Linux | Windows |
+|---|---|---|
+| `~/Library/Application Support/Kaisa` | `$XDG_STATE_HOME/kaisa`, else `~/.local/state/kaisa` | `%LOCALAPPDATA%\Kaisa` |
+
+Set `KAISA_STATE_DIR` to use another directory. Results stay as `kaisa/att_…` branches in your
+repository until you merge or delete them.
+
+<details>
+<summary><b>Update and uninstall</b></summary>
+
+```bash
+# update: run the same install command again
+cargo +1.99.1 install --locked --git https://github.com/sangwookp9591/kaisa kaisa
+
+# uninstall
+cargo uninstall kaisa
+rm -rf ~/Library/Application\ Support/Kaisa      # macOS; ~/.local/state/kaisa on Linux, %LOCALAPPDATA%\Kaisa on Windows
+git branch --list 'kaisa/*'                      # in each repository: result branches you may still want
+```
+
+</details>
+
 
 <a id="quick-start"></a>
 
@@ -294,6 +374,7 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 
 ## 🗺️ Planned
 
+- Packaged, signed releases per OS (FR-01), so installing does not need a Rust toolchain.
 - `kaisa review` to approve a verified candidate and see exactly what approving will do.
 - Several candidates per goal (`--n 3`), provider failover (for example Claude to GPT when a quota runs
   out), budgets per run, user and team.
