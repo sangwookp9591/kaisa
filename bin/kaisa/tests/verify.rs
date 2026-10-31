@@ -101,6 +101,7 @@ fn trusted_checks_run_on_a_clean_checkout_not_the_agents_worktree() {
     let evidence: Vec<Evidence> = run_trusted_checks(
         &bench.repository(),
         &bench.base.join("state"),
+        &bench.base.join("state/attempts/att_developer"),
         "main",
         &candidate,
         &[the_projects_test_command()],
@@ -124,6 +125,7 @@ fn a_passing_check_is_recorded_against_the_candidate_tree() {
     let evidence: Vec<Evidence> = run_trusted_checks(
         &bench.repository(),
         &bench.base.join("state"),
+        &bench.base.join("state/attempts/att_developer"),
         "main",
         &candidate,
         &[the_projects_test_command()],
@@ -148,6 +150,7 @@ fn a_candidate_changed_after_review_needs_new_evidence() {
     let evidence: Vec<Evidence> = run_trusted_checks(
         &bench.repository(),
         &bench.base.join("state"),
+        &bench.base.join("state/attempts/att_developer"),
         "main",
         &reviewed,
         &[the_projects_test_command()],
@@ -169,5 +172,82 @@ fn a_candidate_changed_after_review_needs_new_evidence() {
     assert!(
         !evidence.iter().any(|piece| piece.applies_to(&changed)),
         "after any change the old evidence says nothing about the new content"
+    );
+}
+
+#[cfg(unix)]
+fn a_shell_check(script: &str) -> DetectedCommand {
+    let mut check = the_projects_test_command();
+    check.argv = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+    check
+}
+
+#[cfg(unix)]
+#[test]
+fn a_check_can_write_its_private_tmpdir_and_create_new_build_output() {
+    let bench = Workbench::new("private-temp");
+    let candidate = freeze_candidate(&bench.repository(), "HEAD").expect("frozen");
+    let check = a_shell_check(
+        "test -n \"$TMPDIR\" && test -z \"${TMPDIR##*/attempts/*}\" && \
+         test \"$TMPDIR\" = \"$TEMP\" && test \"$TMPDIR\" = \"$TMP\" && mkdir \"$TMPDIR/probe\" && echo ok > \"$TMPDIR/probe/result\" && \
+         mkdir -p target && echo built > target/output",
+    );
+    let evidence = run_trusted_checks(
+        &bench.repository(),
+        &bench.base.join("state"),
+        &bench.base.join("state/attempts/att_developer"),
+        "main",
+        &candidate,
+        &[check.clone(), check],
+    )
+    .expect("the check starts");
+    assert!(
+        evidence.iter().all(Evidence::passed),
+        "checks need a private writable TMPDIR and a writable disposable checkout: {evidence:?}"
+    );
+    assert!(
+        std::fs::read_dir(bench.base.join("state/attempts/att_developer"))
+            .expect("the attempt directory exists")
+            .next()
+            .is_none(),
+        "each check's temporary directory is reclaimed after its process ends"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_check_cannot_write_the_original_repository_or_other_private_state() {
+    let bench = Workbench::new("outside-write");
+    let state = bench.base.join("state");
+    let other_attempt = state.join("attempts/att_other");
+    std::fs::create_dir_all(&other_attempt).expect("private state exists");
+    let candidate = freeze_candidate(&bench.repository(), "HEAD").expect("frozen");
+    let checks: Vec<_> = [bench.repository(), state.clone(), other_attempt]
+        .iter()
+        .map(|outside| {
+            a_shell_check(&format!(
+                "echo forbidden > '{}'",
+                outside.join("forbidden").display()
+            ))
+        })
+        .collect();
+    let evidence = run_trusted_checks(
+        &bench.repository(),
+        &state,
+        &state.join("attempts/att_developer"),
+        "main",
+        &candidate,
+        &checks,
+    )
+    .expect("the checks start");
+    assert!(
+        evidence
+            .iter()
+            .all(|piece| piece.confined && !piece.passed()),
+        "every write outside this check's grants must be denied: {evidence:?}"
+    );
+    assert!(
+        !bench.repository().join("forbidden").exists(),
+        "the user's original repository must remain untouched"
     );
 }

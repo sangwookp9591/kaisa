@@ -1366,3 +1366,51 @@ fn a_claude_default_cannot_spawn_a_scripted_or_local_model_process() {
         );
     }
 }
+
+/// A headless Claude result can report success after every useful tool was denied.
+#[cfg(unix)]
+fn a_denied_claude_result_script() -> String {
+    let result = serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "permission_denials": [{"tool_name": "mcp__kaisa__fs_read"}]
+    });
+    format!("cat >/dev/null; printf '%s\\n' '{result}'")
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_denied_a_tool_explains_why_it_produced_no_successful_change() {
+    let bench = Workbench::new("permission-denied");
+    use std::os::unix::fs::PermissionsExt;
+
+    let agent = bench.base.join("denied-agent");
+    std::fs::write(
+        &agent,
+        format!("#!/bin/sh\n{}\n", a_denied_claude_result_script()),
+    )
+    .expect("the scripted agent is written");
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))
+        .expect("the scripted agent is executable");
+    let run = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .args([
+            "--agent-program",
+            &agent.to_string_lossy(),
+            "--reviewer-arg",
+            "unused-because-the-developer-made-no-change",
+            GOAL,
+        ])
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", bench.base.join("state"))
+        .output()
+        .expect("kaisa runs");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        !run.status.success()
+            && output.contains("에이전트가 도구 권한을 거부당했다: mcp__kaisa__fs_read"),
+        "the CLI must surface the denied tool even when Claude exits zero: {output}"
+    );
+}

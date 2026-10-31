@@ -112,6 +112,8 @@ pub struct GoalOutcome {
     pub exit: Option<ProcessExit>,
     /// True if the saved transcript lost output at the capture limit.
     pub truncated: bool,
+    /// Tools the provider reported as denied, even if the process exited successfully.
+    pub permission_denials: Vec<String>,
     /// The branch holding the preserved work.
     pub branch: String,
     /// The WIP commit with the work, if there was any to preserve.
@@ -170,8 +172,16 @@ impl GoalOutcome {
         } else {
             ""
         };
+        let denied = if self.permission_denials.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; 에이전트가 도구 권한을 거부당했다: {}",
+                self.permission_denials.join(", ")
+            )
+        };
         format!(
-            "{} {ending}; {work}; context pack {}{reduced}{observed}",
+            "{} {ending}; {work}; context pack {}{reduced}{observed}{denied}",
             self.attempt,
             short(&self.context_pack)
         )
@@ -647,6 +657,9 @@ fn run_goal_inner(
         attempt,
         exit: finished.exit,
         truncated: finished.truncated,
+        permission_denials: kaisa_agents::claude_permission_denials(&String::from_utf8_lossy(
+            &finished.output,
+        )),
         branch,
         commit,
         kept_back,
@@ -740,7 +753,30 @@ mod tests {
             missing,
             observed: false,
             truncated: false,
+            permission_denials: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_successful_agent_with_permission_denials_names_the_tools_in_its_summary() {
+        let mut outcome = an_attempt_missing(Vec::new());
+        outcome.exit = Some(kaisa_sys::ProcessExit::Code(0));
+        let transcript = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "permission_denials": [
+                {"tool_name": "mcp__kaisa__fs_read"},
+                {"tool_name": "mcp__kaisa__fs_read"},
+                {"tool_name": "mcp__kaisa__exec"}
+            ]
+        })
+        .to_string();
+        outcome.permission_denials = kaisa_agents::claude_permission_denials(&transcript);
+        assert!(
+            outcome.summary().contains(
+                "에이전트가 도구 권한을 거부당했다: mcp__kaisa__fs_read, mcp__kaisa__exec"
+            ),
+            "a successful result can still mean denied tools, and must explain the failure"
+        );
     }
 
     #[test]
