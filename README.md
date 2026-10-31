@@ -1,43 +1,94 @@
-# Kaisa
+<div align="center">
 
-**Run coding agents safely. You only see work that has already passed verification.**
+<img src="docs/assets/kaisa-banner.svg" alt="Kaisa: run coding agents safely and see only work that already passed verification" width="100%">
 
-Kaisa is a lightweight control plane for coding agents such as Claude Code and Codex. It gives each
-attempt its own copy of your repository and keeps the agent inside an OS sandbox. It checks the result
-against your tests and an independent reviewer, sends it back for revision when the review finds a
-blocking problem, and asks you only when a human decision is actually needed.
+<p>
+  <a href="https://github.com/sangwookp9591/kaisa/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sangwookp9591/kaisa/ci.yml?branch=main&style=for-the-badge&label=CI%20%C2%B7%203%20OS&labelColor=0D1626&color=2DD4BF" alt="CI on macOS, Linux and Windows"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-8B7CF6?style=for-the-badge&labelColor=0D1626" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/Rust-1.99%20%C2%B7%202024-F5B841?style=for-the-badge&logo=rust&logoColor=white&labelColor=0D1626" alt="Rust 1.99, edition 2024">
+  <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-first--class-5EEAD4?style=for-the-badge&labelColor=0D1626" alt="macOS, Linux and Windows">
+  <img src="https://img.shields.io/badge/status-M0%20%2F%20M1%20partly%20done-F5B841?style=for-the-badge&labelColor=0D1626" alt="Status: M0 and M1 partly done">
+</p>
 
-> **Status: M0 and M1 are partly done.** A goal runs end to end: on macOS, real Claude Code and Codex
-> CLIs have completed verified runs. Several designed parts are built and tested but not yet used by a
-> run, and some are not built; they are marked ◐ in [`docs/tasks/`](docs/tasks/) and listed under
-> [Current differences from the design](#current-differences-from-the-design). CI runs on macOS,
-> Linux and Windows on pushes to `main` and on pull requests (superseded pull-request runs may be cancelled). Real-agent runs have been done on macOS only, and before the
-> later fixes for state isolation, child environments, descendant cleanup and attempt locks; those
-> fixes are tested with scripted agents, and the real-agent runs have not been repeated since. Some
-> protections are *reduced* on some platforms; the [protection status](#protection-status) table says
-> exactly which. Performance and security properties are published only after they have been measured
-> and tested on every supported platform.
+<p>
+  <img src="https://img.shields.io/badge/Claude%20Code-developer%20%26%20reviewer-D6E3EC?style=flat-square&labelColor=1E2E48" alt="Claude Code">
+  <img src="https://img.shields.io/badge/Codex-observed%20developer-D6E3EC?style=flat-square&labelColor=1E2E48" alt="Codex">
+  <img src="https://img.shields.io/badge/local%20models-T0%20first%20pass-D6E3EC?style=flat-square&labelColor=1E2E48" alt="Local models">
+  <img src="https://img.shields.io/badge/one%20binary-no%20Node%20%C2%B7%20Python%20%C2%B7%20Electron-D6E3EC?style=flat-square&labelColor=1E2E48" alt="One binary">
+</p>
+
+**A control plane for coding agents that hands you only what already passed your tests and an independent review.**
+
+[See it run](#see-it-run) · [Quick start](#quick-start) · [How a verified run works](#how-a-verified-run-works) · [Protection status](#protection-status) · [Docs](#documentation)
+
+</div>
 
 ---
 
-## Why Kaisa
+Kaisa runs coding agents such as Claude Code and Codex for you. Each attempt gets its own copy of
+your repository and runs inside an OS sandbox. The result is checked against your tests and by an
+independent reviewer, sent back for revision when the review finds a blocking problem, and you are
+asked only when a human decision is actually needed.
 
-| Without Kaisa | With Kaisa |
-|---|---|
-| You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
-| Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
-| You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
-| A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
-| Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
+> [!NOTE]
+> **Status: M0 and M1 are partly done.** A goal runs end to end, and on macOS real Claude Code and
+> Codex CLIs have completed verified runs, also after the latest fixes for state isolation, child
+> environments, descendant cleanup and attempt locks. Several designed parts are built and tested but
+> not yet used by a run, and some are not built; they are marked ◐ in [`docs/tasks/`](docs/tasks/) and
+> listed under [Current differences from the design](#current-differences-from-the-design). CI runs on
+> macOS, Linux and Windows on pushes to `main` and on pull requests (superseded pull-request runs may be
+> cancelled). Real-agent runs have been done on macOS only. Some protections are *reduced* on some
+> platforms; the [protection status](#protection-status) table says exactly which. Performance and
+> security properties are published only after they have been measured and tested on every supported
+> platform.
 
-## What works today
+<a id="see-it-run"></a>
+
+## 🎬 See it run
+
+These are real runs, recorded on macOS with a logged-in Claude Code CLI against a small Rust
+repository whose `format_date` prints the month one too high.
+
+**A goal, verified.** The developer fixes the bug in its own worktree, the trusted `cargo test` runs on
+a clean checkout, a second Claude Code reviews the frozen candidate, and only then is the result
+offered as a branch.
+
+<p align="center"><img src="docs/assets/screens/verified-run.png" alt="A real kaisa run: developer and reviewer attempts, then 'verified: trusted checks passed and the review approved' and the branch to merge" width="100%"></p>
+
+**A goal that weakens the tests stops for you.** Asked to delete the failing test, the agent does it,
+the review may even approve it, and Kaisa still refuses to deliver: the candidate has fewer tests.
+
+<p align="center"><img src="docs/assets/screens/weakened-tests.png" alt="A real kaisa run that ends 'waiting for you: weakened_tests: src/lib.rs: tests and assertions decreased (1 -> 0)'" width="100%"></p>
+
+<table>
+  <tr>
+    <td width="50%"><b><code>kaisa watch</code></b>: every attempt with its state, cleanup, tokens and cost<br><br><img src="docs/assets/screens/watch.png" alt="kaisa watch listing the developer and reviewer attempts, both exited and reclaimed, with tokens and cost"></td>
+    <td width="50%"><b>No accidental paid runs</b>: planned commands and unknown options never start an agent<br><br><img src="docs/assets/screens/cli-guard.png" alt="kaisa refusing 'review the parser', '--n 3' and 'gc --dry-run' with exit codes 2 and 64 and a hint to quote the goal"></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Animated versions: <a href="docs/assets/screens/verified-run.gif">verified run</a> · <a href="docs/assets/screens/weakened-tests.gif">weakened tests</a> · <a href="docs/assets/screens/cli-guard.gif">CLI guard</a>. Costs shown are what the Claude Code CLI reported for these runs.</sub></p>
+
+---
+
+## ✨ Why Kaisa
+
+| | Without Kaisa | With Kaisa |
+|---|---|---|
+| 🧹 | You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
+| 🛡️ | Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
+| ✅ | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
+| 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
+| 📊 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
+
+<a id="quick-start"></a>
+
+## 🚀 Quick start
 
 Checked on macOS with logged-in Claude Code and Codex CLIs: a verified fix, a second session that
 recalls the first one's lesson, Codex developing with Claude reviewing, a change to what the checks
-run (stops for a person) and `--confine-claude`. A goal that weakens tests also stops for a person;
-that is tested with scripted agents, and the one real-agent run of it, made before the fix, delivered
-the change. A delivered result stays on its `kaisa/att_…` branch; the last line of the output says
-how to bring it in.
+run (stops for a person), a goal that deletes a test (stops for a person) and `--confine-claude`. A
+delivered result stays on its `kaisa/att_…` branch; the last line of the output says how to bring it in.
 
 ```bash
 kaisa "fix the flaky date test"           # run a goal, verified (Claude Code by default)
@@ -53,12 +104,12 @@ A goal ends with one of these results, which scripts and CI can rely on:
 
 | Exit code | Meaning |
 |---|---|
-| `0` | verified: the candidate passed fresh checks and the review (verified path; see the note below the table) |
-| `1` | infrastructure or configuration failure, such as an unlocatable state directory or an old policy that disables a person gate |
-| `3` | waiting for you: a person must decide, and Kaisa says why |
-| `4` | not delivered: no fresh passing evidence, revisions ran out, or the agent could not be started |
-| `2` | the word is a command that is not implemented yet |
-| `64` | usage error, including an unknown option |
+| 🟢 `0` | verified: the candidate passed fresh checks and the review (verified path; see the note below the table) |
+| ⚪ `1` | infrastructure or configuration failure, such as an unlocatable state directory or an old policy that disables a person gate |
+| 🟡 `3` | waiting for you: a person must decide, and Kaisa says why |
+| 🔴 `4` | not delivered: no fresh passing evidence, revisions ran out, or the agent could not be started |
+| ⚪ `2` | the word is a command that is not implemented yet |
+| ⚪ `64` | usage error, including an unknown option |
 
 The scripted `--agent-program` path without `--reviewer-arg` runs no checks and no review and can still exit `0`; it is for testing, not a verified result.
 
@@ -69,7 +120,33 @@ that must contain `--word` can follow `--`: `kaisa -- fix the --verbose bug`. Ru
 subdirectory and it uses the enclosing git repository and says so in one line:
 `using the git repository at <root>`. `kaisa watch` only reads the ledger: it does not append events, migrate the database or rebuild projections. A closed ledger is read without any file change; reading a live WAL database can create or update SQLite shared-memory sidecar files (`-shm`).
 
-### How a verified run works
+<a id="how-a-verified-run-works"></a>
+
+## 🔁 How a verified run works
+
+```mermaid
+flowchart LR
+    goal(["kaisa &quot;goal&quot;"]) --> recall["Recall<br/>profile + lessons"]
+    recall --> develop["Develop<br/>own worktree · sandbox · broker"]
+    develop --> freeze["Freeze<br/>candidate digest"]
+    freeze --> check["Check<br/>your tests, no agent"]
+    check --> review["Review<br/>independent verdict"]
+    review --> gate{"Gate"}
+    gate -- "fresh evidence + approval" --> ok(["verified · exit 0"])
+    gate -- "blocking finding" --> develop
+    gate -- "weakened tests · changed checks" --> person(["waiting for you · exit 3"])
+    gate -- "no valid evidence · revisions spent" --> no(["not delivered · exit 4"])
+    ok --> learn["Learn<br/>lesson for this repo"]
+    classDef good fill:#0F2E2B,stroke:#2DD4BF,color:#E6F1F5
+    classDef wait fill:#33270C,stroke:#F5B841,color:#E6F1F5
+    classDef bad fill:#3A1519,stroke:#F0616D,color:#E6F1F5
+    classDef step fill:#13213A,stroke:#8B7CF6,color:#E6F1F5
+    class ok,learn good
+    class person wait
+    class no bad
+    class recall,develop,freeze,check,review,gate,goal step
+```
+
 
 1. **Recall.** The context pack carries the project profile and up to five relevant lessons from
    earlier verified runs *of this repository*; lessons never cross repositories. A second session
@@ -115,7 +192,9 @@ left by an older Kaisa has no lock; it is kept, with the branch, the worktree an
 next `kaisa` start then records that cleanup and stops reporting the attempt. An agent program that cannot be started ends the goal with exit `4`, and
 its attempt is reclaimed. A direct process-creation failure is recorded as `exited:failed-to-start` and reclaimed. On macOS a sandbox wrapper that starts but cannot exec the agent can instead report its own nonzero exit (for example `exited:71`); the goal still exits `4`.
 
-### Protection status
+<a id="protection-status"></a>
+
+## 🛡️ Protection status
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
@@ -133,6 +212,9 @@ you accept it with `--accept-reduced` and `--accept-until`. `kaisa --confine-cla
 Claude Code run; the steps to verify it on a machine with a logged-in CLI are in
 [`docs/research/brokered-mode-spike.md`](docs/research/brokered-mode-spike.md#closing-a-row-t35).
 
+<details>
+<summary><b>What the sandbox hides, per OS</b></summary>
+
 What the sandbox hides, as built:
 
 - **macOS.** A confined process cannot read Kaisa's state directory (the ledger, other attempts'
@@ -145,6 +227,11 @@ What the sandbox hides, as built:
   labelled `state-read`.
 - **Windows.** AppContainer grants the agent's own worktree, attempt directory and scratch, plus the directories of the programs it may run through the shared programs capability (not revoked per attempt). The
   Windows code is compile-checked locally and tested by CI on Windows; it was not exercised by hand.
+
+</details>
+
+<details>
+<summary><b>Child environment: what agents and checks inherit</b></summary>
 
 **Child environment.** Agents, trusted checks and the local-model bridge start with an allow-listed
 environment, not a copy of your shell's. It carries locale, `PATH` and home locations, the usual
@@ -159,6 +246,11 @@ unset. A Codex setup with a custom provider names its extra variables in
 `KAISA_PASS_ENV=OPENROUTER_API_KEY,AZURE_HEADER` (comma-separated names; Codex only; Kaisa does not read
 them from Codex's configuration). `KAISA_PASS_ENV` forwards any syntactically valid name you list, including otherwise excluded ones such as `LD_PRELOAD` or `RUSTFLAGS`, so list only what you intend to pass.
 
+</details>
+
+<details>
+<summary><b>Policy: the gates you cannot turn off</b></summary>
+
 **Policy.** `kaisa policy show` and `kaisa policy set <key> <value>` manage your personal
 `policy.json`. The keys `require_person_when_tests_weaken` and
 `require_person_when_check_definitions_change` accept only `true`, because that gate is always
@@ -166,10 +258,17 @@ enforced; `set … false` exits `64`. A `policy.json` from an earlier version th
 `false` is refused, not obeyed. `kaisa policy show` (or `set`) prints the file, the key and the repair (edit that line to
 `true`, or delete the file) and exits `1`; bare `kaisa policy` is a usage error (`64`); a goal stops before it starts, exit `1`, naming the key.
 
-## Current differences from the design
+</details>
+
+<a id="current-differences-from-the-design"></a>
+
+## 🧭 Current differences from the design
 
 [`docs/architecture.md`](docs/architecture.md) describes the target design. This is what the code does
 today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
+
+<details>
+<summary><b>Show the list</b></summary>
 
 - **No daemon, keeper or control server.** `kaisa "<goal>"` runs the engine inside the CLI process.
   There is no `kaisa daemon`, `kaisa keeper` or control endpoint. A crashed run is cleaned up by the
@@ -191,7 +290,9 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
   attempt ids include the process id. A test runs eight writers against one ledger; there is still no
   single ledger-writer process.
 
-## Planned
+</details>
+
+## 🗺️ Planned
 
 - `kaisa review` to approve a verified candidate and see exactly what approving will do.
 - Several candidates per goal (`--n 3`), provider failover (for example Claude to GPT when a quota runs
@@ -200,13 +301,15 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 - Team policy packs, approval delegation and an audit log.
 - Korean and English UI.
 
-## Platforms
+## 💻 Platforms
 
 macOS, Linux and Windows are all first-class targets and release blockers. Minimum OS versions for
 full protection are listed in the
 [architecture](docs/architecture.md#57-guard-policy-sandbox-and-egress).
 
-## Documentation
+<a id="documentation"></a>
+
+## 📚 Documentation
 
 | Document | Contents |
 |---|---|
@@ -218,7 +321,7 @@ full protection are listed in the
 | [Research](docs/research/) | Prior-art analysis of Orca, LearnHarness and ruflo, and platform spikes |
 | [Reviews](docs/reviews/) | Independent reviews of the design, with their resolutions |
 
-## Building
+## 🔧 Building
 
 Kaisa is written in Rust (edition 2024; the toolchain is pinned in `rust-toolchain.toml`) and follows
 the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html). It ships as one
@@ -234,18 +337,29 @@ scripts/check.sh --fix       # format first, then check
 CI runs the format, lint and test steps on macOS, Linux and Windows, plus `cargo-deny` for licences and
 advisories. It runs no benchmark or footprint job.
 
-## Principles
+## 🧩 Principles
 
 - **Measured claims only.** No benchmark number appears here before CI has measured it.
 - **Ease of use first.** If a flow is hard to use, the architecture changes. The flow does not.
 - **Honest labels.** Anything that runs with less protection than designed says so in its output.
 - **Ideas, not code, from prior art.** Kaisa studies existing tools but does not copy their code.
 
-## Name
+## 🌌 Name
 
 The name was simply chosen as a name. Kaisa is an independent project with no connection to any game,
-character or trademark.
+character or trademark. The mark, a K whose lower stroke is a verification check inside a shield, and
+the night-and-aurora palette (`#0D1626` night, `#2DD4BF` verified, `#8B7CF6` aurora, `#F5B841` waiting
+for you, `#F0616D` not delivered) are original to this repository; the sources are in
+[`docs/assets/`](docs/assets/).
 
-## License
+## 📄 License
 
 Kaisa is released under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+  <img src="docs/assets/kaisa-icon.svg" alt="Kaisa" width="72">
+  <br>
+  <sub>Only verified work reaches you.</sub>
+</div>

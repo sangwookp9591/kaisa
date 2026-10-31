@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+  <title id="t">Kaisa</title>
+  <defs>
+    <linearGradient id="night" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#13213A"/>
+      <stop offset="1" stop-color="#0A1120"/>
+    </linearGradient>
+    <linearGradient id="aurora" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5EEAD4"/>
+      <stop offset="0.55" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#8B7CF6"/>
+    </linearGradient>
+    <linearGradient id="veil" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2DD4BF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#8B7CF6" stop-opacity="0.04"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#night)"/>
+  <path d="M60 150 C150 90 230 130 300 96 C360 68 420 82 460 60" fill="none" stroke="#5EEAD4" stroke-opacity="0.18" stroke-width="10" stroke-linecap="round"/>
+  <path d="M52 186 C140 140 238 166 312 132 C372 106 430 116 466 98" fill="none" stroke="#8B7CF6" stroke-opacity="0.14" stroke-width="8" stroke-linecap="round"/>
+  <path d="M256 84 L404 148 V272 C404 356 340 414 256 446 C172 414 108 356 108 272 V148 Z" fill="url(#veil)" stroke="url(#aurora)" stroke-width="16" stroke-linejoin="round"/>
+  <g stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <line x1="200" y1="176" x2="200" y2="356" stroke="#E6F1F5" stroke-width="34"/>
+    <line x1="214" y1="270" x2="306" y2="178" stroke="#E6F1F5" stroke-width="34"/>
+    <polyline points="226,288 270,338 352,236" stroke="url(#aurora)" stroke-width="34" filter="url(#glow)"/>
+  </g>
+</svg>
