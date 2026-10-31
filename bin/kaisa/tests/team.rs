@@ -528,6 +528,7 @@ fn a_candidate_that_widens_agent_settings_needs_a_person_before_any_reviewer_sta
         first_pass: None,
         egress_hosts: &[],
         agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the team run completes");
 
