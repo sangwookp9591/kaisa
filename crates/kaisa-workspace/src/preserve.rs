@@ -4,7 +4,7 @@
 //! its worktree is reclaimed. The commit uses Kaisa's own identity and skips repository hooks:
 //! preservation must not run code from the repository it is preserving.
 
-use crate::git::{GitError, run_git_for_preservation};
+use crate::git::{EmptyHooksDirectory, GitError, run_git_for_preservation};
 use crate::inventory::Inventory;
 use crate::receipt::PreservationReceipt;
 use crate::secrets::{SecretKind, scan};
@@ -41,6 +41,7 @@ pub fn preserve_as_commit(
     worktree: &Worktree,
     inventory: &Inventory,
 ) -> Result<Preservation, WorktreeError> {
+    let hooks = EmptyHooksDirectory::create()?;
     let mut paths: Vec<String> = Vec::new();
     let mut covered: Vec<String> = Vec::new();
     let mut flagged: Vec<(String, Vec<SecretKind>)> = Vec::new();
@@ -69,7 +70,7 @@ pub fn preserve_as_commit(
     if !flagged.is_empty() {
         let mut reset = vec!["reset", "--quiet", "HEAD", "--"];
         reset.extend(flagged.iter().map(|(path, _)| path.as_str()));
-        run_git_for_preservation(worktree.path(), &reset)?;
+        run_git_for_preservation(worktree.path(), &hooks, &reset)?;
     }
     if paths.is_empty() {
         return Ok(Preservation {
@@ -80,12 +81,12 @@ pub fn preserve_as_commit(
     // `--force` because ignored files that the policy treats as user data must be kept too.
     let mut add: Vec<&str> = vec!["add", "--all", "--force", "--"];
     add.extend(paths.iter().map(String::as_str));
-    run_git_for_preservation(worktree.path(), &add)?;
+    run_git_for_preservation(worktree.path(), &hooks, &add)?;
     let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
     let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
     commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
-    run_git_for_preservation(worktree.path(), &commit)?;
-    let head: Vec<u8> = run_git_for_preservation(worktree.path(), &["rev-parse", "HEAD"])?;
+    run_git_for_preservation(worktree.path(), &hooks, &commit)?;
+    let head: Vec<u8> = run_git_for_preservation(worktree.path(), &hooks, &["rev-parse", "HEAD"])?;
     let head: String = String::from_utf8_lossy(&head).trim().to_owned();
     Ok(Preservation {
         receipt: PreservationReceipt::committed(
