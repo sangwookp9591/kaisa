@@ -4,7 +4,7 @@
 //! writes only inside its writable paths, and network only to its egress broker. Paths are
 //! embedded as escaped SBPL strings, so no path name can end the string and add rules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::process::ProcessSpec;
 
@@ -15,9 +15,11 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// What one attempt's Seatbelt profile allows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SeatbeltPolicy {
-    /// Directories the agent may never read, such as Kaisa's state directory and other
-    /// attempts' worktrees. Everything else may be read.
+    /// Directories the agent may not read, except for the explicit `readable` paths.
+    /// Production constructors populate this with Kaisa's state directory.
     pub unreadable: Vec<PathBuf>,
+    /// Exact files or directory trees needed inside an otherwise unreadable state directory.
+    pub readable: Vec<PathBuf>,
     /// Directories (or files) the agent may change: the write set and the scratch area. Paths
     /// must be absolute and canonical (`/private/var`, not `/var`).
     pub writable: Vec<PathBuf>,
@@ -28,6 +30,42 @@ pub struct SeatbeltPolicy {
     /// The Unix socket of the attempt's tool broker, the one local endpoint the agent may
     /// connect to. Must be canonical, like `writable`.
     pub broker_socket: Option<PathBuf>,
+}
+
+impl SeatbeltPolicy {
+    /// Protects both the caller's actual state directory and the configured per-user state.
+    /// Only `readable` paths may be read within them; use exact bridge files, never an
+    /// attempt directory, so logs and future secrets are not accidentally exposed.
+    ///
+    /// # Errors
+    /// Returns an error if the configured state location cannot be determined.
+    pub fn protect_state(&mut self, state: &Path) -> std::io::Result<()> {
+        let configured = crate::state_location(|name| std::env::var_os(name))?.directory;
+        for directory in [state, configured.as_path()] {
+            let directory = canonical_path(&std::path::absolute(directory)?);
+            if !self.unreadable.contains(&directory) {
+                self.unreadable.push(directory);
+            }
+        }
+        self.readable = self
+            .readable
+            .iter()
+            .map(|path| Ok(canonical_path(&std::path::absolute(path)?)))
+            .collect::<std::io::Result<_>>()?;
+        Ok(())
+    }
+}
+
+/// Resolve existing ancestors as well: a not-yet-created state path still needs canonical
+/// spelling on macOS, where `/var` and `/tmp` are symlinks.
+fn canonical_path(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical_path(parent).join(name),
+        _ => path.to_owned(),
+    }
 }
 
 /// The rules every agent needs just to run: start processes, use its terminal and system
@@ -49,16 +87,40 @@ const BASE_RULES: &str = "(allow process-exec)
 pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
     let mut profile: String = String::from("(version 1)\n(deny default)\n");
     profile.push_str(BASE_RULES);
-    for path in &policy.unreadable {
-        profile.push_str(&format!(
-            "(deny file-read* file-write* (subpath {}))\n",
-            sbpl_string(&path.to_string_lossy())
-        ));
-    }
     for path in &policy.writable {
         profile.push_str(&format!(
             "(allow file-write* (subpath {}))\n",
             sbpl_string(&path.to_string_lossy())
+        ));
+    }
+    // Keep the denials after the broad read/write allowances. Exceptions are filters on
+    // the denial, never broad later allow rules that could reopen somebody else's state.
+    for path in &policy.unreadable {
+        profile.push_str(&format!(
+            "(deny file-read* (require-all (subpath {})",
+            sbpl_string(&path.to_string_lossy())
+        ));
+        for readable in &policy.readable {
+            let filter = if readable.is_dir() {
+                "subpath"
+            } else {
+                "literal"
+            };
+            profile.push_str(&format!(
+                " (require-not ({filter} {}))",
+                sbpl_string(&readable.to_string_lossy())
+            ));
+        }
+        profile.push_str("))\n");
+    }
+    // Subscription CLI login is not a reason to expose Kaisa's signing key. Claude's
+    // documented default remains reduced/unconfined until confined login is verified.
+    profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.SecurityServer\") (global-name-regex \"^com[.]apple[.]security[.].*\"))\n");
+    if let Some(home) = std::env::var_os("HOME") {
+        let keychains = canonical_path(&PathBuf::from(home).join("Library/Keychains"));
+        profile.push_str(&format!(
+            "(deny file-read* file-write* (subpath {}))\n",
+            sbpl_string(&keychains.to_string_lossy())
         ));
     }
     if let Some(root) = &policy.git_control_root {
@@ -227,6 +289,167 @@ mod tests {
                 .expect("sandbox-exec is part of macOS")
                 .wait()
                 .expect("the agent exits")
+        }
+
+        /// A read-only agent command; arguments avoid shell quoting of fixture paths.
+        fn an_agent_reading(path: &Path) -> ProcessSpec {
+            ProcessSpec {
+                program: "/bin/cat".into(),
+                args: vec![path.to_string_lossy().into_owned()],
+                working_directory: std::env::temp_dir(),
+                env: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn an_unreadable_state_directory_hides_secrets_but_keeps_exact_bridge_files_readable() {
+            let worktree = ScratchWorktree::new("state-reads");
+            let state = worktree.path("state");
+            let own = state.join("attempts/own");
+            let other = state.join("attempts/other");
+            for directory in [&own, &other] {
+                std::fs::create_dir_all(directory).expect("attempt directory");
+            }
+            let own_token = own.join("bridge.token");
+            let secrets = [
+                state.join("kaisa.db"),
+                other.join("bridge.token"),
+                own.join("private.log"),
+            ];
+            for file in secrets.iter().chain([&own_token]) {
+                std::fs::write(file, "planted secret").expect("fixture secret");
+            }
+            let mut policy = SeatbeltPolicy {
+                readable: vec![own_token.clone()],
+                ..SeatbeltPolicy::default()
+            };
+            policy.protect_state(&state).expect("state location");
+            for secret in &secrets {
+                assert_ne!(
+                    run_sandboxed(&an_agent_reading(secret), &policy),
+                    ProcessExit::Code(0),
+                    "state secrets must be denied: {secret:?}"
+                );
+            }
+            for readable in [&own_token, Path::new("/etc/hosts")] {
+                assert_eq!(
+                    run_sandboxed(&an_agent_reading(readable), &policy),
+                    ProcessExit::Code(0),
+                    "the bridge token and ordinary system files remain readable"
+                );
+            }
+        }
+
+        /// Run the native Keychain query inside a sandboxed copy of this test executable.
+        /// Unlike `security`, SecItemCopyMatching preserves the service denial error instead
+        /// of falling back to a legacy search and reporting the misleading item-not-found.
+        #[test]
+        fn a_confined_keychain_query_is_denied_before_item_lookup() {
+            const PROBE: &str = "KAISA_KEYCHAIN_SANDBOX_PROBE";
+            if std::env::var_os(PROBE).is_some() {
+                let lookup = security_service_lookup_status();
+                const BOOTSTRAP_NOT_PRIVILEGED: i32 = 1100;
+                assert_eq!(
+                    lookup, BOOTSTRAP_NOT_PRIVILEGED,
+                    "Seatbelt must deny the securityd service, rather than rely on item absence"
+                );
+                let status = nonexistent_keychain_item_status();
+                const ITEM_NOT_FOUND: i32 = -25300;
+                assert_ne!(
+                    status, ITEM_NOT_FOUND,
+                    "the query must fail at the sandbox boundary"
+                );
+                assert_ne!(status, 0, "a nonexistent item cannot be returned");
+                println!("sandboxed keychain query status: {status}");
+                return;
+            }
+            let spec = ProcessSpec {
+                program: std::env::current_exe().expect("test executable"),
+                args: vec!["--exact".into(),
+                    "seatbelt::tests::enforced::a_confined_keychain_query_is_denied_before_item_lookup".into(),
+                    "--nocapture".into()],
+                working_directory: std::env::temp_dir(),
+                env: vec![(PROBE.into(), "1".into())],
+            };
+            assert_eq!(
+                run_sandboxed(&spec, &SeatbeltPolicy::default()),
+                ProcessExit::Code(0),
+                "the native query must report service denial instead of absence"
+            );
+        }
+
+        #[allow(unsafe_code)] // Native Mach lookup probe stays within the OS-boundary crate.
+        fn security_service_lookup_status() -> i32 {
+            // SAFETY: declarations match bootstrap.h; the immutable bootstrap port belongs
+            // to this process and the output port points to initialized writable storage.
+            unsafe extern "C" {
+                static bootstrap_port: u32;
+                fn bootstrap_look_up(
+                    bootstrap: u32,
+                    service: *const std::ffi::c_char,
+                    port: *mut u32,
+                ) -> i32;
+            }
+            let mut port = 0;
+            // SAFETY: a NUL-terminated static name and a valid output pointer are supplied.
+            unsafe { bootstrap_look_up(bootstrap_port, c"com.apple.securityd".as_ptr(), &mut port) }
+        }
+
+        #[allow(unsafe_code)] // Native Keychain probe stays within the OS-boundary crate.
+        fn nonexistent_keychain_item_status() -> i32 {
+            use std::ffi::c_void;
+            // SAFETY: declarations match Security.framework's SecItem.h.
+            #[link(name = "Security", kind = "framework")]
+            unsafe extern "C" {
+                static kSecClass: *const c_void;
+                static kSecClassGenericPassword: *const c_void;
+                static kSecAttrService: *const c_void;
+                fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
+            }
+            // SAFETY: declarations match CoreFoundation's creation/release functions.
+            #[link(name = "CoreFoundation", kind = "framework")]
+            unsafe extern "C" {
+                fn CFStringCreateWithCString(
+                    allocator: *const c_void,
+                    text: *const std::ffi::c_char,
+                    encoding: u32,
+                ) -> *const c_void;
+                fn CFDictionaryCreate(
+                    allocator: *const c_void,
+                    keys: *const *const c_void,
+                    values: *const *const c_void,
+                    count: isize,
+                    key_callbacks: *const c_void,
+                    value_callbacks: *const c_void,
+                ) -> *const c_void;
+                fn CFRelease(value: *const c_void);
+            }
+            const UTF8: u32 = 0x0800_0100;
+            // SAFETY: framework constants are immutable CF objects. Keys/values and the service
+            // string remain alive throughout the query; both owned CF objects are released.
+            unsafe {
+                let service = CFStringCreateWithCString(
+                    std::ptr::null(),
+                    c"kaisa-f2-nonexistent-sandbox-regression-20261031".as_ptr(),
+                    UTF8,
+                );
+                assert!(!service.is_null(), "the service string must allocate");
+                let keys = [kSecClass, kSecAttrService];
+                let values = [kSecClassGenericPassword, service];
+                let query = CFDictionaryCreate(
+                    std::ptr::null(),
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                    isize::try_from(keys.len()).expect("small dictionary"),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+                assert!(!query.is_null(), "the query must allocate");
+                let status = SecItemCopyMatching(query, std::ptr::null_mut());
+                CFRelease(query);
+                CFRelease(service);
+                status
+            }
         }
 
         #[test]

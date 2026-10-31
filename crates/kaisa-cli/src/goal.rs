@@ -41,7 +41,7 @@ fn codex_args() -> Vec<String> {
 
 /// How to run anyway when containment falls short: shown with every refusal.
 const ACCEPT_HINT: &str = "to run anyway, accept what is missing until a deadline: \
---accept-reduced <write,tcp,udp,descendants> --accept-until <unix time in ms>";
+--accept-reduced <write,tcp,udp,state-read,descendants> --accept-until <unix time in ms>";
 
 /// A person's `--accept-reduced <codes> --accept-until <ms>`, as typed.
 #[derive(Default)]

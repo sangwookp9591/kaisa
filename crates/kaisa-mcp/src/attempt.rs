@@ -178,12 +178,28 @@ impl BridgeConfig {
         };
         #[cfg(target_os = "macos")]
         {
-            Ok(ExecSandbox::Seatbelt(kaisa_sys::SeatbeltPolicy {
+            let mut readable = vec![self.worktree.canonicalize()?];
+            if let Some(scratch) = &self.scratch {
+                readable.push(scratch.canonicalize()?);
+            }
+            let mut policy = kaisa_sys::SeatbeltPolicy {
+                readable,
                 writable,
                 git_control_root: Some(self.worktree.canonicalize()?),
                 broker_port: self.broker_port,
                 ..kaisa_sys::SeatbeltPolicy::default()
-            }))
+            };
+            let configured = kaisa_sys::state_location(|name| std::env::var_os(name))?;
+            // Production worktrees live at <state>/worktrees/<attempt>. Also protect the
+            // configured state when a standalone bridge uses an external worktree.
+            let state = self
+                .worktree
+                .parent()
+                .filter(|parent| parent.file_name().is_some_and(|name| name == "worktrees"))
+                .and_then(Path::parent)
+                .unwrap_or(&configured.directory);
+            policy.protect_state(state)?;
+            Ok(ExecSandbox::Seatbelt(policy))
         }
         #[cfg(target_os = "linux")]
         {
@@ -343,6 +359,64 @@ mod tests {
     #[cfg(unix)]
     use super::bridge_from;
     use super::{BridgeConfig, serve_attempt};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_broker_exec_cannot_read_state_or_tokens_but_can_read_its_worktree() {
+        let state = std::env::temp_dir().join(format!("kaisa-exec-state-{}", std::process::id()));
+        let worktree = state.join("worktrees/own");
+        let other = state.join("attempts/other");
+        std::fs::create_dir_all(&worktree).expect("attempt worktree");
+        std::fs::create_dir_all(&other).expect("other attempt");
+        let source = worktree.join("source.rs");
+        let secrets = [state.join("kaisa.db"), other.join("bridge.token")];
+        for file in secrets.iter().chain([&source]) {
+            std::fs::write(file, "fixture").expect("planted fixture");
+        }
+        let config = BridgeConfig {
+            worktree: worktree.clone(),
+            write_set: WriteSet::new(Vec::new()),
+            role: Role::Developer,
+            scratch: None,
+            broker_port: None,
+        };
+        let sandbox = config.exec_sandbox().expect("exec sandbox");
+        let super::super::broker::ExecSandbox::Seatbelt(policy) = sandbox else {
+            panic!("macOS exec needs Seatbelt");
+        };
+        let read = |path: &std::path::Path| {
+            let spec = kaisa_sys::ProcessSpec {
+                program: "/bin/cat".into(),
+                args: vec![path.to_string_lossy().into_owned()],
+                working_directory: worktree.clone(),
+                env: Vec::new(),
+            };
+            kaisa_sys::run_captured(
+                &spec,
+                &kaisa_sys::Confinement::Seatbelt(&policy),
+                b"",
+                std::time::Duration::from_secs(10),
+                4096,
+            )
+            .expect("exec exits")
+            .exit
+            .expect("cat exits before deadline")
+        };
+        const SUCCESS: kaisa_sys::ProcessExit = kaisa_sys::ProcessExit::Code(0);
+        for secret in &secrets {
+            assert_ne!(
+                read(secret),
+                SUCCESS,
+                "broker commands must hide {secret:?}"
+            );
+        }
+        assert_eq!(
+            read(&source),
+            SUCCESS,
+            "exec must still read its source tree"
+        );
+        std::fs::remove_dir_all(state).expect("remove isolated broker state");
+    }
 
     /// An attempt whose write grants can be exercised without starting an agent.
     fn an_exec_attempt(name: &str) -> BridgeConfig {
