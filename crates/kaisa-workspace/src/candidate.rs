@@ -99,62 +99,208 @@ pub fn weakened_tests(
     base: &str,
     candidate: &Candidate,
 ) -> Result<Vec<String>, GitError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type ComparisonCache = Mutex<HashMap<(String, String), Vec<String>>>;
+    static CACHE: OnceLock<ComparisonCache> = OnceLock::new();
+    let base_tree = git_text(repository, &["rev-parse", &format!("{base}^{{tree}}")])?;
+    let key = (base_tree.clone(), candidate.tree.clone());
+    // Hold the lock through comparison: parallel checks of the same immutable trees must
+    // not repeat the scan. Tree identities also make results independent of repository paths.
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(findings) = cache.get(&key) {
+        return Ok(findings.clone());
+    }
+    let paths: Vec<_> = changed_paths(repository, &base_tree, candidate)?
+        .into_iter()
+        .filter(|path| supported_source(path) || is_test_file(path))
+        .collect();
+    let sources = committed_sources(repository, &base_tree, &candidate.tree, &paths)?;
     let mut findings = Vec::new();
-    for path in changed_paths(repository, base, candidate)? {
-        let before = committed_source(repository, base, &path)?;
-        let after = committed_source(repository, &candidate.commit, &path)?;
-        let file = path.rsplit('/').next().unwrap_or(&path);
-        let extension = file.rsplit('.').next().unwrap_or("");
-        let test_file = path
-            .split('/')
-            .any(|part| matches!(part, "test" | "tests" | "__tests__"))
-            || matches!(file, "test.rs" | "tests.rs")
-            || file.ends_with("_tests.rs")
-            || file.starts_with("test_")
-            || file.ends_with("_test.py")
-            || file.ends_with("_test.go")
-            || file.contains(".test.")
-            || file.contains(".spec.");
-        let supported = matches!(extension, "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go");
-        if !supported && !test_file {
-            continue;
-        }
-        if before.is_some() && after.is_none() && test_file {
+    for (path, pair) in paths.iter().zip(sources.as_chunks::<2>().0) {
+        if pair[0].is_some() && pair[1].is_none() && is_test_file(path) {
             findings.push(format!("{path}: test file deleted (1 -> 0)"));
         }
-        let before = before.unwrap_or_default();
-        let after = after.unwrap_or_default();
-        for (label, old, new) in test_counts(extension, &before, &after) {
-            if new < old {
-                findings.push(format!("{path}: {label} decreased ({old} -> {new})"));
-            }
-        }
-        for marker in ["#[ignore", ".skip", ".only", "xfail", "@pytest.mark.skip"] {
-            let old = construct_count(&before, marker);
-            let new = construct_count(&after, marker);
-            if new > old {
-                findings.push(format!("{path}: {marker} added ({old} -> {new})"));
-            }
-        }
+        compare_test_source(
+            path,
+            pair[0].as_deref().unwrap_or_default(),
+            pair[1].as_deref().unwrap_or_default(),
+            &mut findings,
+        );
     }
+    cache.insert(key, findings.clone());
     Ok(findings)
 }
 
-fn committed_source(
+fn is_test_file(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .any(|part| matches!(part, "test" | "tests" | "__tests__"))
+        || matches!(file, "test.rs" | "tests.rs")
+        || file.ends_with("_tests.rs")
+        || file.ends_with("_test.rs")
+        || file.starts_with("test_")
+        || file.ends_with("_test.py")
+        || file.ends_with("_test.go")
+        || file.contains(".test.")
+        || file.contains(".spec.")
+}
+
+fn supported_source(path: &str) -> bool {
+    matches!(
+        path.rsplit('.').next(),
+        Some("rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go")
+    )
+}
+
+fn committed_sources(
     repository: &Path,
-    revision: &str,
-    path: &str,
-) -> Result<Option<String>, GitError> {
-    let entry = run_git(repository, &["ls-tree", "-z", revision, "--", path])?;
-    if entry.is_empty() {
-        return Ok(None);
+    base: &str,
+    candidate: &str,
+    paths: &[String],
+) -> Result<Vec<Option<String>>, GitError> {
+    use std::io::{BufRead, Read, Write};
+    use std::process::{Command, Stdio};
+    // -Z keeps even newline-bearing paths unambiguous; all blobs use one Git process.
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch", "-Z"])
+        .current_dir(repository)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(GitError::Spawn)?;
+    let mut input = child.stdin.take().expect("piped input");
+    let requests: Vec<_> = paths
+        .iter()
+        .flat_map(|path| [format!("{base}:{path}\0"), format!("{candidate}:{path}\0")])
+        .collect();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for request in requests {
+            input.write_all(request.as_bytes())?;
+        }
+        Ok(())
+    });
+    let mut output = std::io::BufReader::new(child.stdout.take().expect("piped output"));
+    let mut sources = Vec::new();
+    for _ in 0..paths.len() * 2 {
+        let mut header = Vec::new();
+        output.read_until(0, &mut header).map_err(GitError::Spawn)?;
+        let header = String::from_utf8_lossy(&header);
+        if header.trim_end_matches('\0').ends_with(" missing") {
+            sources.push(None);
+            continue;
+        }
+        let size = header
+            .trim_end_matches('\0')
+            .rsplit(' ')
+            .next()
+            .and_then(|size| size.parse::<usize>().ok())
+            .ok_or_else(|| GitError::Failed {
+                args: vec!["cat-file".into()],
+                stderr: format!("invalid batch header: {header}"),
+            })?;
+        let mut bytes = vec![0; size];
+        output.read_exact(&mut bytes).map_err(GitError::Spawn)?;
+        let mut terminator = [0];
+        output
+            .read_exact(&mut terminator)
+            .map_err(GitError::Spawn)?;
+        sources.push(Some(String::from_utf8_lossy(&bytes).into_owned()));
     }
-    let bytes = run_git(repository, &["show", &format!("{revision}:{path}")])?;
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    writer
+        .join()
+        .expect("batch writer completed")
+        .map_err(GitError::Spawn)?;
+    if !child.wait().map_err(GitError::Spawn)?.success() {
+        return Err(GitError::Failed {
+            args: vec!["cat-file".into()],
+            stderr: "batch read failed".into(),
+        });
+    }
+    Ok(sources)
+}
+
+// Replace comments/literals with whitespace before tokenization, preserving line boundaries.
+// Rust block comments nest; Python triple quotes are docstrings; Go raw strings use backticks.
+fn executable_source(source: &str, extension: &str) -> String {
+    let b = source.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        if (extension == "py" && b[i] == b'#') || (extension != "py" && b[i..].starts_with(b"//")) {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if extension != "py" && b[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < b.len() && depth > 0 {
+                if b[i..].starts_with(b"/*") && extension == "rs" {
+                    depth += 1;
+                    i += 2;
+                } else if b[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if extension == "rs" && (b[i] == b'r' || b[i..].starts_with(b"br")) {
+            let mut quote = i + if b[i] == b'b' { 2 } else { 1 };
+            while quote < b.len() && b[quote] == b'#' {
+                quote += 1;
+            }
+            if quote < b.len() && b[quote] == b'"' {
+                let hashes = &b[(i + if b[i] == b'b' { 2 } else { 1 })..quote];
+                i = quote + 1;
+                while i < b.len() && !(b[i] == b'"' && b[i + 1..].starts_with(hashes)) {
+                    i += 1;
+                }
+                i = (i + 1 + hashes.len()).min(b.len());
+            } else {
+                i += 1;
+                continue;
+            }
+        } else if b[i] == b'"'
+            || b[i] == b'`'
+            || (b[i] == b'\''
+                && (extension != "rs"
+                    || (i + 2 < b.len() && (b[i + 2] == b'\'' || b[i + 1] == b'\\'))))
+        {
+            let quote = b[i];
+            let triple = extension == "py" && b[i..].starts_with(&[quote; 3]);
+            let width = if triple { 3 } else { 1 };
+            i += width;
+            while i < b.len() {
+                if b[i..].starts_with(&vec![quote; width]) {
+                    i += width;
+                    break;
+                }
+                if b[i] == b'\\' && quote != b'`' {
+                    i = (i + 2).min(b.len());
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        }
+        for c in &mut out[start..i] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    }
+    String::from_utf8(out).expect("replacing complete UTF-8 regions preserves UTF-8")
 }
 
 // Preserve identifier boundaries: `split(` must never count as `it(` and `assertion`
-// must never count as Python's `assert`. Comments and literals remain conservative signals.
+// must never count as Python's `assert`. Callers strip comments and literals first.
 fn tokens(source: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
@@ -176,16 +322,15 @@ fn tokens(source: &str) -> Vec<String> {
     tokens
 }
 
-fn construct_count(source: &str, marker: &str) -> usize {
-    let source = tokens(source);
+fn construct_count(source: &[String], marker: &str) -> usize {
     match marker {
         "def test_" => source
             .windows(2)
-            .filter(|pair| pair[0] == "def" && pair[1].starts_with("test_"))
+            .filter(|p| p[0] == "def" && p[1].starts_with("test_"))
             .count(),
         "func Test" => source
             .windows(2)
-            .filter(|pair| pair[0] == "func" && pair[1].starts_with("Test"))
+            .filter(|p| p[0] == "func" && p[1].starts_with("Test"))
             .count(),
         _ => {
             let marker = tokens(marker);
@@ -197,53 +342,368 @@ fn construct_count(source: &str, marker: &str) -> usize {
     }
 }
 
-fn test_counts(extension: &str, before: &str, after: &str) -> Vec<(&'static str, usize, usize)> {
-    let count = construct_count;
-    let markers: &[(&str, &str)] = match extension {
-        "rs" => &[],
-        "py" => &[("Python tests", "def test_"), ("assertions", "assert")],
-        "js" | "jsx" | "ts" | "tsx" => &[
-            ("test suites", "describe("),
-            ("assertions", "expect("),
-            ("assert calls", "assert("),
-        ],
-        "go" => &[("Go tests", "func Test"), ("assertions", "assert.")],
+fn declarations(t: &[String], extension: &str) -> usize {
+    let markers: &[&str] = match extension {
+        "rs" => &["#[test]", "#[tokio::test"],
+        "py" => &["def test_"],
+        "go" => &["func Test"],
+        "js" | "jsx" | "ts" | "tsx" => &["it(", "test(", "describe("],
         _ => &[],
     };
-    let mut counts: Vec<_> = markers
-        .iter()
-        .map(|(label, marker)| (*label, count(before, marker), count(after, marker)))
-        .collect();
-    if matches!(extension, "js" | "jsx" | "ts" | "tsx") {
-        let declarations =
-            |source: &str| construct_count(source, "it(") + construct_count(source, "test(");
-        counts.push(("JS tests", declarations(before), declarations(after)));
-    }
-    if extension == "rs" {
-        let assertions = |source: &str| {
-            ["assert!", "assert_eq!", "assert_ne!"]
-                .iter()
-                .map(|marker| construct_count(source, marker))
-                .sum()
-        };
-        counts.push(("assertions", assertions(before), assertions(after)));
-        let rust_tests = |source: &str| {
-            construct_count(source, "#[test]") + construct_count(source, "#[tokio::test")
-        };
-        counts.push(("Rust tests", rust_tests(before), rust_tests(after)));
-        counts.push((
-            "doctest blocks",
-            doctest_blocks(before),
-            doctest_blocks(after),
-        ));
-    }
-    counts
+    markers.iter().map(|m| construct_count(t, m)).sum()
 }
 
-fn doctest_blocks(source: &str) -> usize {
-    // Include line docs, block docs and #[doc = ...] literals. As with the other
-    // lexical counters, an example in an ordinary string is a conservative signal.
-    source.matches("```").count().div_ceil(2)
+fn assertions(t: &[String], extension: &str) -> usize {
+    let markers: &[&str] = match extension {
+        "rs" => &["assert!", "assert_eq!", "assert_ne!"],
+        "py" => &["assert", "self.assertEqual(", "self.assertTrue("],
+        "go" => &["assert."],
+        _ => &["expect(", "assert("],
+    };
+    markers.iter().map(|m| construct_count(t, m)).sum()
+}
+
+fn rust_test_scope(t: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    let markers = [
+        tokens("#[test]"),
+        tokens("#[tokio::test"),
+        tokens("#[cfg(test)]"),
+    ];
+    while i < t.len() {
+        if markers.iter().any(|marker| t[i..].starts_with(marker)) {
+            let start = i;
+            while i < t.len() && t[i] != "{" {
+                i += 1;
+            }
+            let mut depth = 0;
+            while i < t.len() {
+                if t[i] == "{" {
+                    depth += 1;
+                }
+                if t[i] == "}" {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            result.extend_from_slice(&t[start..i]);
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+fn test_scope(source: &str, t: &[String], extension: &str, test_file: bool) -> Vec<String> {
+    if test_file {
+        return t.to_vec();
+    }
+    if extension == "rs" {
+        return rust_test_scope(t);
+    }
+    if extension == "py" {
+        let mut selected = String::new();
+        let mut indent = None;
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let current = line.len() - trimmed.len();
+            if trimmed.starts_with("def test_") || trimmed.starts_with("async def test_") {
+                indent = Some(current);
+            } else if indent.is_some_and(|start| current <= start) {
+                indent = None;
+            }
+            if indent.is_some() {
+                selected.push_str(line);
+                selected.push('\n');
+            }
+        }
+        return tokens(&selected);
+    }
+    let mut selected = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let starts_test = if extension == "go" {
+            t[i] == "func" && t.get(i + 1).is_some_and(|name| name.starts_with("Test"))
+        } else {
+            matches!(t[i].as_str(), "it" | "test" | "describe")
+                && t.get(i + 1).is_some_and(|next| next == "(")
+        };
+        if !starts_test {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < t.len() && t[i] != "{" {
+            i += 1;
+        }
+        let mut depth = 0;
+        while i < t.len() {
+            if t[i] == "{" {
+                depth += 1;
+            }
+            if t[i] == "}" {
+                depth -= 1;
+                if depth == 0 {
+                    i += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        selected.extend_from_slice(&t[start..i]);
+    }
+    selected
+}
+
+fn empty_rust_tests(t: &[String]) -> usize {
+    let markers = [tokens("#[test]"), tokens("#[tokio::test")];
+    (0..t.len())
+        .filter(|&index| {
+            if !markers.iter().any(|marker| t[index..].starts_with(marker)) {
+                return false;
+            }
+            let Some(body) = t[index..].iter().position(|token| token == "{") else {
+                return false;
+            };
+            t.get(index + body + 1).is_some_and(|token| token == "}")
+        })
+        .count()
+}
+
+fn tautologies(t: &[String]) -> usize {
+    let mut count = 0;
+    for i in 0..t.len() {
+        if t[i] == "assert" && t.get(i + 1).is_some_and(|s| s == "True") {
+            count += 1;
+        }
+        if !matches!(t[i].as_str(), "assert" | "assert_eq")
+            || t.get(i + 1).is_none_or(|s| s != "!")
+            || t.get(i + 2).is_none_or(|s| s != "(")
+        {
+            continue;
+        }
+        let args = &t[i + 3..];
+        let mut depth = 0;
+        let end = args
+            .iter()
+            .position(|s| {
+                if s == ")" && depth == 0 {
+                    return true;
+                }
+                if matches!(s.as_str(), "(" | "[" | "{") {
+                    depth += 1;
+                }
+                if matches!(s.as_str(), ")" | "]" | "}") {
+                    depth -= 1;
+                }
+                false
+            })
+            .unwrap_or(args.len());
+        let args = &args[..end];
+        if args.first().is_some_and(|arg| arg == "true")
+            && (args.len() == 1 || args.get(1).is_some_and(|arg| arg == ","))
+        {
+            count += 1;
+            continue;
+        }
+        if t[i] == "assert_eq" {
+            if let Some(comma) = args.iter().position(|s| s == ",") {
+                let rhs = &args[comma + 1..];
+                let end = rhs.iter().position(|s| s == ",").unwrap_or(rhs.len());
+                if comma > 0 && args[..comma] == rhs[..end] {
+                    count += 1;
+                }
+            }
+        } else if let Some(eq) = args.windows(2).position(|p| p == ["=", "="]) {
+            let rhs = &args[eq + 2..];
+            let end = rhs.iter().position(|s| s == ",").unwrap_or(rhs.len());
+            if eq > 0 && args[..eq] == rhs[..end] {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn doctest_counts(source: &str) -> (usize, usize) {
+    // Documentation is intentionally read before stripping comments/literals. Only doc
+    // comments/attributes carry executable examples; ordinary string examples do not.
+    let mut docs = String::new();
+    let mut block = false;
+    for line in source.lines() {
+        let line = line.trim_start();
+        if line.starts_with("/**") || line.starts_with("/*!") {
+            block = true;
+        }
+        if block || line.starts_with("///") || line.starts_with("//!") || line.starts_with("#[doc")
+        {
+            docs.push_str(line);
+            docs.push('\n');
+        }
+        if block && line.contains("*/") {
+            block = false;
+        }
+    }
+    let mut blocks = 0;
+    let mut disabled = 0;
+    for (index, part) in docs.split("```").skip(1).enumerate() {
+        if index % 2 == 0 {
+            blocks += 1;
+            let info = part.lines().next().unwrap_or_default();
+            if info
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| {
+                    matches!(
+                        word,
+                        "ignore" | "no_run" | "text" | "compile_fail" | "should_panic"
+                    )
+                })
+            {
+                disabled += 1;
+            }
+        }
+    }
+    (blocks, disabled)
+}
+
+fn compare_test_source(path: &str, before: &str, after: &str, findings: &mut Vec<String>) {
+    let extension = path.rsplit('.').next().unwrap_or_default();
+    // Rust tests require attributes and doctests require documentation. Plain production
+    // files cannot contribute test assertions, so avoid allocating tokens for large generated
+    // sources with neither. Check both versions so removing the last attribute is still seen.
+    if extension == "rs"
+        && !is_test_file(path)
+        && ![before, after].iter().any(|source| {
+            source.contains('#')
+                || source.contains("///")
+                || source.contains("//!")
+                || source.contains("/**")
+                || source.contains("/*!")
+        })
+    {
+        return;
+    }
+    let old_source = executable_source(before, extension);
+    let new_source = executable_source(after, extension);
+    let old = tokens(&old_source);
+    let new = tokens(&new_source);
+    let old_scope = test_scope(&old_source, &old, extension, is_test_file(path));
+    let new_scope = test_scope(&new_source, &new, extension, is_test_file(path));
+    let test_context = is_test_file(path) || !old_scope.is_empty() || !new_scope.is_empty();
+    let old_assert = if test_context {
+        assertions(&old_scope, extension)
+    } else {
+        0
+    };
+    let new_assert = if test_context {
+        assertions(&new_scope, extension)
+    } else {
+        0
+    };
+    let old_tests = declarations(&old, extension);
+    let new_tests = declarations(&new, extension);
+    let mut signal = |label: &str, a: usize, b: usize| {
+        findings.push(format!("{path}: {label} ({a} -> {b})"));
+    };
+    // Declaration OR assertion loss alone is ambiguous (merged tests or extracted helpers).
+    // Require both, except explicit deletion/disable/comment/tautology signals. A newly
+    // introduced loop with retained tests is a common table-driven merge (R6 F1); accepting
+    // it is lexical evidence, not proof that every old example remains covered.
+    let table_merge =
+        new_tests > 0 && construct_count(&new_scope, "for") > construct_count(&old_scope, "for");
+    if new_tests < old_tests && new_assert < old_assert && !table_merge {
+        signal("tests and assertions decreased", old_tests, new_tests);
+    }
+    // Commenting a test out removes executable declarations but leaves their text behind.
+    if new_tests < old_tests && declarations(&tokens(after), extension) >= old_tests {
+        signal("tests commented out", old_tests, new_tests);
+    }
+    if extension == "rs" {
+        let old_cfg = construct_count(&old, "#[cfg(test)]");
+        let new_cfg = construct_count(&new, "#[cfg(test)]");
+        if new_cfg < old_cfg {
+            signal("#[cfg(test)] decreased", old_cfg, new_cfg);
+        }
+        for marker in [
+            "#[cfg(any())]",
+            "#[cfg(feature",
+            "#[cfg(FALSE)]",
+            "#[cfg(not(test))]",
+        ] {
+            let a = construct_count(&old, marker);
+            let b = construct_count(&new, marker);
+            if b > a && old_tests > 0 {
+                signal(marker, a, b);
+            }
+        }
+        let cfg_ignore = |t: &[String]| {
+            t.split(|s| s == "]")
+                .filter(|attr| {
+                    construct_count(attr, "#[cfg_attr(") > 0 && attr.iter().any(|s| s == "ignore")
+                })
+                .count()
+        };
+        let a = cfg_ignore(&old);
+        let b = cfg_ignore(&new);
+        if b > a {
+            signal("cfg_attr ignore added", a, b);
+        }
+        let (a, disabled_a) = doctest_counts(before);
+        let (b, disabled_b) = doctest_counts(after);
+        if b < a {
+            signal("doctest blocks decreased", a, b);
+        }
+        if disabled_b > disabled_a {
+            signal("disabled doctest added", disabled_a, disabled_b);
+        }
+    }
+    for marker in [
+        "#[ignore",
+        ".skip",
+        ".skipif",
+        ".only",
+        "xfail",
+        "@pytest.mark.skip",
+        "pytest.skip(",
+        "unittest.skip",
+        "xit(",
+        "xdescribe(",
+        "it.todo(",
+        "test.todo(",
+        "t.Skip(",
+    ] {
+        let a = construct_count(&old, marker);
+        let b = construct_count(&new, marker);
+        if b > a {
+            signal(&format!("{marker} added"), a, b);
+        }
+    }
+    let a = tautologies(&old_scope);
+    let b = tautologies(&new_scope);
+    if b > a && test_context {
+        signal("tautological assertions added", a, b);
+    }
+    if extension == "rs" {
+        let a = empty_rust_tests(&old);
+        let b = empty_rust_tests(&new);
+        if b > a && old_tests > 0 {
+            signal("empty test bodies added", a, b);
+        }
+    }
+    // Early return is a useful explicit bypass signal, without pretending to analyze control flow.
+    let a = construct_count(&old_scope, "{ return ;");
+    let b = construct_count(&new_scope, "{ return ;");
+    if b > a && old_tests > 0 {
+        signal("test early return added", a, b);
+    }
 }
 
 /// The paths changed between `base` and `candidate`, sorted and deduplicated.
@@ -457,9 +917,9 @@ mod tests {
         let changes = [
             (
                 "src/lib.rs",
-                "#[tokio::test] async fn works() {}",
+                "#[tokio::test] async fn works() { assert!(ready()); }",
                 "pub fn works() {}",
-                "Rust tests",
+                "tests and assertions",
             ),
             (
                 "src/block_docs.rs",
@@ -471,19 +931,19 @@ mod tests {
                 "test_login.py",
                 "def test_login(): assert True",
                 "def login(): pass",
-                "Python tests",
+                "tests and assertions",
             ),
             (
                 "login.test.ts",
                 "describe('login', () => { it('works', () => expect(true)); });",
                 "const login = () => {};",
-                "JS tests",
+                "tests and assertions",
             ),
             (
                 "login_test.go",
-                "func TestLogin(t *testing.T) {}",
+                "func TestLogin(t *testing.T) { assert.Equal(t, got, want) }",
                 "func Login() {}",
-                "Go tests",
+                "tests and assertions",
             ),
             (
                 "login.test.js",
@@ -553,6 +1013,176 @@ mod tests {
                 .any(|signal| signal.contains(path) && signal.contains("test file deleted")),
             "even a test file with no recognized declarations remains coverage: {signals:?}"
         );
+    }
+
+    struct CoverageChange {
+        path: &'static str,
+        before: &'static str,
+        after: &'static str,
+    }
+
+    fn source_change(before: &'static str, after: &'static str) -> CoverageChange {
+        CoverageChange {
+            path: "src/lib.rs",
+            before,
+            after,
+        }
+    }
+
+    const ACTIVE_TEST: &str = "#[cfg(test)] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }";
+
+    #[test]
+    fn commented_disabled_tautological_and_early_return_tests_are_reported() {
+        let changes = [
+            source_change(
+                ACTIVE_TEST,
+                "// #[cfg(test)] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "/* outer /* nested */ #[cfg(test)] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } } */",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(any())] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(feature = \"missing\")] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(FALSE)] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(not(test))] mod tests { #[test] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(test)] mod tests { #[test] #[cfg_attr(test, ignore)] fn checks_value() { assert_eq!(actual(), expected()); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(test)] mod tests { #[test] fn checks_value() { assert!(true, \"context\"); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(test)] mod tests { #[test] fn checks_value() { assert!(1 == 1); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(test)] mod tests { #[test] fn checks_value() { assert_eq!(value, value); } }",
+            ),
+            source_change(
+                ACTIVE_TEST,
+                "#[cfg(test)] mod tests { #[test] fn checks_value() { return; assert_eq!(actual(), expected()); } }",
+            ),
+            CoverageChange {
+                path: "test_login.py",
+                before: "def test_login(): assert login()",
+                after: "def test_login(): assert True",
+            },
+            CoverageChange {
+                path: "test_login.py",
+                before: "def test_login(): assert login()",
+                after: "def test_login(): pytest.skip('reason'); assert login()",
+            },
+            CoverageChange {
+                path: "test_login.py",
+                before: "def test_login(): assert login()",
+                after: "@pytest.mark.skipif(condition)\ndef test_login(): assert login()",
+            },
+            CoverageChange {
+                path: "test_login.py",
+                before: "def test_login(): assert login()",
+                after: "@unittest.skip('reason')\ndef test_login(): assert login()",
+            },
+            CoverageChange {
+                path: "login.test.ts",
+                before: "it('login', () => expect(login()));",
+                after: "xit('login', () => expect(login()));",
+            },
+            CoverageChange {
+                path: "login.test.ts",
+                before: "it('login', () => expect(login()));",
+                after: "it.todo('login', () => expect(login()));",
+            },
+            CoverageChange {
+                path: "login_test.go",
+                before: "func TestLogin(t *testing.T) {}",
+                after: "func TestLogin(t *testing.T) { t.Skip(\"reason\"); }",
+            },
+        ];
+        for change in changes {
+            let signals = weakening_for(change.path, change.before, Some(change.after));
+            assert!(
+                !signals.is_empty(),
+                "explicit weakening must be visible for {}: {}",
+                change.path,
+                change.after
+            );
+        }
+        for info in ["ignore", "no_run", "text", "compile_fail", "should_panic"] {
+            let before = "/// ```\n/// assert_eq!(actual(), expected());\n/// ```";
+            let after = before.replacen("```", &format!("```{info}"), 1);
+            let signals = weakening_for("src/lib.rs", before, Some(&after));
+            assert!(
+                signals
+                    .iter()
+                    .any(|signal| signal.contains("disabled doctest")),
+                "{info} changes doctest execution: {signals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_merges_helper_extraction_and_production_assertion_removal_are_allowed() {
+        let changes = [
+            source_change(
+                "#[test] fn first() { assert!(first()); } #[test] fn second() { assert!(second()); }",
+                "#[test] fn table() { for case in cases() { assert!(case); } }",
+            ),
+            source_change(
+                "#[test] fn first() { assert!(first()); assert!(second()); }",
+                "fn check(value: bool) { assert!(value); } #[test] fn first() { check(first()); check(second()); }",
+            ),
+            source_change(
+                "pub fn production() { assert!(ready()); }",
+                "pub fn production() {}",
+            ),
+            CoverageChange {
+                path: "login.py",
+                before: "def login(): assert ready()",
+                after: "def login(): pass",
+            },
+            CoverageChange {
+                path: "login.ts",
+                before: "function login() { assert(ready()); }",
+                after: "function login() {}",
+            },
+            CoverageChange {
+                path: "login.go",
+                before: "func Login() { assert.True(ready()) }",
+                after: "func Login() {}",
+            },
+            source_change(
+                "const EXAMPLE: &str = r###\"#[test] fn fake() { assert!(true); }\"###;",
+                "const EXAMPLE: &str = \"example\";",
+            ),
+            CoverageChange {
+                path: "test_login.py",
+                before: "\"\"\"def test_fake(): assert True\"\"\"\ndef test_login(): assert ready()",
+                after: "def test_login(): assert ready()",
+            },
+        ];
+        for change in changes {
+            let signals = weakening_for(change.path, change.before, Some(change.after));
+            assert!(
+                signals.is_empty(),
+                "refactoring and non-executable examples keep coverage: {signals:?}"
+            );
+        }
     }
 
     /// The original source path before a rename.

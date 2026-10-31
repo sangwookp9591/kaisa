@@ -727,7 +727,11 @@ fn deleting_a_rust_unit_test_exits_three_despite_review_approval() {
         "#[test]\nfn login_works() { assert!(true); assert_eq!(1, 1); }\n",
         "",
     );
-    assert_weakening_needs_a_person("unit-deleted", &replacement, "Rust tests decreased");
+    assert_weakening_needs_a_person(
+        "unit-deleted",
+        &replacement,
+        "tests and assertions decreased",
+    );
 }
 
 #[test]
@@ -743,9 +747,9 @@ fn adding_ignore_exits_three_despite_review_approval() {
 }
 
 #[test]
-fn removing_an_assertion_exits_three_despite_review_approval() {
-    let replacement = COVERED_SOURCE.replace("assert!(true);", "");
-    assert_weakening_needs_a_person("assertion-removed", &replacement, "assertions decreased");
+fn adding_a_tautological_assertion_exits_three_despite_review_approval() {
+    let replacement = COVERED_SOURCE.replace("assert!(true);", "assert!(true); assert!(true);");
+    assert_weakening_needs_a_person("assertion-removed", &replacement, "tautological assertions");
 }
 
 #[test]
@@ -766,7 +770,8 @@ fn refactoring_without_losing_tests_delivers_with_exit_zero() {
 
 #[test]
 fn adding_a_test_delivers_with_exit_zero() {
-    let replacement = format!("{COVERED_SOURCE}#[test]\nfn another_login() {{ assert!(true); }}\n");
+    let replacement =
+        format!("{COVERED_SOURCE}#[test]\nfn another_login() {{ assert_eq!(login(), ()); }}\n");
     let (outcome, _, _) = a_test_coverage_change("test-added", &replacement, true);
     let (_, exit) = kaisa_cli::report_delivery(&outcome.delivery);
     assert_eq!(
@@ -778,7 +783,7 @@ fn adding_a_test_delivers_with_exit_zero() {
 
 #[test]
 fn disabling_the_human_gate_keeps_weakening_visible_and_never_learns() {
-    let replacement = COVERED_SOURCE.replace("assert!(true);", "");
+    let replacement = COVERED_SOURCE.replace("assert!(true);", "assert!(true); assert!(true);");
     let (outcome, evidence, learned) =
         a_test_coverage_change("weakening-policy-disabled", &replacement, false);
     let (text, exit) = kaisa_cli::report_verified_outcome(&outcome);
@@ -788,7 +793,7 @@ fn disabling_the_human_gate_keeps_weakening_visible_and_never_learns() {
         "the explicit personal policy may permit delivery"
     );
     assert!(
-        text.contains("weakened_tests") && evidence.contains("assertions decreased"),
+        text.contains("weakened_tests") && evidence.contains("tautological assertions"),
         "output and ledger retain weakening even under the policy exception"
     );
     assert!(
@@ -829,6 +834,10 @@ fn delivered_advice_is_bounded_and_precedes_the_result_retrieval_line() {
             .count(),
         MAX_VISIBLE_ADVISORIES,
         "at most three single-line advisory summaries are shown"
+    );
+    assert!(
+        text.contains("untracked files") && text.contains("git status"),
+        "retrieval explains how to resolve untracked collisions: {text}"
     );
     assert!(text.lines().last().is_some_and(|line| line.starts_with("Result:") && line.contains("git merge --ff-only")), "retrieval remains the final instruction: {text}");
 }
