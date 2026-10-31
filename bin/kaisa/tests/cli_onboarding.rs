@@ -473,8 +473,9 @@ fn a_goal_uses_the_configured_test_without_a_check_program_override() {
     assert_eq!(
         failing.status.code(),
         Some(NOT_DELIVERED),
-        "a configured failing test cannot fall back to detected cargo tests: {}",
-        text(&failing)
+        "a configured failing test cannot fall back to detected cargo tests: {} {}",
+        text(&failing),
+        String::from_utf8_lossy(&failing.stderr)
     );
 }
 
