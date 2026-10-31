@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000000"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"clamping SessionEnd hook timeout to 3s in /redacted/codex-home/hooks.json"}}
+2026-10-31T00:00:00.000000Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (http://127.0.0.1:1/mcp)")))
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"```json\n{\"candidate_tree\": \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\", \"approve\": true, \"findings\": []}\n```"}}
+{"type":"turn.completed","usage":{"input_tokens":32264,"cached_input_tokens":13184,"cache_write_input_tokens":0,"output_tokens":47,"reasoning_output_tokens":0}}

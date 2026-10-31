@@ -9,7 +9,9 @@
 //! Usage: `kaisa-fake-agent --mcp-config <file> --fake-write <repository path>
 //! [--try-direct-write <path relative to its working directory>]
 //! (or `--fake-write-next <path prefix>`)
-//! (or `--fake-review-require <path>`: act as a reviewer that approves only if the path exists)
+//! (or `--fake-review-require <path>`: act as a reviewer that approves only if the path exists,
+//! answering as `--fake-review-format raw|claude|claude-prose` says)
+//! [--fake-content <text>: what `--fake-write` writes, instead of the start of the pack]
 //! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [--crash-after-write]
 //! [other flags]`
 //!
@@ -63,10 +65,53 @@ const CODEX_WRITES: &str = "src/written-by-codex.md";
 /// The line of a review pack that names the candidate's tree.
 const CANDIDATE_TREE_LABEL: &str = "candidate_tree: ";
 
+/// How the scripted reviewer answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReviewFormat {
+    /// The verdict alone, as the last line of standard output.
+    Raw,
+    /// Claude Code's stream-json events, the verdict in a code fence inside prose in the
+    /// assistant message and the final `result` event, which is the transcript's last line.
+    Claude,
+    /// The same events, the answer only prose with no verdict.
+    ClaudeProse,
+}
+
+impl ReviewFormat {
+    fn from_flag(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("raw") => Ok(Self::Raw),
+            Some("claude") => Ok(Self::Claude),
+            Some("claude-prose") => Ok(Self::ClaudeProse),
+            Some(other) => Err(format!("unknown review format {other:?}")),
+        }
+    }
+}
+
+/// Prints `answer` the way Claude Code's `-p --output-format stream-json --verbose` does: an
+/// `init` event, the assistant message, and a successful `result` event carrying its text.
+fn print_as_claude(answer: &str) {
+    println!(
+        "{}",
+        json!({"type": "system", "subtype": "init", "cwd": ".", "tools": [], "mcp_servers": [],
+               "model": "claude-haiku-5-5", "session_id": "fake"})
+    );
+    println!(
+        "{}",
+        json!({"type": "assistant", "session_id": "fake", "message": {"role": "assistant",
+               "type": "message", "content": [{"type": "text", "text": answer}]}})
+    );
+    println!(
+        "{}",
+        json!({"duration_ms": 1, "is_error": false, "num_turns": 1, "subtype": "success",
+               "result": answer, "session_id": "fake", "type": "result",
+               "usage": {"input_tokens": 1, "output_tokens": 1}, "total_cost_usd": 0.0})
+    );
+}
+
 /// Reviews the candidate in the working directory: approves if `required` exists there, else
-/// reports one blocking finding. The verdict is the last line of standard output, as a real
-/// reviewer is asked to give it.
-fn review(required: &str) -> Result<(), String> {
+/// reports one blocking finding, answering in `format`.
+fn review(required: &str, format: ReviewFormat) -> Result<(), String> {
     let mut first_line = String::new();
     std::io::stdin()
         .lock()
@@ -92,10 +137,14 @@ fn review(required: &str) -> Result<(), String> {
         json!([{"severity": "blocking", "path": required, "line": null,
                 "message": format!("{required} is missing")}])
     };
-    println!(
-        "{}",
-        json!({"candidate_tree": tree, "approve": approve, "findings": findings})
-    );
+    let verdict: Value = json!({"candidate_tree": tree, "approve": approve, "findings": findings});
+    match format {
+        ReviewFormat::Raw => println!("{verdict}"),
+        ReviewFormat::Claude => print_as_claude(&format!(
+            "I reviewed the candidate against the goal.\n\n```json\n{verdict}\n```"
+        )),
+        ReviewFormat::ClaudeProse => print_as_claude("I reviewed the candidate. Looks good to me!"),
+    }
     Ok(())
 }
 
@@ -134,7 +183,8 @@ fn run() -> Result<(), String> {
     }
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
     if let Some(required) = flag(&args, "--fake-review-require") {
-        return review(&required);
+        let format = ReviewFormat::from_flag(flag(&args, "--fake-review-format").as_deref())?;
+        return review(&required, format);
     }
     // `--fake-usage <input>/<output>/<cost>` reports usage the way Claude Code's stream-json
     // result event does, so usage recording can be tested without a model.
@@ -199,13 +249,15 @@ fn run() -> Result<(), String> {
         .read_line(&mut first_line)
         .map_err(|error| error.to_string())?;
     let first: Value = serde_json::from_str(&first_line).map_err(|error| error.to_string())?;
-    let pack: String = first
-        .pointer("/message/content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .chars()
-        .take(PACK_ECHO_CHARS)
-        .collect();
+    let pack: String = flag(&args, "--fake-content").unwrap_or_else(|| {
+        first
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(PACK_ECHO_CHARS)
+            .collect()
+    });
 
     let mut bridge = Command::new(command)
         .args(&bridge_args)

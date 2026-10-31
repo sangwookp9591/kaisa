@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+use serde_json::Value;
+
+use crate::transcript::{event_type, events};
+
 /// How Kaisa supervises an agent's tool effects (architecture §5.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustMode {
@@ -85,6 +89,35 @@ pub fn codex_observed_argv(launch: &CodexLaunch<'_>) -> Vec<String> {
 
 /// The reasoning levels Codex CLI 0.165 accepts for `model_reasoning_effort`.
 pub const CODEX_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// What Codex finally answered in an `exec --json` `transcript`: the text of its last
+/// `agent_message` item, if a `turn.completed` follows it. A failed turn or a stream error
+/// after the message leaves no answer.
+#[must_use]
+pub fn codex_final_answer(transcript: &str) -> Option<String> {
+    let mut answer: Option<String> = None;
+    let mut completed: bool = false;
+    for event in events(transcript) {
+        match event_type(&event) {
+            Some("item.completed")
+                if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") =>
+            {
+                answer = event
+                    .pointer("/item/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                completed = false;
+            }
+            Some("turn.completed") => completed = true,
+            Some("turn.failed" | "error") => {
+                answer = None;
+                completed = false;
+            }
+            _ => {}
+        }
+    }
+    answer.filter(|_| completed)
+}
 
 fn is_safe_launch_value(value: &str) -> bool {
     !value.is_empty()
