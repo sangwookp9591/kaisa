@@ -66,6 +66,7 @@ pub struct AppContainerProfile {
     name: Vec<u16>,
     sid: PSID,
     capability: Option<std::sync::Arc<CapabilitySid>>,
+    sid_from_text: bool,
 }
 
 impl AppContainerProfile {
@@ -103,6 +104,45 @@ impl AppContainerProfile {
             name,
             sid,
             capability: None,
+            sid_from_text: false,
+        })
+    }
+
+    /// Opens an existing attempt's container identity from its recorded SID, without
+    /// creating a new profile or changing its filesystem grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text is not an AppContainer SID or Windows rejects it.
+    pub fn from_sid_string(text: &str) -> io::Result<Self> {
+        if !text.starts_with("S-1-15-2-")
+            || !text
+                .chars()
+                .all(|character| character.is_ascii_digit() || matches!(character, 'S' | '-'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not an AppContainer SID",
+            ));
+        }
+        let text = wide(OsStr::new(text));
+        let mut sid: PSID = null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: text is NUL-terminated; sid receives a LocalAlloc allocation owned below.
+        let converted = unsafe {
+            windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW(
+                text.as_ptr(),
+                &raw mut sid,
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            name: Vec::new(),
+            sid,
+            capability: None,
+            sid_from_text: true,
         })
     }
 
@@ -190,6 +230,12 @@ impl AppContainerProfile {
     ///
     /// Returns the error Windows reports if the profile cannot be deleted.
     pub fn delete(self) -> io::Result<()> {
+        if self.name.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a SID-only profile cannot be deleted",
+            ));
+        }
         #[allow(unsafe_code)]
         // SAFETY: `name` is NUL-terminated.
         let deleted: i32 = unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
@@ -282,10 +328,14 @@ impl Drop for AppContainerProfile {
     fn drop(&mut self) {
         if !self.sid.is_null() {
             #[allow(unsafe_code)]
-            // SAFETY: the SID came from CreateAppContainerProfile or its Derive counterpart,
-            // which document FreeSid as the way to release it; it is freed once, here.
+            // SAFETY: each SID is released once with its matching allocator: textual SIDs
+            // use LocalFree; CreateAppContainerProfile/Derive SIDs use FreeSid.
             unsafe {
-                FreeSid(self.sid);
+                if self.sid_from_text {
+                    LocalFree(self.sid as HLOCAL);
+                } else {
+                    FreeSid(self.sid);
+                }
             }
         }
     }

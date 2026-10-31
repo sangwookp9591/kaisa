@@ -8,7 +8,9 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use kaisa_domain::{RepoPath, Role, WriteSet, sandbox_profile};
+#[cfg(not(windows))]
+use kaisa_domain::sandbox_profile;
+use kaisa_domain::{RepoPath, Role, WriteSet};
 use serde_json::{Value, json};
 
 use crate::broker::{ExecSandbox, FileBroker};
@@ -99,6 +101,7 @@ impl BridgeConfig {
     }
 
     /// The exec sandbox this attempt gets on this OS.
+    #[cfg(not(windows))]
     fn exec_sandbox(&self) -> io::Result<ExecSandbox> {
         let worktree: PathBuf = self.worktree.canonicalize()?;
         let mut writable: Vec<PathBuf> = sandbox_profile(self.role, &self.write_set)
@@ -143,13 +146,19 @@ pub fn serve_attempt(
     input: impl BufRead,
     output: &mut dyn Write,
 ) -> io::Result<()> {
-    attempt_server(&BridgeConfig::load(attempt_directory)?)?
-        .serve(input, output)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
+    attempt_server(
+        &BridgeConfig::load(attempt_directory)?,
+        #[cfg(windows)]
+        std::fs::read_to_string(attempt_directory.join(crate::CONTAINER_SID_FILE))
+            .ok()
+            .as_deref(),
+    )?
+    .serve(input, output)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))
 }
 
 /// What `kaisa mcp --attempt` does: relay to the attempt's broker when one is listening outside
-/// the sandbox, otherwise serve the attempt's tools in this process (Windows until T15.5s).
+/// the sandbox, otherwise serve the attempt's tools in this process. Windows exec still requires its container.
 ///
 /// # Errors
 ///
@@ -171,13 +180,44 @@ fn bridge_from(
 }
 
 /// The MCP server holding the attempt's tools and its broker.
-pub(crate) fn attempt_server(config: &BridgeConfig) -> io::Result<McpServer<FileBroker>> {
+pub(crate) fn attempt_server(
+    config: &BridgeConfig,
+    #[cfg(windows)] container_sid: Option<&str>,
+) -> io::Result<McpServer<FileBroker>> {
     let mut broker: FileBroker = FileBroker::new(&config.worktree, config.write_set.clone())?;
     if tools_for(config.role)
         .iter()
         .any(|tool| tool.name == "exec")
     {
-        broker = broker.with_exec(config.exec_sandbox()?);
+        #[cfg(not(windows))]
+        {
+            broker = broker.with_exec(config.exec_sandbox()?);
+        }
+        #[cfg(windows)]
+        {
+            let profile = container_sid
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the attempt has no AppContainer SID",
+                    )
+                })
+                .and_then(|sid| kaisa_sys::AppContainerProfile::from_sid_string(sid.trim()));
+            let sandbox = match profile {
+                Ok(profile) => match kaisa_sys::CapabilitySid::derive("kaisaAgentPrograms") {
+                    Ok(programs) => ExecSandbox::AppContainer(
+                        profile.with_capability(std::sync::Arc::new(programs)),
+                    ),
+                    Err(error) => ExecSandbox::Unavailable(format!(
+                        "exec requires the attempt's program capability: {error}"
+                    )),
+                },
+                Err(error) => ExecSandbox::Unavailable(format!(
+                    "exec requires the attempt's AppContainer: {error}"
+                )),
+            };
+            broker = broker.with_exec(sandbox);
+        }
     }
     Ok(McpServer::new(tools_for(config.role), broker))
 }
