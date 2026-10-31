@@ -12,10 +12,13 @@ use kaisa_workspace::{Candidate, CandidateCheckout, RiskFinding, freeze_candidat
 use serde_json::json;
 
 use crate::gate::{Delivery, decide_delivery};
-use crate::goal::{AgentLauncher, GoalError, GoalOutcome, GoalRequest, at, record, run_goal};
+use crate::goal::{
+    AgentLauncher, AttemptContext, GoalError, GoalOutcome, GoalRequest, at, record,
+    run_goal_with_context,
+};
 use crate::ids::fresh_suffix;
 use crate::review::verdict_in_answer;
-use crate::revision::{RevisionBudget, revision_goal};
+use crate::revision::{RevisionBudget, revision_findings};
 use crate::verify::{Evidence, run_trusted_checks};
 
 /// The line of a review pack that names the candidate's tree.
@@ -95,9 +98,58 @@ fn review_instruction(goal: &str, candidate: &Candidate) -> String {
          Verdict schema: \
          {{\"candidate_tree\": \"...\", \"approve\": true|false, \"findings\": [{{\"severity\": \
          \"blocking\"|\"advisory\", \"path\": \"...\", \"line\": n|null, \"message\": \"...\"}}]}}\n\n\
+         Trusted checks already ran on this exact candidate; their commands, exit status, \
+         confinement status and scrubbed output are in the Trusted checks section. Confined \
+         checks ran in Kaisa's sandbox; confined=false explicitly means reduced confinement. \
+         Do not ask to re-run these checks. \
+         \"I could not verify\" is not by itself a blocking finding when the evidence is in the pack.\n\n\
          Goal: {goal}\n{CANDIDATE_TREE_LABEL}{}\n",
         candidate.tree
     )
+}
+
+/// Execution metadata is Kaisa-authored; command and output strings are quoted by the pack.
+fn review_check_receipts(candidate: &Candidate, evidence: &[Evidence]) -> String {
+    let mut text = format!("candidate_tree: {}\n", candidate.tree);
+    if evidence.is_empty() {
+        text.push_str("No trusted test commands ran.\n");
+    }
+    for piece in evidence {
+        // Never present stale evidence as a receipt for this review.
+        if piece.candidate_tree != candidate.tree {
+            continue;
+        }
+        let command = piece
+            .check
+            .iter()
+            .map(|arg| {
+                if kaisa_workspace::scan_for_secrets(arg).is_empty() {
+                    arg.clone()
+                } else {
+                    "[omitted: secret detected]".to_owned()
+                }
+            })
+            .collect::<Vec<_>>();
+        let exit = match piece.exit {
+            Some(ProcessExit::Code(code)) => format!("code {code}"),
+            Some(ProcessExit::Terminated) => "terminated".to_owned(),
+            None => "deadline exceeded".to_owned(),
+        };
+        text.push_str(&format!(
+            "command (argv): {}\nexit: {exit}\nconfined: {}\n",
+            serde_json::to_string(&command).expect("string argv"),
+            piece.confined
+        ));
+        if let Some(reason) = piece.bounded_failure_reason() {
+            text.push_str(&format!("invalid evidence: {}\n", safe_reason(&reason)));
+        }
+        text.push_str(&format!(
+            "Output tail (at most {} bytes; quoted untrusted data):\n{}\n",
+            crate::verify::CHECK_OUTPUT_TAIL_BYTES,
+            piece.output_tail
+        ));
+    }
+    text
 }
 
 /// A review is consumable only after a successful process and a complete capture.
@@ -235,25 +287,31 @@ fn run_verified_goal_inner(
         freeze_candidate(request.repository, "HEAD").map_err(at("resolving the base"))?;
     let mut budget = RevisionBudget::new(request.policy.policy().revision_limit);
     let mut base: String = original_base.commit.clone();
-    let mut instruction: String = request.goal.to_owned();
+    let mut findings: Vec<String> = Vec::new();
     let no_paths = WriteSet::default();
     loop {
-        let developed: GoalOutcome = run_goal(&GoalRequest {
-            repository: request.repository,
-            goal: &instruction,
-            base: &base,
-            state_directory: request.state_directory,
-            write_set: request.write_set,
-            role: Role::Developer,
-            launch: request.developer,
-            kaisa_executable: request.kaisa_executable,
-            confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-            egress_hosts: request.egress_hosts,
-            agent_writable: request.agent_writable,
-            local_model_port: None,
-            observed: request.observed,
-            reduced_mode: request.reduced_mode,
-        })?;
+        let developed: GoalOutcome = run_goal_with_context(
+            &GoalRequest {
+                repository: request.repository,
+                goal: request.goal,
+                base: &base,
+                state_directory: request.state_directory,
+                write_set: request.write_set,
+                role: Role::Developer,
+                launch: request.developer,
+                kaisa_executable: request.kaisa_executable,
+                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                egress_hosts: request.egress_hosts,
+                agent_writable: request.agent_writable,
+                local_model_port: None,
+                observed: request.observed,
+                reduced_mode: request.reduced_mode,
+            },
+            &AttemptContext {
+                findings: &findings,
+                ..AttemptContext::default()
+            },
+        )?;
         let commit: Option<String> = developed.commit.clone();
         let agent_ok: bool = developed.exit == Some(ProcessExit::Code(0));
         attempts.push(developed);
@@ -344,6 +402,20 @@ fn run_verified_goal_inner(
                     "weakened_tests": piece.weakened_tests}),
             )?;
         }
+        let diff =
+            kaisa_workspace::candidate_diff(request.repository, &original_base.commit, &candidate)
+                .map_err(at("reading the candidate diff"))?;
+        let diff_remainder = format!(
+            "Diff truncated to fit the context budget. Read the complete patch in your worktree with: git diff --no-ext-diff --no-textconv {} {} --",
+            original_base.commit, candidate.tree
+        );
+        let check_receipts = review_check_receipts(&candidate, &evidence);
+        let review_context = AttemptContext {
+            findings: &[],
+            diff: &diff,
+            diff_remainder: &diff_remainder,
+            checks: &check_receipts,
+        };
         if let Some(first_pass) = request.first_pass {
             // AppContainer has no loopback, so only a first pass that must reach a local model
             // server leaves confinement on Windows; any other first pass stays confined.
@@ -355,22 +427,25 @@ fn run_verified_goal_inner(
                 ),
                 _ => kaisa_domain::ReducedModeBasis::None,
             };
-            let glanced: GoalOutcome = run_goal(&GoalRequest {
-                repository: request.repository,
-                goal: &review_instruction(request.goal, &candidate),
-                base: &candidate.commit,
-                state_directory: request.state_directory,
-                write_set: &no_paths,
-                role: Role::Reviewer,
-                launch: first_pass.launch,
-                kaisa_executable: request.kaisa_executable,
-                confine_agent: !needs_loopback,
-                egress_hosts: &[],
-                agent_writable: &[],
-                local_model_port: first_pass.model_port,
-                observed: false,
-                reduced_mode: &local_basis,
-            })?;
+            let glanced: GoalOutcome = run_goal_with_context(
+                &GoalRequest {
+                    repository: request.repository,
+                    goal: &review_instruction(request.goal, &candidate),
+                    base: &candidate.commit,
+                    state_directory: request.state_directory,
+                    write_set: &no_paths,
+                    role: Role::Reviewer,
+                    launch: first_pass.launch,
+                    kaisa_executable: request.kaisa_executable,
+                    confine_agent: !needs_loopback,
+                    egress_hosts: &[],
+                    agent_writable: &[],
+                    local_model_port: first_pass.model_port,
+                    observed: false,
+                    reduced_mode: &local_basis,
+                },
+                &review_context,
+            )?;
             record_review(&context, &candidate, &glanced, true)?;
             if let Some(failure) = reviewer_failure(&glanced) {
                 attempts.push(glanced);
@@ -409,26 +484,29 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                instruction = revision_goal(request.goal, &reasons);
+                findings = revision_findings(&reasons);
                 continue;
             }
         }
-        let reviewed: GoalOutcome = run_goal(&GoalRequest {
-            repository: request.repository,
-            goal: &review_instruction(request.goal, &candidate),
-            base: &candidate.commit,
-            state_directory: request.state_directory,
-            write_set: &no_paths,
-            role: Role::Reviewer,
-            launch: request.reviewer,
-            kaisa_executable: request.kaisa_executable,
-            confine_agent: request.confine_agent && request.policy.policy().confine_agents,
-            egress_hosts: request.egress_hosts,
-            agent_writable: request.agent_writable,
-            local_model_port: None,
-            observed: false,
-            reduced_mode: request.reduced_mode,
-        })?;
+        let reviewed: GoalOutcome = run_goal_with_context(
+            &GoalRequest {
+                repository: request.repository,
+                goal: &review_instruction(request.goal, &candidate),
+                base: &candidate.commit,
+                state_directory: request.state_directory,
+                write_set: &no_paths,
+                role: Role::Reviewer,
+                launch: request.reviewer,
+                kaisa_executable: request.kaisa_executable,
+                confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+                egress_hosts: request.egress_hosts,
+                agent_writable: request.agent_writable,
+                local_model_port: None,
+                observed: false,
+                reduced_mode: request.reduced_mode,
+            },
+            &review_context,
+        )?;
         record_review(&context, &candidate, &reviewed, false)?;
         if let Some(failure) = reviewer_failure(&reviewed) {
             attempts.push(reviewed);
@@ -454,7 +532,7 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                instruction = revision_goal(request.goal, &reasons);
+                findings = revision_findings(&reasons);
             }
             other => {
                 return finish(

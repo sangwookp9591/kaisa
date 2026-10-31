@@ -34,6 +34,47 @@ pub fn freeze_candidate(repository: &Path, revision: &str) -> Result<Candidate, 
     Ok(Candidate { commit, tree })
 }
 
+/// A deterministic unified patch between the base and frozen candidate tree.
+/// Paths are never parsed as lines or passed through a shell: Git quotes unusual names.
+/// External diff drivers and text conversion are disabled for untrusted candidate content.
+///
+/// # Errors
+/// Returns [`GitError`] if Git cannot compare the trees.
+pub fn candidate_diff(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<String, GitError> {
+    let bytes = run_git(
+        repository,
+        &[
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "diff.submodule=short",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--no-renames",
+            "--diff-algorithm=myers",
+            "--no-indent-heuristic",
+            "--unified=3",
+            "--inter-hunk-context=0",
+            "-O",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--ignore-submodules=all",
+            base,
+            &candidate.tree,
+            "--",
+        ],
+    )?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// File names that decide what a project's checks do. A candidate that changes one could make
 /// its own checks pass, so evidence names such changes and delivery needs a person for them.
 const CHECK_DEFINITION_FILES: [&str; 17] = [
@@ -920,6 +961,26 @@ mod tests {
         Candidate, CandidateCheckout, changed_check_definitions, changed_paths, freeze_candidate,
     };
     use crate::test_support::{TemporaryRepository, a_repository_with_one_commit_on_main};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_diff_with_non_ascii_and_newline_paths_keeps_the_patch_and_quotes_the_name() {
+        let repository = a_repository_with_one_commit_on_main();
+        let base = freeze_candidate(repository.path(), "HEAD").expect("base");
+        repository.commit_file("src/검사\nnotes.md", "review this change\n", "unusual path");
+        let candidate = freeze_candidate(repository.path(), "HEAD").expect("candidate");
+        let diff =
+            super::candidate_diff(repository.path(), &base.commit, &candidate).expect("patch");
+        assert!(
+            diff.contains("+review this change") && diff.contains("\\nnotes.md"),
+            "Git must quote control characters without losing or splitting paths: {diff}"
+        );
+        assert_eq!(
+            diff,
+            super::candidate_diff(repository.path(), &base.commit, &candidate).expect("repeat"),
+            "fixed trees produce identical patches"
+        );
+    }
 
     #[test]
     fn a_candidate_is_the_preserved_commit_and_its_tree() {

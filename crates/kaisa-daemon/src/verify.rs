@@ -17,6 +17,8 @@ use crate::ids::fresh_suffix;
 const CHECK_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How much of a check's output is kept for its digest, in bytes.
 const CHECK_OUTPUT_CAP: usize = 16 * 1024 * 1024;
+/// Maximum UTF-8 bytes of scrubbed captured output given to a reviewer per check.
+pub(crate) const CHECK_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
 /// Maximum length of a Kaisa-authored check failure reason shown at the gate.
 const MAX_CHECK_FAILURE_REASON_CHARS: usize = 160;
 /// Fixed text only: never include check output, which may contain credentials.
@@ -36,6 +38,8 @@ pub struct Evidence {
     pub failure_reason: Option<String>,
     /// The digest of its output, so the evidence can be matched to a stored transcript.
     pub output_digest: String,
+    /// Bounded captured output tail, scrubbed before it can enter a recorded pack.
+    pub output_tail: String,
     /// False if the check ran without OS confinement (Windows until checks get a container).
     pub confined: bool,
     /// Check-definition files the candidate changed since its base; when any are named, the
@@ -140,6 +144,7 @@ pub fn run_trusted_checks(
             exit: run.exit,
             failure_reason: source_changed.then(|| CHANGED_CHECK_SOURCES.to_owned()),
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
+            output_tail: review_output_tail(&run),
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
             weakened_tests: weakened_tests.clone(),
@@ -150,6 +155,24 @@ pub fn run_trusted_checks(
         }
     }
     Ok(evidence)
+}
+
+/// Scan the complete capture before taking a tail: truncation must not hide a secret.
+fn review_output_tail(run: &CapturedRun) -> String {
+    let output = String::from_utf8_lossy(&run.output);
+    if !kaisa_workspace::scan_for_secrets(&output).is_empty() {
+        return "[omitted: secret detected]".to_owned();
+    }
+    // A truncated capture contains a prefix, not the process's final output. Do not imply
+    // that its last bytes are the final lines, or that uncaptured bytes were scanned.
+    if run.truncated {
+        return "[omitted: check output exceeded capture limit]".to_owned();
+    }
+    let mut start = output.len().saturating_sub(CHECK_OUTPUT_TAIL_BYTES);
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    output[start..].to_owned()
 }
 
 /// The clean checkout's original Git metadata, pinned before executing untrusted checks.
@@ -464,5 +487,54 @@ mod tests {
             "build outputs must remain writable without a checkout-wide Landlock grant"
         );
         std::fs::remove_dir_all(base).expect("remove the check fixture");
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use kaisa_sys::{CapturedRun, ProcessExit};
+
+    use super::{CHECK_OUTPUT_TAIL_BYTES, review_output_tail};
+
+    fn captured_output(text: &str) -> CapturedRun {
+        CapturedRun {
+            output: text.as_bytes().to_vec(),
+            exit: Some(ProcessExit::Code(0)),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn long_check_output_keeps_only_a_utf8_tail_within_the_named_limit() {
+        let output = format!("{}final result", "검사".repeat(CHECK_OUTPUT_TAIL_BYTES));
+        let tail = review_output_tail(&captured_output(&output));
+        assert!(
+            tail.len() <= CHECK_OUTPUT_TAIL_BYTES && tail.ends_with("final result"),
+            "the final result survives without exceeding the byte cap or splitting UTF-8"
+        );
+    }
+
+    #[test]
+    fn a_secret_before_the_visible_tail_omits_the_entire_output() {
+        let output = format!(
+            "AKIAABCDEFGHIJKLMNOP\n{}",
+            "passed\n".repeat(CHECK_OUTPUT_TAIL_BYTES)
+        );
+        let tail = review_output_tail(&captured_output(&output));
+        assert_eq!(
+            tail, "[omitted: secret detected]",
+            "scanning only the bounded tail would conceal an earlier credential"
+        );
+    }
+
+    #[test]
+    fn a_truncated_capture_is_omitted_instead_of_claiming_to_be_the_final_tail() {
+        let mut run = captured_output("initial output");
+        run.truncated = true;
+        assert_eq!(
+            review_output_tail(&run),
+            "[omitted: check output exceeded capture limit]",
+            "a prefix capture cannot prove the final output or the absence of later secrets"
+        );
     }
 }

@@ -16,8 +16,8 @@ mod test_support;
 mod worktree;
 
 pub use candidate::{
-    Candidate, CandidateCheckout, changed_check_definitions, changed_paths, freeze_candidate,
-    weakened_tests,
+    Candidate, CandidateCheckout, candidate_diff, changed_check_definitions, changed_paths,
+    freeze_candidate, weakened_tests,
 };
 pub use git::{GitError, git_cli_path};
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};

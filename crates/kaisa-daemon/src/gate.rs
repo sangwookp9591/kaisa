@@ -166,6 +166,7 @@ mod tests {
             check: vec!["cargo".to_owned(), "test".to_owned()],
             exit: Some(exit),
             output_digest: "digest-of-test-output".to_owned(),
+            output_tail: String::new(),
             confined: true,
             definitions_changed: Vec::new(),
             weakened_tests: Vec::new(),
