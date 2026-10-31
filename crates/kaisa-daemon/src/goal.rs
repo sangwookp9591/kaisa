@@ -363,6 +363,8 @@ fn run_goal_inner(
     } else {
         request.reduced_mode
     };
+    let recorded_basis = basis.for_missing(&expected_missing(confine_agent));
+    let basis = &recorded_basis;
     let admission: Admission = admit_on(&expected_missing(confine_agent), basis, now_ms());
     if decision_budget(basis).is_none() {
         return Err(GoalError::refused(admission.missing(), basis));

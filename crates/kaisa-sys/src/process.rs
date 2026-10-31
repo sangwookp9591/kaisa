@@ -1,7 +1,7 @@
 //! Processes Kaisa owns: started, waited for and ended by Kaisa (architecture §5.1).
 //!
-//! This is the portable layer on top of `std::process`. Process groups, Job Objects and pidfds
-//! are added per operating system in later steps without changing this API.
+//! The portable layer on top of `std::process`, process groups and descendant walks, Linux
+//! pidfds, and Windows Job Objects. Unix descendant cleanup remains a reduced guarantee.
 
 use std::io;
 use std::path::PathBuf;
@@ -16,7 +16,8 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     /// The working directory.
     pub working_directory: PathBuf,
-    /// Variables added to (or replacing ones in) the inherited environment.
+    /// Variables added to (or replacing ones in) Kaisa's allow-listed base environment.
+    /// Provider credentials must be explicitly supplied by their agent adapter.
     pub env: Vec<(String, String)>,
 }
 
@@ -64,8 +65,8 @@ impl OwnedProcess {
     pub(crate) fn spawn_owned(mut command: Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            // The process leads a new process group, so everything it starts can be ended
-            // together by signalling the group.
+            // The process leads a new group. Cleanup also walks attached descendants that
+            // leave it with setsid/setpgid; already reparented daemons remain a platform limit.
             std::os::unix::process::CommandExt::process_group(&mut command, 0);
         }
         #[cfg(windows)]
@@ -84,7 +85,7 @@ impl OwnedProcess {
 
     /// Starts a command whose stdio and session were already prepared by the caller, such as
     /// an agent attached to a terminal. The caller is responsible for making the child lead
-    /// its own process group, so that [`kill_tree`](Self::kill_tree) reaches its descendants.
+    /// its own process group, so that [`kill_tree`](Self::kill_tree) can signal that group.
     #[cfg(unix)]
     pub(crate) fn spawn_prepared(mut command: Command) -> io::Result<Self> {
         Self::adopt(command.spawn()?)
@@ -217,9 +218,10 @@ impl OwnedProcess {
         Ok(self.child.try_wait()?.is_some())
     }
 
-    /// Ends the process and everything it started (its process group on Unix, its Job Object
-    /// on Windows). Ending a process that already exited is not an error; its leftover
-    /// children are still ended, because an agent may leave background processes behind.
+    /// Ends the Job Object on Windows; on macOS/Linux, walks attached descendants and ends
+    /// them plus the process group. Unix children already reparented outside the tree cannot
+    /// be discovered: descendant containment must be labelled reduced on Unix.
+    /// Ending a process that already exited is not an error.
     ///
     /// # Errors
     ///
@@ -232,9 +234,15 @@ impl OwnedProcess {
         self.end_tree()
     }
 
-    /// Ends the process group led by the child, then the child itself if it still runs.
+    /// Ends attached descendants, the child's process group, and the child if still running.
     #[cfg(unix)]
     fn end_tree(&mut self) -> io::Result<()> {
+        // A reaped leader's PID could belong to someone else; its former PPID tree is gone.
+        let descendants = if self.child.try_wait()?.is_none() {
+            unix::kill_descendants(self.child.id())
+        } else {
+            Ok(())
+        };
         let killed: io::Result<()> = unix::kill_process_group(self.child.id());
         // Only asked when the kill failed: whether the leader has exited, which reaps it.
         let leader_exited: bool = killed.is_err() && self.child.try_wait()?.is_some();
@@ -242,13 +250,16 @@ impl OwnedProcess {
         #[cfg(target_os = "linux")]
         if let Some(pidfd) = &self.pidfd {
             // Addresses exactly our child, even if its PID was reused.
-            return crate::pidfd::kill(pidfd);
+            crate::pidfd::kill(pidfd)?;
+            return descendants;
         }
-        match self.child.kill() {
+        let leader = match self.child.kill() {
             // Already exited (and possibly already reaped).
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
             other => other,
-        }
+        };
+        leader?;
+        descendants
     }
 
     /// Ends every process in the job, including the child.
@@ -278,8 +289,67 @@ pub(crate) fn command_for(spec: &ProcessSpec) -> Command {
     command
         .args(&spec.args)
         .current_dir(&spec.working_directory)
+        .env_clear()
+        .envs(base_environment())
         .envs(spec.env.iter().map(|(name, value)| (name, value)));
     command
+}
+
+/// The inherited environment shared by agents and trusted checks. Toolchain locations keep
+/// cargo, npm, Java and Python checks usable without forwarding provider keys or arbitrary
+/// configuration. Egress proxy variables are supplied explicitly by the broker, never inherited.
+#[must_use]
+pub fn base_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(name, _)| name.to_str().is_some_and(is_base_variable))
+        .collect()
+}
+
+fn is_base_variable(name: &str) -> bool {
+    // Windows names are case insensitive, including PATH/Path and SystemRoot/SYSTEMROOT.
+    let normalized;
+    let name = if cfg!(windows) {
+        normalized = name.to_ascii_uppercase();
+        normalized.as_str()
+    } else {
+        name
+    };
+    name.starts_with("LC_")
+        || matches!(
+            name,
+            "PATH"
+                | "HOME"
+                | "USER"
+                | "LOGNAME"
+                | "SHELL"
+                | "TMPDIR"
+                | "LANG"
+                | "TERM"
+                | "SYSTEMROOT"
+                | "COMSPEC"
+                | "PATHEXT"
+                | "USERPROFILE"
+                | "APPDATA"
+                | "LOCALAPPDATA"
+                | "TEMP"
+                | "TMP"
+                | "CARGO_HOME"
+                | "RUSTUP_HOME"
+                | "RUSTUP_TOOLCHAIN"
+                | "NVM_DIR"
+                | "VOLTA_HOME"
+                | "PNPM_HOME"
+                | "NODE_PATH"
+                | "NPM_CONFIG_PREFIX"
+                | "npm_config_prefix"
+                | "NPM_CONFIG_CACHE"
+                | "npm_config_cache"
+                | "BUN_INSTALL"
+                | "JAVA_HOME"
+                | "VIRTUAL_ENV"
+                | "CONDA_PREFIX"
+                | "PYENV_ROOT"
+        )
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -301,12 +371,172 @@ impl OwnedProcess {
 /// Sends SIGKILL to the process group led by `leader`; a group that is gone is not an error.
 #[cfg(unix)]
 pub(crate) fn end_process_group(leader: u32) -> io::Result<()> {
-    unix::kill_process_group(leader)
+    let descendants = unix::kill_descendants(leader);
+    unix::kill_process_group(leader)?;
+    descendants
 }
 
 #[cfg(unix)]
 mod unix {
     use std::io;
+
+    /// Discover before signalling parents, since killing them first reparents their children.
+    /// Repeated snapshots include children created during a previous walk. A daemon already
+    /// reparented before discovery, or forking during the final signal race, remains a reduced
+    /// platform capability; a PPID walk is not a cgroup or a Job Object.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(super) fn kill_descendants(leader: u32) -> io::Result<()> {
+        let Some(root) = crate::ProcessIdentity::of(leader)? else {
+            return Ok(());
+        };
+        signal(root.pid, libc::SIGSTOP)?;
+        let mut known = std::collections::BTreeMap::new();
+        let mut failure = None;
+        'discover: loop {
+            let before = known.len();
+            let mut parents = vec![root];
+            parents.extend(known.values().copied());
+            for parent in parents {
+                // Never walk children of an unrelated process that reused a recorded PID.
+                let children = parent.is_running().and_then(|running| {
+                    if running {
+                        children_of(parent.pid)
+                    } else {
+                        Ok(Vec::new())
+                    }
+                });
+                let children = match children {
+                    Ok(children) => children,
+                    Err(error) => {
+                        failure = Some(error);
+                        break 'discover;
+                    }
+                };
+                for pid in children {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = known.entry(pid) {
+                        match crate::ProcessIdentity::of(pid) {
+                            Ok(Some(identity)) => {
+                                // Stop discovered parents before expanding their descendants so
+                                // a fork loop cannot outrun cleanup indefinitely.
+                                entry.insert(identity);
+                                if let Err(error) = signal(pid, libc::SIGSTOP) {
+                                    failure = Some(error);
+                                    break 'discover;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                failure = Some(error);
+                                break 'discover;
+                            }
+                        }
+                    }
+                }
+            }
+            if known.len() == before {
+                break;
+            }
+        }
+        // Still kill everything recorded if enumeration failed, then let the caller kill the
+        // group. In particular, no stopped session-escaped child is left behind on error.
+        // Leave the stopped leader alive until the caller signals the group. Besides keeping
+        // its group ID reserved, this avoids a zombie-only group returning EPERM on macOS.
+        for identity in known.values() {
+            let result = identity.is_running().and_then(|running| {
+                if running {
+                    signal(identity.pid, libc::SIGKILL)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub(super) fn kill_descendants(_leader: u32) -> io::Result<()> {
+        // These Unix targets are labelled missing every containment capability by admission.
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
+        let pid = libc::pid_t::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
+        #[allow(unsafe_code)]
+        // SAFETY: kill has no memory preconditions; the caller checked the recorded identity.
+        let result = unsafe { libc::kill(pid, signal) };
+        if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn children_of(parent: u32) -> io::Result<Vec<u32>> {
+        let parent =
+            libc::pid_t::try_from(parent).map_err(|_| io::Error::other("pid out of range"))?;
+        // proc_listpids returns bytes (unlike proc_listchildpids, which returns a pid count).
+        const PROC_PPID_ONLY: u32 = 6;
+        let mut pids = vec![0_i32; 32];
+        loop {
+            let bytes = libc::c_int::try_from(size_of_val(pids.as_slice()))
+                .map_err(|_| io::Error::other("process table too large"))?;
+            #[allow(unsafe_code)]
+            // SAFETY: pids is a writable buffer of `bytes` bytes, and the PPID filter has no pointers.
+            let written = unsafe {
+                libc::proc_listpids(
+                    PROC_PPID_ONLY,
+                    parent as u32,
+                    pids.as_mut_ptr().cast(),
+                    bytes,
+                )
+            };
+            if written < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if written < bytes {
+                pids.truncate(written as usize / size_of::<libc::pid_t>());
+                return Ok(pids
+                    .into_iter()
+                    .filter_map(|pid| u32::try_from(pid).ok().filter(|pid| *pid != 0))
+                    .collect());
+            }
+            pids.resize(pids.len() * 2, 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn children_of(parent: u32) -> io::Result<Vec<u32>> {
+        let mut children = Vec::new();
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            // comm (field 2) can contain ')' and spaces; state and PPID follow its last ')'.
+            let ppid = stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|field| field.parse::<u32>().ok());
+            if ppid == Some(parent) {
+                children.push(pid);
+            }
+        }
+        Ok(children)
+    }
 
     /// Sends SIGKILL to every process in the group led by `leader`. A group that no longer
     /// exists is not an error.
@@ -476,6 +706,60 @@ mod tests {
     }
 
     #[test]
+    fn the_base_environment_keeps_toolchain_locations_and_excludes_provider_credentials() {
+        for allowed in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "NVM_DIR",
+            "VOLTA_HOME",
+            "JAVA_HOME",
+        ] {
+            assert!(
+                super::is_base_variable(allowed),
+                "{allowed} is a declared runtime or toolchain location"
+            );
+        }
+        for secret in [
+            "KAISA_TEST_UNRELATED_SECRET",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+        ] {
+            assert!(
+                !super::is_base_variable(secret),
+                "{secret} must be passed explicitly by its adapter or Kaisa's egress broker"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_environment_names_are_matched_without_case_sensitivity() {
+        for essential in [
+            "Path",
+            "SystemRoot",
+            "ComSpec",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+        ] {
+            assert!(
+                super::is_base_variable(essential),
+                "Windows needs its declared essential {essential}"
+            );
+        }
+    }
+
+    #[test]
     fn a_spawned_process_reports_its_exit_code_when_waited_for() {
         let mut process: OwnedProcess = started(&a_process_that_exits_with(AGENT_FAILURE_CODE));
 
@@ -605,6 +889,61 @@ mod tests {
             assert!(
                 disappears_within_patience(grandchild),
                 "a background process left by the agent must not survive cleanup"
+            );
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[test]
+        fn killing_the_tree_ends_a_grandchild_that_started_a_new_session() {
+            const FIXTURE_PID_FILE: &str = "KAISA_TEST_SESSION_PID_FILE";
+            const TEST: &str = "process::tests::unix_tree::killing_the_tree_ends_a_grandchild_that_started_a_new_session";
+            if let Some(path) = std::env::var_os(FIXTURE_PID_FILE) {
+                #[allow(unsafe_code)]
+                // SAFETY: setsid changes only this fixture process's session, touching no memory.
+                let session = unsafe { libc::setsid() };
+                assert_eq!(
+                    u32::try_from(session).ok(),
+                    Some(std::process::id()),
+                    "the grandchild must become a new session leader"
+                );
+                std::fs::write(path, std::process::id().to_string()).expect("report fixture pid");
+                std::thread::sleep(std::time::Duration::from_secs(
+                    super::super::test_support::LONG_RUNNING_SECONDS.into(),
+                ));
+                return;
+            }
+            let pid_file = a_fresh_pid_file();
+            let _ = std::fs::remove_file(&pid_file);
+            let mut spec =
+                super::super::test_support::shell("\"$1\" --exact \"$2\" --nocapture & wait");
+            spec.args.extend([
+                "session-fixture".to_owned(),
+                std::env::current_exe()
+                    .expect("test executable")
+                    .to_string_lossy()
+                    .into_owned(),
+                TEST.to_owned(),
+            ]);
+            spec.env.push((
+                FIXTURE_PID_FILE.to_owned(),
+                pid_file.to_string_lossy().into_owned(),
+            ));
+            let mut agent = OwnedProcess::spawn(&spec).expect("the fixture starts");
+            let grandchild = wait_for_pid_in(&pid_file);
+            agent.kill_tree().expect("tree cleanup succeeds");
+            agent.wait().expect("leader reaped");
+            let ended = disappears_within_patience(grandchild);
+            if !ended {
+                #[allow(unsafe_code)]
+                // SAFETY: kill has no memory preconditions; clean up the failed regression fixture.
+                unsafe {
+                    libc::kill(grandchild, libc::SIGKILL);
+                }
+            }
+            let _ = std::fs::remove_file(pid_file);
+            assert!(
+                ended,
+                "setsid must not let an attached descendant survive tree cleanup"
             );
         }
     }

@@ -106,6 +106,43 @@ fn a_goal_runs_to_a_preserved_result_with_a_scripted_agent() {
         reduced_mode: &kaisa_domain::ReducedModeBasis::None,
     })
     .expect("the goal runs");
+    #[cfg(unix)]
+    {
+        let ledger =
+            kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("ledger opens");
+        let events = ledger
+            .read_from(kaisa_domain::Sequence::FIRST)
+            .expect("admission can be read");
+        let event = events
+            .iter()
+            .find(|event| event.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted)
+            .expect("admission was recorded");
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.recorded.event.payload).expect("admission is JSON");
+        let containment = &payload["containment"];
+        assert_eq!(
+            containment["admission"], "reduced",
+            "a Unix sandbox must not promise complete cleanup of reparented descendants"
+        );
+        assert_eq!(
+            containment["basis"], "platform-limit",
+            "the ledger identifies the documented automatic reduced policy"
+        );
+        assert!(
+            containment["missing"]
+                .as_array()
+                .expect("capability list")
+                .iter()
+                .any(|code| code == "descendants"),
+            "the specific descendant limit is visible in the admission record"
+        );
+        assert!(
+            !outcome.confined
+                && outcome.summary().contains("platform-limit")
+                && outcome.summary().contains("descendants"),
+            "the user-facing result discloses the same reduced guarantee as the ledger"
+        );
+    }
     let preserved_notes: String = git(
         &bench.repository(),
         &["show", &format!("{}:{NOTES}", outcome.branch)],
@@ -200,7 +237,10 @@ fn a_brokered_agent_process_cannot_write_the_worktree_directly() {
     )
     .unwrap_or_default();
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        !outcome
+            .missing
+            .contains(&kaisa_domain::ContainmentCapability::WriteConfinement)
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the probe's own write was refused, so the agent went on through the broker: \
          {outcome:?}; agent said {transcript:?}"
     );
@@ -262,7 +302,10 @@ fn a_confined_agent_reaches_the_network_only_through_its_egress_broker() {
     .expect("the goal runs");
 
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        !outcome
+            .missing
+            .contains(&kaisa_domain::ContainmentCapability::TcpEgress)
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the agent reached its egress broker, was refused an unlisted host, and could not \
          connect around it: {outcome:?}"
     );
@@ -800,7 +843,11 @@ fn a_local_model_drives_a_confined_attempt_through_the_broker() {
     );
 
     assert!(
-        outcome.confined && outcome.exit == Some(ProcessExit::Code(0)),
+        outcome.missing == kaisa_domain::platform_limits()
+            && outcome.admitted_on
+                == kaisa_domain::ReducedModeBasis::None
+                    .for_missing(kaisa_domain::platform_limits())
+            && outcome.exit == Some(ProcessExit::Code(0)),
         "the local model finished inside the sandbox: {outcome:?}"
     );
     assert_eq!(

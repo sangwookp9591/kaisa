@@ -34,6 +34,8 @@ impl BridgeClient {
             .unwrap_or_default();
         let mut child = Command::new(command)
             .args(&args)
+            .env_clear()
+            .envs(kaisa_sys::base_environment())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;

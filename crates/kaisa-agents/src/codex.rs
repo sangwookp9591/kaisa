@@ -6,6 +6,32 @@ use serde_json::Value;
 
 use crate::transcript::{event_type, events};
 
+/// Codex CLI's authentication, configuration, endpoint and TLS inputs.
+const ENVIRONMENT: &[&str] = &[
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_HOME",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "CODEX_CA_CERTIFICATE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// Explicit parent variables required by Codex; other provider credentials stay in Kaisa.
+#[must_use]
+pub fn codex_environment() -> Vec<(String, String)> {
+    environment_with(|name| std::env::var(name).ok())
+}
+
+fn environment_with(mut lookup: impl FnMut(&str) -> Option<String>) -> Vec<(String, String)> {
+    ENVIRONMENT
+        .iter()
+        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
+        .collect()
+}
+
 /// How Kaisa supervises an agent's tool effects (architecture §5.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustMode {
@@ -141,6 +167,30 @@ mod tests {
     const CODEX_MODEL: &str = "gpt-6.1-sol";
     const REASONING_EFFORT: &str = "medium";
     const OPTION_AND_VALUE_LENGTH: usize = 2;
+
+    #[test]
+    fn the_codex_environment_includes_its_credentials_and_excludes_other_provider_keys() {
+        let parent = [
+            ("OPENAI_API_KEY", "dummy-openai-key"),
+            ("CODEX_HOME", "isolated-codex-home"),
+            ("ANTHROPIC_API_KEY", "dummy-claude-key"),
+            ("UNRELATED_SECRET", "dummy-secret"),
+        ];
+        let environment = super::environment_with(|name| {
+            parent
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        });
+        let expected = parent[..2]
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            environment, expected,
+            "Codex receives its own authentication and home without another provider's key"
+        );
+    }
 
     fn a_codex_launch() -> CodexLaunch<'static> {
         CodexLaunch::try_new(CODEX_MODEL, REASONING_EFFORT)
