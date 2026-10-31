@@ -55,14 +55,15 @@ pub fn decide_delivery(
         .flat_map(|piece| &piece.weakened_tests)
         .collect();
     if !weakened.is_empty() {
-        return Delivery::NeedsPerson(format!(
+        let reason = format!(
             "weakened_tests: {}",
             weakened
                 .iter()
                 .map(|reason| reason.as_str())
                 .collect::<Vec<_>>()
                 .join("; ")
-        ));
+        );
+        return needs_person_with_context(reason, candidate, evidence, verdict);
     }
     let Some(verdict) = verdict else {
         return Delivery::Refuse("there is no valid review verdict".to_owned());
@@ -75,14 +76,19 @@ pub fn decide_delivery(
         .flat_map(|piece| piece.definitions_changed.iter())
         .collect();
     if !changed.is_empty() {
-        return Delivery::NeedsPerson(format!(
-            "the candidate changed what its checks run: {}",
-            changed
-                .iter()
-                .map(|path| path.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        return needs_person_with_context(
+            format!(
+                "the candidate changed what its checks run: {}",
+                changed
+                    .iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            candidate,
+            evidence,
+            Some(verdict),
+        );
     }
     let mut reasons: Vec<RevisionReason> = evidence
         .iter()
@@ -103,6 +109,30 @@ pub fn decide_delivery(
     } else {
         Delivery::Revise(reasons)
     }
+}
+
+fn needs_person_with_context(
+    mut reason: String,
+    candidate: &Candidate,
+    evidence: &[Evidence],
+    verdict: Option<&ReviewVerdict>,
+) -> Delivery {
+    for piece in evidence.iter().filter(|piece| !piece.passed()) {
+        reason.push_str(&format!(
+            "\nfailing check: {} ({:?})",
+            piece.check.join(" "),
+            piece.exit
+        ));
+    }
+    if let Some(verdict) = verdict.filter(|verdict| verdict.candidate_tree == candidate.tree) {
+        for finding in verdict.blocking() {
+            reason.push_str(&format!(
+                "\nblocking finding: {}: {}",
+                finding.path, finding.message
+            ));
+        }
+    }
+    Delivery::NeedsPerson(reason)
 }
 
 #[cfg(test)]
@@ -247,6 +277,18 @@ mod tests {
         assert!(
             matches!(delivery, Delivery::NeedsPerson(_)),
             "passing checks the agent rewrote prove nothing on their own: {delivery:?}"
+        );
+    }
+
+    #[test]
+    fn weakened_tests_keep_failed_checks_and_current_blocking_findings_visible() {
+        let mut evidence = evidence_on(CANDIDATE_TREE, FAIL);
+        evidence.weakened_tests = vec!["src/lib.rs: tests commented out".into()];
+        let review = a_review(CANDIDATE_TREE, Some(Severity::Blocking));
+        let delivery = decide_delivery(&the_candidate(), &[evidence], Some(&review));
+        assert!(
+            matches!(delivery, Delivery::NeedsPerson(ref reason) if reason.contains("failing check: cargo test") && reason.contains("blocking finding: src/auth/session.rs")),
+            "a human sees all reasons the same candidate is unsafe: {delivery:?}"
         );
     }
 

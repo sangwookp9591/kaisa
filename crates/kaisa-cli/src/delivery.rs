@@ -82,7 +82,7 @@ pub fn report_verified_outcome(outcome: &kaisa_daemon::VerifiedOutcome) -> (Stri
                 .map(|attempt| attempt.branch.as_str());
             if let Some(branch) = branch {
                 text.push_str(&format!(
-                    "\nResult: {branch} at {}; retrieve with git merge --ff-only {branch}",
+                    "\nIf untracked files block the merge, run git status, move the conflicting files, and retry.\nResult: {branch} at {}; retrieve with git merge --ff-only {branch}",
                     candidate.commit
                 ));
             }
