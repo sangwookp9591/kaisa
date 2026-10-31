@@ -39,7 +39,7 @@ jobs:
       - name: build the test-only fake agent (end-to-end tests run it as a process)
         run: cargo build --locked -p kaisa-fake-agent
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
       - name: smoke-run the binary
         shell: bash
         run: |

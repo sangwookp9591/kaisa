@@ -22,7 +22,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 echo "== tests"
 # The end-to-end tests run the test-only fake agent as a real process next to `kaisa`.
 cargo build --locked -q -p kaisa-fake-agent
-cargo test --workspace --locked
+cargo test --workspace --locked --no-fail-fast
 if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc"; then
   # Only crates without C build steps: blake3 (assembly) and SQLite cannot be cross-compiled
   # for MSVC from macOS/Linux, so kaisa-ledger, kaisa-context, kaisa-mcp, kaisa-agents, kaisa-cli and the binary (which reach blake3) are left
