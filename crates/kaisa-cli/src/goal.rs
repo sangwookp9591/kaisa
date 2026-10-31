@@ -557,8 +557,16 @@ mod tests {
         let unquoted = super::GoalCommand::parse(&words(&["fix", "the", "login", "bug"]));
         let quoted = super::GoalCommand::parse(&words(&["fix the login bug"]));
 
-        assert_eq!(unquoted.expect("a goal").goal, "fix the login bug");
-        assert_eq!(quoted.expect("a goal").goal, "fix the login bug");
+        assert_eq!(
+            unquoted.expect("a goal").goal,
+            "fix the login bug",
+            "unquoted words are joined into the goal"
+        );
+        assert_eq!(
+            quoted.expect("a goal").goal,
+            "fix the login bug",
+            "a quoted sentence is the goal as typed"
+        );
     }
 
     #[test]
@@ -566,8 +574,16 @@ mod tests {
         let quoted = super::GoalCommand::parse(&words(&["--fix typo in README"]));
         let after_separator = super::GoalCommand::parse(&words(&["--", "--verbose", "output"]));
 
-        assert_eq!(quoted.expect("a goal").goal, "--fix typo in README");
-        assert_eq!(after_separator.expect("a goal").goal, "--verbose output");
+        assert_eq!(
+            quoted.expect("a goal").goal,
+            "--fix typo in README",
+            "a word with a space is a sentence, not an option"
+        );
+        assert_eq!(
+            after_separator.expect("a goal").goal,
+            "--verbose output",
+            "everything after `--` is goal text"
+        );
     }
 
     #[test]
@@ -576,7 +592,8 @@ mod tests {
 
         assert_eq!(
             parsed.err(),
-            Some(GoalParseError::UnknownFlag("--n".to_owned()))
+            Some(GoalParseError::UnknownFlag("--n".to_owned())),
+            "the refusal names the option the user typed"
         );
     }
 

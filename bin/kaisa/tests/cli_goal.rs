@@ -1564,19 +1564,61 @@ fn a_scripted_run_in(directory: &Path, state: &Path) -> Output {
         .expect("kaisa runs")
 }
 
-#[test]
-fn watch_leaves_the_ledger_file_unchanged() {
-    let bench = Workbench::new("watch-readonly");
+/// Exit status of a command that is documented but not built yet.
+const EXIT_NOT_IMPLEMENTED: i32 = 2;
+/// Exit status of a command line the CLI cannot understand.
+const EXIT_USAGE: i32 = 64;
+
+/// The scripted agent, for tests whose guard must hold even if it regresses: a launch then
+/// starts this program, never a real provider.
+fn the_scripted_agent() -> String {
+    PathBuf::from(env!("CARGO_BIN_EXE_kaisa"))
+        .with_file_name(format!("kaisa-fake-agent{}", std::env::consts::EXE_SUFFIX))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `kaisa watch` against `state`.
+fn the_user_watches(state: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .arg("watch")
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("kaisa watch runs")
+}
+
+/// The names in `directory`, sorted: what a user would see with `ls -a`.
+fn file_names_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .expect("the state directory is readable")
+        .map(|entry| {
+            entry
+                .expect("a readable entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A state directory left by one finished scripted run: the ledger is closed and checkpointed.
+fn a_state_after_one_finished_run(bench: &Workbench) -> PathBuf {
     let state: PathBuf = bench.base.join("state");
     a_scripted_run_in(&bench.base.join("repo"), &state);
-    let database: PathBuf = state.join("kaisa.db");
-    let before: Vec<u8> = std::fs::read(&database).expect("the run created the ledger");
+    state
+}
 
-    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
-        .arg("watch")
-        .env("KAISA_STATE_DIR", &state)
-        .output()
-        .expect("kaisa watch runs");
+#[test]
+fn watching_a_closed_ledger_leaves_the_state_directory_and_database_unchanged() {
+    let bench = Workbench::new("watch-readonly");
+    let state: PathBuf = a_state_after_one_finished_run(&bench);
+    let database: PathBuf = state.join("kaisa.db");
+    let files_before: Vec<String> = file_names_in(&state);
+    let bytes_before: Vec<u8> = std::fs::read(&database).expect("the run created the ledger");
+
+    let watched: Output = the_user_watches(&state);
 
     assert!(
         watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("exited"),
@@ -1584,9 +1626,38 @@ fn watch_leaves_the_ledger_file_unchanged() {
         String::from_utf8_lossy(&watched.stdout)
     );
     assert_eq!(
+        file_names_in(&state),
+        files_before,
+        "watch creates no -wal or -shm sidecar: read-only commands write no state (NFR-03)"
+    );
+    assert_eq!(
         std::fs::read(&database).expect("the ledger is still there"),
-        before,
-        "watch only reads: kaisa.db is byte for byte what the run left (NFR-03)"
+        bytes_before,
+        "watch only reads: kaisa.db is byte for byte what the run left"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn watching_from_a_read_only_state_directory_still_shows_the_attempts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const READ_ONLY_DIRECTORY: u32 = 0o500;
+    const WRITABLE_DIRECTORY: u32 = 0o700;
+    let bench = Workbench::new("watch-readonly-dir");
+    let state: PathBuf = a_state_after_one_finished_run(&bench);
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(READ_ONLY_DIRECTORY))
+        .expect("the directory can be made read-only");
+
+    let watched: Output = the_user_watches(&state);
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(WRITABLE_DIRECTORY))
+        .expect("the directory can be made writable again for cleanup");
+
+    assert!(
+        watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("exited"),
+        "watch works where it cannot write: {:?} {:?}",
+        String::from_utf8_lossy(&watched.stdout),
+        String::from_utf8_lossy(&watched.stderr)
     );
 }
 
@@ -1596,11 +1667,7 @@ fn watch_in_an_empty_state_directory_creates_no_ledger() {
     let state: PathBuf = bench.base.join("state");
     std::fs::create_dir_all(&state).expect("writable temp dir");
 
-    let watched: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
-        .arg("watch")
-        .env("KAISA_STATE_DIR", &state)
-        .output()
-        .expect("kaisa watch runs");
+    let watched: Output = the_user_watches(&state);
 
     assert!(
         watched.status.success() && String::from_utf8_lossy(&watched.stdout).contains("nothing"),
@@ -1612,22 +1679,72 @@ fn watch_in_an_empty_state_directory_creates_no_ledger() {
     );
 }
 
+/// A command line the user might type, and the status it must get before any agent runs.
+struct RefusedCommand {
+    scenario: &'static str,
+    words: &'static [&'static str],
+    status: i32,
+}
+
+const REFUSED_COMMANDS: [RefusedCommand; 9] = [
+    RefusedCommand {
+        scenario: "the planner handoff the docs name",
+        words: &["handoff", "41"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "garbage collection",
+        words: &["gc", "--dry-run"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "retaining an attempt",
+        words: &["retain", "41"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "the advanced run command",
+        words: &["run", "--issue", "123"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "verifying the audit chain",
+        words: &["audit", "verify"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "handing an attempt back",
+        words: &["handback", "44.3"],
+        status: EXIT_NOT_IMPLEMENTED,
+    },
+    RefusedCommand {
+        scenario: "a fleet option kaisa does not have",
+        words: &["--agents", "a,b", "fix"],
+        status: EXIT_USAGE,
+    },
+    RefusedCommand {
+        scenario: "a machine-output option kaisa does not have",
+        words: &["--json", "fix"],
+        status: EXIT_USAGE,
+    },
+    RefusedCommand {
+        scenario: "a budget option kaisa does not have",
+        words: &["--budget", "5", "fix"],
+        status: EXIT_USAGE,
+    },
+];
+
 #[test]
 fn words_the_docs_name_as_commands_and_unknown_options_never_start_a_run() {
     let bench = Workbench::new("no-paid-run");
     let state: PathBuf = bench.base.join("state");
-    let cases: [(&[&str], u8); 6] = [
-        (&["gc", "--dry-run"], 2),
-        (&["retain", "41"], 2),
-        (&["run", "--issue", "123"], 2),
-        (&["audit", "verify"], 2),
-        (&["--agents", "a,b", "fix"], 64),
-        (&["--json", "fix"], 64),
-    ];
+    let fake_agent: String = the_scripted_agent();
 
-    for (words, expected) in cases {
+    for refused in REFUSED_COMMANDS {
+        // The scripted agent is named so that a regression launches it, never a real provider.
         let ran: Output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
-            .args(words)
+            .args(refused.words)
+            .args(["--agent-program", &fake_agent])
             .current_dir(bench.base.join("repo"))
             .env("KAISA_STATE_DIR", &state)
             .output()
@@ -1635,8 +1752,10 @@ fn words_the_docs_name_as_commands_and_unknown_options_never_start_a_run() {
 
         assert_eq!(
             ran.status.code(),
-            Some(i32::from(expected)),
-            "`kaisa {words:?}` is refused before any agent runs"
+            Some(refused.status),
+            "{}: `kaisa {:?}` is refused before any agent runs",
+            refused.scenario,
+            refused.words
         );
     }
     assert!(

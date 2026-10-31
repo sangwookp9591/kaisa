@@ -34,10 +34,12 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 /// Command names reserved for later milestones; they answer "not implemented" instead of being
 /// mistaken for a goal.
 ///
-/// Every verb that README, docs/user-flows.md or docs/architecture.md names as a `kaisa <verb>`
-/// command and that does not work yet is listed, so none of them can start a paid run as goal
-/// text.
-const PLANNED_COMMANDS: [&str; 27] = [
+/// Every verb that README, docs/user-flows.md or docs/architecture.md names as a command and that
+/// does not work yet is listed, so none of them can start a paid run as goal text. The docs name
+/// them as literal `kaisa <verb>`, in the command tables of user-flows §7 and architecture §4
+/// (`handoff`, `handback`, `wrap`, `console`, `memory` appear only there), and in process-model
+/// rows.
+const PLANNED_COMMANDS: [&str; 28] = [
     "review",
     "ask",
     "attach",
@@ -62,6 +64,7 @@ const PLANNED_COMMANDS: [&str; 27] = [
     "uninstall",
     "tui",
     "retain",
+    "handoff",
     "handback",
     "gc",
     "daemon",
@@ -256,8 +259,26 @@ mod tests {
         );
     }
 
-    /// The verbs the docs name as commands that do not work yet.
-    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 11] = [
+    /// Every verb the docs name as a command: the planned ones answer "not implemented", the
+    /// others work today. Collected from literal `kaisa <verb>` text and from the command tables
+    /// in docs/user-flows.md §7 and docs/architecture.md §4.
+    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 28] = [
+        "review",
+        "ask",
+        "attach",
+        "steer",
+        "pause",
+        "resume",
+        "cancel",
+        "undo",
+        "restore",
+        "init",
+        "doctor",
+        "status",
+        "console",
+        "memory",
+        "team",
+        "admin",
         "run",
         "keeper",
         "audit",
@@ -266,10 +287,24 @@ mod tests {
         "uninstall",
         "tui",
         "retain",
+        "handoff",
         "handback",
         "gc",
         "daemon",
     ];
+
+    #[test]
+    fn the_refusal_table_covers_exactly_the_reserved_verbs() {
+        let mut reserved: Vec<&str> = super::PLANNED_COMMANDS.to_vec();
+        let mut documented: Vec<&str> = DOCUMENTED_UNIMPLEMENTED_VERBS.to_vec();
+        reserved.sort_unstable();
+        documented.sort_unstable();
+
+        assert_eq!(
+            reserved, documented,
+            "a verb added to one list without the other would escape the refusal test"
+        );
+    }
 
     #[test]
     fn every_documented_but_unimplemented_verb_answers_not_implemented_instead_of_starting_a_run() {
@@ -292,7 +327,10 @@ mod tests {
     fn a_goal_starting_with_a_reserved_verb_is_told_to_quote_the_goal() {
         let transcript: Transcript = user_types(&["review", "the", "parser"]);
 
-        assert_eq!(transcript.status, EXIT_NOT_IMPLEMENTED);
+        assert_eq!(
+            transcript.status, EXIT_NOT_IMPLEMENTED,
+            "a reserved first word is refused, never run as a goal"
+        );
         assert!(
             transcript.stderr.contains("kaisa \"review the parser\""),
             "the hint shows the quoted form: {:?}",
@@ -328,7 +366,14 @@ mod tests {
     fn an_unknown_option_among_the_goal_words_is_a_usage_error_too() {
         let transcript: Transcript = user_types(&["fix", "the", "--verbose", "bug"]);
 
-        assert_eq!(transcript.status, EXIT_USAGE);
-        assert!(transcript.stderr.contains("--verbose"));
+        assert_eq!(
+            transcript.status, EXIT_USAGE,
+            "an option-like word inside a goal is a usage error, not goal text"
+        );
+        assert!(
+            transcript.stderr.contains("--verbose"),
+            "the error names the option: {:?}",
+            transcript.stderr
+        );
     }
 }
