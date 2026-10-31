@@ -493,15 +493,25 @@ impl GoalRecord {
 
     /// Where the run stands, from its files and the ledger. Reads only.
     fn snapshot(&self, state: &Path) -> Snapshot {
+        let read_exit = || {
+            fs::read_to_string(self.directory.join(EXIT_FILE))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|value| value.get("code").and_then(Value::as_i64))
+        };
+        let mut exit: Option<i64> = read_exit();
+        // The runner writes its exit record and then exits. Seen in that order, an exit file read
+        // before the liveness check can miss a record written just before the process ended, so
+        // a runner found gone is checked for its record once more before being called crashed.
+        let alive: bool = exit.is_none() && self.runner_alive();
+        if exit.is_none() && !alive {
+            exit = read_exit();
+        }
         let log: Vec<String> = read_log(&self.directory.join(LOG_FILE));
-        let exit: Option<i64> = fs::read_to_string(self.directory.join(EXIT_FILE))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| value.get("code").and_then(Value::as_i64));
         let mut snapshot = Snapshot::new(self);
         match exit {
             Some(code) => snapshot.finish(code, &log),
-            None if self.runner_alive() => {}
+            None if alive => {}
             None => {
                 snapshot.state = "not_delivered";
                 snapshot.reason = Some(

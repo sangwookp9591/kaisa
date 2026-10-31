@@ -131,10 +131,21 @@ pub fn preserve_as_commit(
     if !stageable.is_empty() {
         stage_paths(worktree.path(), &hooks, &stageable)?;
     }
-    let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
-    let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
-    commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
-    run_git_for_preservation(worktree.path(), &hooks, &commit)?;
+    // A path the inventory listed can stage to nothing new (for example after end-of-line
+    // normalization on Windows, or a revision that rewrote a file with the same bytes); then there
+    // is nothing to commit and HEAD already holds the work.
+    let nothing_staged: bool = run_git_for_preservation(
+        worktree.path(),
+        &hooks,
+        &["diff", "--cached", "--quiet", "--no-ext-diff"],
+    )
+    .is_ok();
+    if !nothing_staged {
+        let message: String = format!("kaisa: preserve the work of {}", worktree.branch());
+        let mut commit: Vec<&str> = PRESERVATION_IDENTITY.to_vec();
+        commit.extend(["commit", "--quiet", "--no-verify", "-m", &message]);
+        run_git_for_preservation(worktree.path(), &hooks, &commit)?;
+    }
     let head: Vec<u8> = run_git_for_preservation(worktree.path(), &hooks, &["rev-parse", "HEAD"])?;
     let head: String = String::from_utf8_lossy(&head).trim().to_owned();
     let tree = run_git_for_preservation(worktree.path(), &hooks, &["ls-tree", "-r", "-z", &head])?;
