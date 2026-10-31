@@ -91,8 +91,19 @@ pub fn run_trusted_checks(
     candidate: &Candidate,
     checks: &[DetectedCommand],
 ) -> Result<Vec<Evidence>, GoalError> {
-    let definitions_changed: Vec<String> = changed_check_definitions(repository, base, candidate)
-        .map_err(at("comparing check definitions"))?;
+    let mut definitions_changed: Vec<String> =
+        changed_check_definitions(repository, base, candidate)
+            .map_err(at("comparing check definitions"))?;
+    let referenced = referenced_check_paths(repository, base, checks)?;
+    for path in kaisa_workspace::changed_paths(repository, base, candidate)
+        .map_err(at("comparing referenced check scripts"))?
+    {
+        if referenced.contains(&path) && !definitions_changed.contains(&path) {
+            definitions_changed.push(path);
+        }
+    }
+    definitions_changed.sort();
+
     let weakened_tests = kaisa_workspace::weakened_tests(repository, base, candidate)
         .map_err(at("comparing candidate tests"))?;
     let place: PathBuf = state_directory
@@ -155,6 +166,129 @@ pub fn run_trusted_checks(
         }
     }
     Ok(evidence)
+}
+
+/// Resolve only trusted argv and base-revision package scripts. Candidate text never decides
+/// which files define a check. Any file operand is conservative: data/config operands can
+/// influence a check just as an interpreter script or a make -f file can.
+fn referenced_check_paths(
+    repository: &Path,
+    base: &str,
+    checks: &[DetectedCommand],
+) -> Result<std::collections::BTreeSet<String>, GoalError> {
+    let mut paths = std::collections::BTreeSet::new();
+    for check in checks.iter().filter(|check| check.purpose == Purpose::Test) {
+        let directory = check.directory.as_ref().map_or("", |path| path.as_str());
+        add_argv_paths(&mut paths, directory, &check.argv);
+        let Some(program) = check.argv.first() else {
+            continue;
+        };
+        if !matches!(program.as_str(), "npm" | "pnpm" | "yarn" | "bun") {
+            continue;
+        }
+        let script = match check.argv.get(1).map(String::as_str) {
+            Some("run" | "run-script") => check.argv.get(2),
+            Some(_) => check.argv.get(1),
+            None => None,
+        };
+        let Some(script) = script else { continue };
+        let manifest = if directory.is_empty() {
+            "package.json".to_owned()
+        } else {
+            format!("{directory}/package.json")
+        };
+        let output = Command::new("git")
+            .args(["show", &format!("{base}:{manifest}")])
+            .current_dir(repository)
+            .output()
+            .map_err(at("reading trusted package scripts"))?;
+        if !output.status.success() {
+            continue;
+        }
+        let Ok(package) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            continue;
+        };
+        // npm also executes the selected script's lifecycle hooks.
+        for name in [
+            format!("pre{script}"),
+            script.clone(),
+            format!("post{script}"),
+        ] {
+            if let Some(body) = package
+                .get("scripts")
+                .and_then(|scripts| scripts.get(&name))
+                .and_then(serde_json::Value::as_str)
+            {
+                add_shell_paths(&mut paths, directory, body);
+            }
+        }
+    }
+    // Only existing base files are definitions. A test such as `test -f src/new.md`
+    // names an expected output, so creating it must remain ordinary candidate work.
+    let tracked = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "-z", base, "--"])
+        .current_dir(repository)
+        .output()
+        .map_err(at("listing trusted check files"))?;
+    if !tracked.status.success() {
+        return Err(GoalError {
+            step: "listing trusted check files",
+            detail: String::from_utf8_lossy(&tracked.stderr).into_owned(),
+        });
+    }
+    let existing = String::from_utf8_lossy(&tracked.stdout)
+        .split('\0')
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    paths.retain(|path| existing.contains(path));
+    Ok(paths)
+}
+
+fn add_shell_paths(paths: &mut std::collections::BTreeSet<String>, directory: &str, body: &str) {
+    if let Ok(argv) = shell_words::split(body) {
+        add_argv_paths(paths, directory, &argv);
+    }
+}
+
+fn add_argv_paths(
+    paths: &mut std::collections::BTreeSet<String>,
+    directory: &str,
+    argv: &[String],
+) {
+    for argument in argv {
+        let path = Path::new(argument);
+        if argument.is_empty() || path.is_absolute() {
+            continue;
+        }
+        let mut relative = PathBuf::from(directory);
+        let mut safe = true;
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(name) => relative.push(name),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir if relative.pop() => {}
+                _ => {
+                    safe = false;
+                    break;
+                }
+            }
+        }
+        if safe {
+            paths.insert(
+                relative
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    // Shell command strings are quoted argv, not paths themselves.
+    for pair in argv.windows(2) {
+        if pair[0] == "-c" {
+            add_shell_paths(paths, directory, &pair[1]);
+        }
+    }
 }
 
 /// Scan the complete capture before taking a tail: truncation must not hide a secret.
@@ -354,6 +488,49 @@ fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Ve
 #[cfg(all(test, unix))]
 mod tests {
     use super::linux_check_writable;
+
+    /// Interpreter, explicit executable and makefile operands, including quoted shell paths.
+    fn script_invocations() -> Vec<(Vec<String>, &'static str, &'static str)> {
+        [
+            (vec!["sh", "x.sh"], "", "x.sh"),
+            (vec!["bash", "scripts/test.sh"], "", "scripts/test.sh"),
+            (
+                vec!["python", "tools/run_tests.py"],
+                "",
+                "tools/run_tests.py",
+            ),
+            (vec!["make", "-f", "checks/Test.mk"], "", "checks/Test.mk"),
+            (vec!["./tools/test"], "", "tools/test"),
+            (vec!["bash", "./test.sh"], "web", "web/test.sh"),
+            (vec!["bash", "../tools/test.sh"], "web", "tools/test.sh"),
+            (
+                vec!["sh", "-c", "bash 'scripts/test suite.sh'"],
+                "",
+                "scripts/test suite.sh",
+            ),
+        ]
+        .into_iter()
+        .map(|(argv, directory, expected)| {
+            (
+                argv.into_iter().map(str::to_owned).collect(),
+                directory,
+                expected,
+            )
+        })
+        .collect()
+    }
+
+    #[test]
+    fn trusted_interpreter_and_make_operands_resolve_to_repository_relative_check_paths() {
+        for (argv, directory, expected) in script_invocations() {
+            let mut paths = std::collections::BTreeSet::new();
+            super::add_argv_paths(&mut paths, directory, &argv);
+            assert!(
+                paths.contains(expected),
+                "trusted argv {argv:?} in {directory} must protect {expected}: {paths:?}"
+            );
+        }
+    }
 
     /// Commands whose logical path resolution walks the protected state ancestors.
     #[cfg(target_os = "macos")]

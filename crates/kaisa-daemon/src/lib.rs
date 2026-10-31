@@ -29,6 +29,8 @@ pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict, verdict_in_answer};
 pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};
 pub use route::{ROUTE_EFFORT, RouteDecision, decide_route, record_route};
+/// Read-only prediction of missing sandbox capabilities before admission.
+pub use sandbox::expected_missing as expected_sandbox_missing;
 pub use team::{
     CANDIDATE_TREE_LABEL, FirstPass, VerifiedOutcome, VerifiedRequest, run_verified_goal,
 };

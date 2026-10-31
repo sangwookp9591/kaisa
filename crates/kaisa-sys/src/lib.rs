@@ -59,3 +59,6 @@ pub use state_dir::{
 #[cfg(unix)]
 pub use state_dir::{PRIVATE_FILE_MODE, PRIVATE_MODE};
 pub use terminal::Terminal;
+
+mod writable;
+pub use writable::directory_writable;

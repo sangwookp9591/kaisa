@@ -16,6 +16,8 @@ kaisa-domain.workspace = true
 kaisa-ledger.workspace = true
 kaisa-sys.workspace = true
 kaisa-mcp.workspace = true
+kaisa-workspace.workspace = true
+toml = "0.8"
 
 serde_json.workspace = true
 

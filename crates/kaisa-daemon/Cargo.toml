@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+shell-words.workspace = true
 blake3.workspace = true
 kaisa-agents.workspace = true
 kaisa-context.workspace = true

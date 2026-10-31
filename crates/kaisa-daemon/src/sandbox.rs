@@ -213,7 +213,7 @@ pub(crate) fn agent_sandbox(
 /// What an attempt will be missing before its sandbox is built: everything if it is not to be
 /// confined, otherwise what this machine's sandbox cannot give. The sandbox actually built is
 /// checked again before the agent starts ([`AgentSandbox::missing`]).
-pub(crate) fn expected_missing(confine: bool) -> Vec<ContainmentCapability> {
+pub fn expected_missing(confine: bool) -> Vec<ContainmentCapability> {
     if !confine {
         return ContainmentCapability::ALL.to_vec();
     }

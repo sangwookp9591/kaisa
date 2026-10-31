@@ -440,6 +440,7 @@ impl GoalCommand {
                 codes(&expired.accepts_missing),
                 expired.expires_at_ms
             )?;
+            record_admission_wait(&self.goal, "Your Decision expired; give a new one")?;
             return Ok(crate::EXIT_WAITING_FOR_HUMAN);
         }
         let reduced_mode: ReducedModeBasis = self.reduced_mode(decision);
@@ -494,9 +495,39 @@ impl GoalCommand {
                 writeln!(out, "{}", outcome.summary())?;
                 Ok(exit_status(&outcome))
             }
-            Err(error) => report_error(&error, out, err),
+            Err(error) => {
+                if error.not_admitted() {
+                    record_admission_wait(&self.goal, &error.detail)?;
+                }
+                report_error(&error, out, err)
+            }
         }
     }
+}
+
+/// Early waits have no attempt: persist a goal and gate without inventing an agent run.
+fn record_admission_wait(goal: &str, reason: &str) -> io::Result<()> {
+    let state = crate::doctor::state_directory()?;
+    kaisa_sys::ensure_private_directory(&state)?;
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&state.join("kaisa.db")).map_err(io::Error::other)?;
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let run = format!("run_{tick:x}{:x}", std::process::id());
+    let reason = if kaisa_workspace::scan_for_secrets(reason).is_empty() {
+        reason
+    } else {
+        "[omitted: secret detected]"
+    };
+    ledger.append(kaisa_domain::Event {
+        kind: kaisa_domain::EventKind::GateDecided,
+        subject: run.clone(),
+        payload_version: 1,
+        payload: serde_json::json!({"run_id":run,"goal":goal,"decision":"NeedsPerson","reason":reason}).to_string(),
+    }).map_err(io::Error::other)?;
+    Ok(())
 }
 
 /// A run that could not be admitted waits for a person (exit 3) and says what is missing;

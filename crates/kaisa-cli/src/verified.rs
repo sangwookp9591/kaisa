@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use kaisa_agents::{ClaudeLaunch, claude_brokered_argv};
-use kaisa_context::{Confirmation, DetectedCommand, Language, Purpose, derive_profile};
+use kaisa_context::{Confirmation, DetectedCommand, Language, Purpose};
 use kaisa_daemon::{ROUTE_EFFORT, decide_route};
 use kaisa_domain::{
     AgentEntry, AgentKind, Catalog, CatalogModel, Grade, PlannedTask, Role, TaskId, TaskSignals,
@@ -148,7 +148,7 @@ pub(crate) fn trusted_checks(
             confirmation: Confirmation::Confirmed,
         }];
     }
-    derive_profile(repository)
+    crate::init::profile(repository)
         .map(|profile| {
             profile
                 .commands

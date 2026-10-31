@@ -27,6 +27,7 @@ repository = "https://github.com/sangwookp9591/kaisa"
 publish = false
 
 [workspace.dependencies]
+shell-words = "1.1.1"
 kaisa-agents = { path = "crates/kaisa-agents" }
 kaisa-cli = { path = "crates/kaisa-cli" }
 kaisa-daemon = { path = "crates/kaisa-daemon" }

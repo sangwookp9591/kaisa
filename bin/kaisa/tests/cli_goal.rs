@@ -986,6 +986,7 @@ fn a_run_missing_containment_without_a_decision_waits_for_a_person_and_lists_wha
         admitted_attempts(&state).is_empty(),
         "no attempt was admitted, so no agent ran"
     );
+    assert_home_names_admission_wait(&bench, &state);
 }
 
 #[test]
@@ -1043,6 +1044,7 @@ fn an_expired_decision_does_not_admit_a_reduced_run() {
         admitted_attempts(&state).is_empty(),
         "no attempt was admitted on an expired Decision"
     );
+    assert_home_names_admission_wait(&bench, &state);
 }
 
 #[test]
@@ -1802,5 +1804,18 @@ fn a_run_below_the_repository_root_names_the_repository_it_uses() {
         notice(&from_root),
         None,
         "a run at the root has nothing to announce"
+    );
+}
+
+fn assert_home_names_admission_wait(bench: &Workbench, state: &Path) {
+    let home = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+        .current_dir(bench.base.join("repo"))
+        .env("KAISA_STATE_DIR", state)
+        .output()
+        .expect("Home reads admission waits");
+    let report = String::from_utf8_lossy(&home.stdout);
+    assert!(
+        report.contains("Waiting for you:") && !report.contains("Nothing waiting"),
+        "Home must show exit-3 goals even before an attempt runs: {report}"
     );
 }
