@@ -403,6 +403,7 @@ dependencies = [
  "kaisa-sys",
  "ratatui",
  "serde_json",
+ "signal-hook",
 ]
 
 [[package]]

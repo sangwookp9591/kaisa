@@ -24,6 +24,7 @@ catalog! {
     Error => ("kaisa tui: {}", "kaisa tui: {}"),
     LedgerError => ("kaisa tui: the ledger cannot be read: {}", "kaisa tui: 기록을 읽을 수 없어요: {}"),
     PlainTitle => ("KAISA · terminal home\nNeeds you", "KAISA · 터미널 홈\n사람을 기다려요"),
+    MoreNeeds => ("+{} more · n to view all", "+{}개 더 · n으로 모두 보기"),
     NoNeeds => ("No recorded NeedsPerson gates.", "사람을 기다리는 게이트가 없어요."),
     Runs => ("Goals / runs", "목표 / 실행"),
     Empty => ("nothing has run yet", "아직 실행한 작업이 없어요"),
@@ -72,7 +73,7 @@ catalog! {
 }
 
 pub(super) fn text(message: Message) -> &'static str {
-    text_for(message, &std::env::var("KAISA_LANG").unwrap_or_default())
+    text_for(message, language(|name| std::env::var(name).ok()))
 }
 
 /// Substitute only catalog placeholders, never placeholders inside user-provided arguments.
@@ -84,4 +85,21 @@ pub(super) fn format(message: Message, arguments: &[&dyn Display]) -> String {
         output.push_str(piece);
     }
     output
+}
+
+/// An explicit KAISA_LANG wins; otherwise use POSIX locale precedence.
+pub(super) fn language(lookup: impl Fn(&str) -> Option<String>) -> &'static str {
+    let selected = lookup("KAISA_LANG")
+        .or_else(|| {
+            ["LC_ALL", "LC_MESSAGES", "LANG"]
+                .into_iter()
+                .filter_map(lookup)
+                .find(|value| !value.is_empty())
+        })
+        .unwrap_or_default();
+    if selected.to_ascii_lowercase().starts_with("ko") {
+        "ko"
+    } else {
+        "en"
+    }
 }

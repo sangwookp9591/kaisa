@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -24,6 +27,7 @@ const VERIFIED: Color = Color::Rgb(45, 212, 191);
 const AURORA: Color = Color::Rgb(139, 124, 246);
 const WAITING: Color = Color::Rgb(245, 184, 65);
 const FAILED: Color = Color::Rgb(240, 97, 109);
+const MUTED: Color = Color::Rgb(75, 91, 115);
 const POLL: Duration = Duration::from_millis(1000);
 
 pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
@@ -38,7 +42,11 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
         .iter()
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        writeln!(out, "kaisa tui [--plain]\n\n{}", text(Message::Help))?;
+        writeln!(
+            out,
+            "kaisa tui [--plain]\n\n{}\n\nKAISA_LANG: case-insensitive ko prefix selects Korean; otherwise English.\nWhen unset: LC_ALL, LC_MESSAGES, LANG (first nonempty); default English.",
+            text(Message::Help)
+        )?;
         return Ok(crate::EXIT_SUCCESS);
     }
     let state = match kaisa_sys::state_location(|name| std::env::var_os(name)) {
@@ -210,11 +218,28 @@ impl App {
             .and_then(|index| self.rows().get(index).copied())
     }
 
+    fn event(&mut self, event: Event) -> Action {
+        match event {
+            Event::Key(key) => self.key(key),
+            Event::Paste(pasted) => {
+                let literal = safe(&pasted.replace(['\r', '\n'], " "));
+                match &mut self.input {
+                    Input::Goal(goal) => goal.push_str(&literal),
+                    Input::Search => self.search.push_str(&literal),
+                    Input::Browse => {}
+                }
+                self.clamp();
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind == KeyEventKind::Release {
             return Action::None;
         }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return Action::Quit;
         }
         // Escape always quits, including during input and help.
@@ -251,9 +276,12 @@ impl App {
                     Input::Browse => {}
                 },
                 KeyCode::Char(character)
-                    if !key
+                    if key
                         .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        || !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     match &mut self.input {
                         Input::Search => self.search.push(character),
@@ -326,7 +354,7 @@ impl App {
 
 fn block(title: &str, focused: bool) -> Block<'_> {
     Block::default()
-        .title(title)
+        .title(Span::styled(title, Style::default().fg(AURORA)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused {
             AURORA
@@ -367,6 +395,102 @@ fn totals(snapshot: &Snapshot) -> String {
     message(Message::Totals, &[&tokens, &format!("{cost:.4}"), &unknown])
 }
 
+// Keep untrusted display text inspectable before Ratatui's buffer drops control graphemes.
+fn needs_lines(snapshot: &Snapshot) -> Vec<Line<'static>> {
+    let waiting: Vec<_> = snapshot
+        .runs
+        .iter()
+        .filter(|run| run.needs_person())
+        .collect();
+    let mut needs: Vec<Line<'_>> = waiting
+        .iter()
+        .take(3)
+        .flat_map(|run| {
+            [
+                Line::from(Span::styled(
+                    safe(&run.goal),
+                    Style::default().fg(WAITING).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    safe(&run.reason),
+                    Style::default().fg(WAITING),
+                )),
+            ]
+        })
+        .collect();
+    if waiting.len() > 3 {
+        needs.push(Line::from(Span::styled(
+            message(Message::MoreNeeds, &[&(waiting.len() - 3)]),
+            Style::default().fg(WAITING),
+        )));
+    }
+    if needs.is_empty() {
+        needs.push(Line::from(text(Message::NoNeeds)));
+    }
+    needs
+}
+
+fn row_lines(app: &App, selected: &Selection) -> Vec<Line<'static>> {
+    let run = &app.snapshot.runs[selected.run];
+    if let Some(index) = selected.attempt {
+        let attempt = &run.attempts[index];
+        vec![
+            Line::from(safe(&format!(
+                "  └ {} · {}",
+                attempt.role,
+                attempt.row.attempt.as_str()
+            ))),
+            Line::from(format!(
+                "    {} / {}",
+                attempt.row.execution.code(),
+                attempt.row.cleanup.code()
+            )),
+            Line::from(format!("    {}", compact_usage(attempt))),
+            Line::from(Span::styled(
+                safe(&format!("    {}", attempt.containment)),
+                Style::default().fg(WAITING),
+            )),
+        ]
+    } else {
+        let color = if run.needs_person() {
+            WAITING
+        } else if run.failed() {
+            FAILED
+        } else if run.decision == "Deliver" {
+            VERIFIED
+        } else {
+            AURORA
+        };
+        vec![
+            Line::from(Span::styled(
+                safe(&run.goal),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                safe(&format!("{} · {}", run.id, run.status())),
+                Style::default().fg(MUTED),
+            )),
+        ]
+    }
+}
+
+fn runs_title(app: &App) -> String {
+    let filter = text(match app.filter {
+        Filter::All => Message::All,
+        Filter::NeedsYou => Message::Needs,
+        Filter::Failed => Message::Failed,
+    });
+    message(Message::RunsTitle, &[&filter, &safe(&app.search)])
+}
+
+fn input_prompt(app: &App) -> String {
+    match &app.input {
+        Input::Browse => message(Message::Footer, &[&safe(&app.notice)]),
+        Input::Search => message(Message::SearchPrompt, &[&safe(&app.search)]),
+        Input::Goal(goal) => message(Message::GoalPrompt, &[&safe(goal)]),
+    }
+}
+
 fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     frame.render_widget(
@@ -388,7 +512,10 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 Span::raw(text(Message::Header)),
             ]),
-            Line::from(format!(" {}", totals(&app.snapshot))),
+            Line::from(Span::styled(
+                format!(" {}", totals(&app.snapshot)),
+                Style::default().fg(MUTED),
+            )),
         ]),
         outer[0],
     );
@@ -397,33 +524,11 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(outer[1])
     };
-    let waiting: Vec<_> = app
-        .snapshot
-        .runs
-        .iter()
-        .filter(|run| run.needs_person())
-        .collect();
-    let needs: Vec<Line<'_>> = waiting
-        .iter()
-        .take(3)
-        .flat_map(|run| {
-            [
-                Line::from(Span::styled(
-                    safe(&run.goal),
-                    Style::default().fg(WAITING).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    safe(&run.reason),
-                    Style::default().fg(WAITING),
-                )),
-            ]
-        })
-        .collect();
-    let needs_height = if waiting.is_empty() {
-        3
-    } else {
-        u16::try_from(waiting.len()).unwrap_or(u16::MAX).min(3) * 3 + 2
-    };
+    let needs = needs_lines(&app.snapshot);
+    let needs_height = u16::try_from(needs.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .max(3);
     let left =
         Layout::vertical([Constraint::Length(needs_height), Constraint::Min(1)]).split(panes[0]);
     let needs = if needs.is_empty() {
@@ -431,62 +536,17 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         needs
     };
+    // Each entry has two fixed lines; truncating long reasons keeps the count visible.
     frame.render_widget(
-        Paragraph::new(needs)
-            .block(block(text(Message::NeedsTitle), false))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(needs).block(block(text(Message::NeedsTitle), false)),
         left[0],
     );
     let rows = app.rows();
     let items: Vec<ListItem<'_>> = rows
         .iter()
-        .map(|selected| {
-            let run = &app.snapshot.runs[selected.run];
-            if let Some(index) = selected.attempt {
-                let attempt = &run.attempts[index];
-                ListItem::new(vec![
-                    Line::from(safe(&format!(
-                        "  └ {} · {}",
-                        attempt.role,
-                        attempt.row.attempt.as_str()
-                    ))),
-                    Line::from(safe(&format!(
-                        "    {} / {}",
-                        attempt.row.execution.code(),
-                        attempt.row.cleanup.code()
-                    ))),
-                    Line::from(safe(&format!("    {}", compact_usage(attempt)))),
-                    Line::from(Span::styled(
-                        safe(&format!("    {}", attempt.containment)),
-                        Style::default().fg(WAITING),
-                    )),
-                ])
-            } else {
-                let color = if run.needs_person() {
-                    WAITING
-                } else if run.failed() {
-                    FAILED
-                } else if run.decision == "Deliver" {
-                    VERIFIED
-                } else {
-                    AURORA
-                };
-                ListItem::new(vec![
-                    Line::from(Span::styled(
-                        safe(&run.goal),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(safe(&format!("{} · {}", run.id, run.status()))),
-                ])
-            }
-        })
+        .map(|selected| ListItem::new(row_lines(app, selected)))
         .collect();
-    let filter = text(match app.filter {
-        Filter::All => Message::All,
-        Filter::NeedsYou => Message::Needs,
-        Filter::Failed => Message::Failed,
-    });
-    let title = message(Message::RunsTitle, &[&filter, &safe(&app.search)]);
+    let title = runs_title(app);
     if items.is_empty() {
         let message = if app.snapshot.runs.is_empty() {
             text(Message::EmptyInteractive)
@@ -504,7 +564,7 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
             List::new(items)
                 .block(block(&title, !app.details_focused))
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(Color::Rgb(30, 46, 72))),
+                .highlight_style(Style::default().bg(AURORA).fg(BACKGROUND)),
             left[1],
             &mut app.list,
         );
@@ -514,17 +574,32 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
         .map(|selected| details(&app.snapshot.runs[selected.run], selected.attempt))
         .unwrap_or_else(|| text(Message::Choose).to_owned());
     frame.render_widget(
-        Paragraph::new(detail)
-            .block(block(text(Message::DetailsTitle), app.details_focused))
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll, 0)),
+        Paragraph::new(
+            detail
+                .lines()
+                .map(|line| {
+                    let color = if line.contains("NeedsPerson") {
+                        WAITING
+                    } else if line.contains("Refuse")
+                        || line.contains("Blocking")
+                        || line == text(Message::NoMerge).trim_end()
+                    {
+                        FAILED
+                    } else if line.contains("Deliver") || line.starts_with("git merge --ff-only") {
+                        VERIFIED
+                    } else {
+                        TEXT
+                    };
+                    Line::from(Span::styled(line.to_owned(), Style::default().fg(color)))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .block(block(text(Message::DetailsTitle), app.details_focused))
+        .wrap(Wrap { trim: false })
+        .scroll((app.scroll, 0)),
         panes[1],
     );
-    let prompt = match &app.input {
-        Input::Browse => message(Message::Footer, &[&safe(&app.notice)]),
-        Input::Search => message(Message::SearchPrompt, &[&safe(&app.search)]),
-        Input::Goal(goal) => message(Message::GoalPrompt, &[&safe(goal)]),
-    };
+    let prompt = input_prompt(app);
     frame.render_widget(
         Paragraph::new(prompt)
             .style(Style::default().fg(AURORA))
@@ -566,20 +641,76 @@ impl<F: FnOnce()> Drop for RestoreGuard<F> {
     }
 }
 
+fn restore_terminal() {
+    let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
+    ratatui::restore();
+}
+
+// Signal handlers only set an atomic flag (async-signal-safe). The event loop observes it
+// within its 100ms poll, then returns through the same restore guard as keyboard exits.
+#[cfg(unix)]
+struct ExitSignals {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    registrations: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl ExitSignals {
+    fn install() -> io::Result<Self> {
+        let mut signals = Self {
+            flag: std::sync::Arc::default(),
+            registrations: Vec::new(),
+        };
+        for signal in [
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGHUP,
+        ] {
+            signals
+                .registrations
+                .push(signal_hook::flag::register(signal, signals.flag.clone())?);
+        }
+        Ok(signals)
+    }
+
+    fn received(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExitSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
+}
+
 fn interactive(snapshot: Snapshot, state: &Path) -> io::Result<()> {
-    let _restore = RestoreGuard(Some(ratatui::restore));
+    #[cfg(unix)]
+    let signals = ExitSignals::install()?;
+    let _restore = RestoreGuard(Some(restore_terminal));
     // Ratatui also installs a panic hook that restores before the panic diagnostic is printed.
     let mut terminal = ratatui::try_init()?;
+    // Include paste mode in panic restoration as well as return/error restoration.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        previous_hook(info);
+    }));
+    crossterm::execute!(io::stdout(), EnableBracketedPaste)?;
     let mut app = App::new(snapshot);
     let mut last_refresh = Instant::now();
     let mut children: Vec<(Child, PathBuf)> = Vec::new();
     loop {
+        #[cfg(unix)]
+        if signals.received() {
+            return Ok(());
+        }
         terminal.draw(|frame| render(frame, &mut app))?;
         let action = if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) => app.key(key),
-                _ => Action::None,
-            }
+            app.event(event::read()?)
         } else {
             Action::None
         };
@@ -649,16 +780,20 @@ fn start_goal(
     goal: &str,
 ) -> io::Result<(Child, PathBuf)> {
     // The only write path in this module: an explicit g + Enter, never a refresh.
-    std::fs::create_dir_all(state)?;
+    kaisa_sys::ensure_private_directory(state)?;
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
     let log = state.join(format!("tui-goal-{}-{suffix}.log", std::process::id()));
-    let output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&log)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(kaisa_sys::PRIVATE_FILE_MODE);
+    }
+    let output = options.open(&log)?;
     let mut command = goal_command(program, repository, goal);
     command
         .stdout(Stdio::from(output.try_clone()?))

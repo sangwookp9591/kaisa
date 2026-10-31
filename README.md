@@ -189,8 +189,10 @@ kaisa policy set revision_limit 3         # change it (validated before it is sa
 
 `kaisa tui` refreshes the ledger once a second. Use `n` for Needs you, `f` for failed, `/` to
 search, Enter for details, `g` to submit a new background goal, and `?` for all keys. `--plain`
-(and output without a TTY) prints the same information once and exits. `KAISA_LANG=ko` selects
-Korean TUI labels; recorded goal text and engine codes stay as written.
+(and output without a TTY) prints the same information once and exits. `KAISA_LANG=ko` (also `ko_KR` or `ko-KR.UTF-8`, case-insensitive `ko` prefix) selects
+Korean TUI labels. When `KAISA_LANG` is unset, the first nonempty value of `LC_ALL`,
+`LC_MESSAGES`, then `LANG` selects Korean if it starts with `ko` (case-insensitive); otherwise
+the default is English. Recorded goal text and engine codes stay as written.
 
 A goal ends with one of these results, which scripts and CI can rely on:
 

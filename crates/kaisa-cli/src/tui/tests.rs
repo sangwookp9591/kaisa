@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::path::Path;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -543,4 +543,265 @@ impl Drop for ReadOnlyLedger {
             self.database_permissions.clone(),
         );
     }
+}
+
+const HOSTILE_TEXT: &str = "hostile\u{1b}]52;c;clipboard\u{7}\r\u{1b}[2J\u{009b}end";
+
+fn assert_no_terminal_controls(output: &str) {
+    assert!(
+        output
+            .chars()
+            .all(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+        "every output path must remove terminal controls from untrusted data: {output:?}"
+    );
+}
+
+#[test]
+fn hostile_ledger_fields_are_sanitised_in_details_plain_and_every_visible_frame() {
+    let (bench, mut app) = a_home("hostile-render");
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("fixture writer");
+    const PAYLOAD_VERSION: u16 = 1;
+    for run in &app.snapshot.runs {
+        for (kind, payload) in [
+            (
+                kaisa_domain::EventKind::MissionCreated,
+                serde_json::json!({"run_id": run.id, "goal": HOSTILE_TEXT}),
+            ),
+            (
+                kaisa_domain::EventKind::GateDecided,
+                serde_json::json!({"run_id": run.id, "decision": run.decision, "reason": HOSTILE_TEXT}),
+            ),
+        ] {
+            ledger
+                .append(kaisa_domain::Event {
+                    kind,
+                    subject: run.id.clone(),
+                    payload_version: PAYLOAD_VERSION,
+                    payload: payload.to_string(),
+                })
+                .expect("hostile ledger field");
+        }
+        for attempt in &run.attempts {
+            std::fs::write(
+                bench
+                    .state()
+                    .join("attempts")
+                    .join(attempt.row.attempt.as_str())
+                    .join("transcript.log"),
+                HOSTILE_TEXT,
+            )
+            .expect("hostile transcript");
+        }
+    }
+    drop(ledger);
+    app.replace(load(&bench.state()).expect("hostile fixture reads"));
+    for run in &app.snapshot.runs {
+        assert_eq!(
+            run.goal, HOSTILE_TEXT,
+            "the fixture must exercise ledger text before display sanitisation"
+        );
+        assert_eq!(
+            run.reason, HOSTILE_TEXT,
+            "the fixture must exercise a hostile recorded reason"
+        );
+        for attempt in &run.attempts {
+            assert!(
+                attempt.tail.contains('\u{1b}'),
+                "transcript loading must reach the display guard with hostile input"
+            );
+        }
+    }
+    for run in &mut app.snapshot.runs {
+        run.id = HOSTILE_TEXT.into();
+        run.goal = HOSTILE_TEXT.into();
+        run.reason = HOSTILE_TEXT.into();
+        run.repository = Some(HOSTILE_TEXT.into());
+        for attempt in &mut run.attempts {
+            attempt.tail = HOSTILE_TEXT.into();
+            attempt.role = HOSTILE_TEXT.into();
+            attempt.containment = HOSTILE_TEXT.into();
+            attempt.findings.push(HOSTILE_TEXT.into());
+        }
+        assert_no_terminal_controls(&details(run, None));
+    }
+    // Ratatui silently discards control graphemes. Inspect the actual widget inputs too,
+    // so its buffer filtering cannot conceal a missing sanitisation call in our renderer.
+    for line in super::needs_lines(&app.snapshot).into_iter().chain(
+        app.rows()
+            .iter()
+            .flat_map(|row| super::row_lines(&app, row)),
+    ) {
+        for span in line.spans {
+            assert_no_terminal_controls(&span.content);
+        }
+    }
+    let mut output = Vec::new();
+    plain(&app.snapshot, &mut output).expect("plain frame");
+    assert_no_terminal_controls(&String::from_utf8(output).expect("UTF-8"));
+    for position in 0..app.rows().len() {
+        app.list.select(Some(position));
+        assert_no_terminal_controls(&a_screen(&mut app, SCREEN_WIDTH, SCREEN_HEIGHT));
+    }
+    app.notice = HOSTILE_TEXT.into();
+    assert_no_terminal_controls(&super::input_prompt(&app));
+    assert_no_terminal_controls(&a_screen(&mut app, SCREEN_WIDTH, SCREEN_HEIGHT));
+    app.input = Input::Goal(HOSTILE_TEXT.into());
+    assert_no_terminal_controls(&super::input_prompt(&app));
+    assert_no_terminal_controls(&a_screen(&mut app, SCREEN_WIDTH, SCREEN_HEIGHT));
+    app.input = Input::Search;
+    app.search = HOSTILE_TEXT.into();
+    assert_no_terminal_controls(&super::input_prompt(&app));
+    assert_no_terminal_controls(&super::runs_title(&app));
+    assert_no_terminal_controls(&a_screen(&mut app, SCREEN_WIDTH, SCREEN_HEIGHT));
+}
+
+#[test]
+fn multiline_paste_stays_literal_until_a_typed_enter_submits_the_whole_goal() {
+    let mut app = App::new(Snapshot::default());
+    app.key(key(KeyCode::Char('g')));
+    let pasted = "first line\r\nqng/ second line";
+    assert_eq!(
+        app.event(Event::Paste(pasted.into())),
+        Action::None,
+        "pasted newlines and shortcut letters must never submit or execute commands"
+    );
+    assert_eq!(
+        app.input,
+        Input::Goal("first line  qng/ second line".into()),
+        "paste newlines become literal spaces in the pending goal"
+    );
+    assert_eq!(
+        app.key(key(KeyCode::Enter)),
+        Action::Start("first line  qng/ second line".into()),
+        "only a typed Enter submits the complete paste"
+    );
+}
+
+#[test]
+fn altgr_characters_are_accepted_as_literal_goal_text() {
+    let mut app = App::new(Snapshot::default());
+    app.key(key(KeyCode::Char('g')));
+    app.key(KeyEvent::new(
+        KeyCode::Char('@'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    ));
+    assert_eq!(
+        app.input,
+        Input::Goal("@".into()),
+        "AltGr must permit keyboard-layout characters"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_first_submitted_goal_creates_private_state_and_log_even_when_spawn_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let bench = Workbench::new("private-goal");
+    let result = super::start_goal(
+        &bench.base.join("missing-program"),
+        &bench.base.join("repo"),
+        &bench.state(),
+        "private goal",
+    );
+    assert!(
+        result.is_err(),
+        "the deliberately absent program cannot launch"
+    );
+    const MODE_BITS: u32 = 0o777;
+    assert_eq!(
+        std::fs::metadata(bench.state())
+            .expect("state created")
+            .permissions()
+            .mode()
+            & MODE_BITS,
+        kaisa_sys::PRIVATE_MODE,
+        "the first g must apply the standard private directory policy"
+    );
+    for log in std::fs::read_dir(bench.state()).expect("logs") {
+        assert_eq!(
+            log.expect("log")
+                .metadata()
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & MODE_BITS,
+            kaisa_sys::PRIVATE_FILE_MODE,
+            "goal logs may contain private agent output"
+        );
+    }
+}
+
+#[test]
+fn more_than_three_waiting_goals_show_the_hidden_count_and_the_filter_lists_every_goal() {
+    use super::model::RunCard;
+    const WAITING_GOALS: usize = 5;
+    let snapshot = Snapshot {
+        runs: (0..WAITING_GOALS)
+            .map(|index| RunCard {
+                goal: format!("Waiting goal {index}"),
+                decision: "NeedsPerson".into(),
+                reason: "a long reason ".repeat(100),
+                ..RunCard::default()
+            })
+            .collect(),
+    };
+    let mut app = App::new(snapshot);
+    let screen = a_screen(&mut app, SCREEN_WIDTH, SCREEN_HEIGHT);
+    assert!(
+        screen.contains("+2 more"),
+        "the pinned lane must advertise every hidden wait: {screen}"
+    );
+    app.key(key(KeyCode::Char('n')));
+    assert_eq!(
+        app.rows().len(),
+        WAITING_GOALS,
+        "n must expose all waiting goals without truncation"
+    );
+}
+
+#[test]
+fn korean_locale_prefixes_and_posix_precedence_select_the_documented_language() {
+    use super::messages::language;
+    for korean in ["ko", "ko_KR", "ko-KR.UTF-8", "KO_kr.UTF-8"] {
+        assert_eq!(
+            language(|name| (name == "KAISA_LANG").then(|| korean.into())),
+            "ko",
+            "all documented Korean locale spellings must work"
+        );
+    }
+    for locale_variable in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        assert_eq!(
+            language(|name| (name == locale_variable).then(|| "ko_KR.UTF-8".into())),
+            "ko",
+            "unset KAISA_LANG must use the POSIX locale"
+        );
+    }
+    let environment = [
+        ("LC_ALL", "en_US.UTF-8"),
+        ("LC_MESSAGES", "ko_KR"),
+        ("LANG", "ko"),
+    ];
+    assert_eq!(
+        language(|name| environment
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).into())),
+        "en",
+        "LC_ALL overrides LC_MESSAGES and LANG"
+    );
+    assert_eq!(
+        language(|name| match name {
+            "KAISA_LANG" => Some("en".into()),
+            "LC_ALL" => Some("ko".into()),
+            _ => None,
+        }),
+        "en",
+        "explicit KAISA_LANG overrides the system locale"
+    );
+    assert_eq!(
+        language(|_| None),
+        "en",
+        "an unset locale defaults to English"
+    );
 }

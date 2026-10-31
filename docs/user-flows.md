@@ -317,7 +317,8 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
   with output in a state-directory log, and polling shows the recorded work. Take over, steer,
   pause, undo and approve are labelled **not available yet** in help and do nothing.
   `--plain`, or running without a TTY, prints one complete text frame and exits. TUI labels come
-  from a ko/en catalog (`KAISA_LANG=ko` selects Korean). `kaisa watch` still prints its attempt table
+  from a ko/en catalog (`KAISA_LANG` accepts a case-insensitive `ko` prefix; when unset,
+  `LC_ALL`, `LC_MESSAGES`, then `LANG` supplies the locale, defaulting to English). `kaisa watch` still prints its attempt table
   and exits. The browser console and the broader decision/question actions below remain planned.
 - **Actions** are keys on the selected card: `[t]` take over · `[s]` steer · `[p]` pause · `[u]` undo · `[k]` keep.
 - **Accessibility.** `--plain` prints the same information as a text stream that screen readers can follow.
@@ -596,7 +597,7 @@ The default (marked ★) is always the safe choice.
 
 Every command supports `--json`, `--plain` and `--help`, in `ko` or `en`. Read-only commands never start the daemon or write state.
 
-**Today (M1):** `kaisa "<goal>"`, `watch`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no `--json`, `--plain` or `ko`/`en` yet.
+**Today (M1):** `kaisa "<goal>"`, `watch`, `agent`, `policy` and `--help`/`--version` work. Every other verb in this table is reserved and answers "not implemented yet" with exit `2`, whatever follows it, so it cannot start a run as goal text; there is no global `--json` yet. `kaisa tui --plain` prints one text frame; the TUI has ko/en labels, selected by `KAISA_LANG` or the POSIX locale as described in F10.
 
 ---
 
