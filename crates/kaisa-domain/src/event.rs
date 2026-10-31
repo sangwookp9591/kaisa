@@ -66,6 +66,16 @@ pub enum EventKind {
     RouteDecided,
     /// A context pack was assembled for an attempt; the payload names its digest.
     ContextPackRecorded,
+    /// A developer result was frozen as a commit and tree.
+    CandidateFrozen,
+    /// A trusted check produced evidence on a frozen tree.
+    CheckEvidence,
+    /// A reviewer returned a verdict (or no valid verdict) on a frozen tree.
+    ReviewVerdict,
+    /// The delivery gate decided what happens next.
+    GateDecided,
+    /// A bounded revision began from a frozen candidate.
+    RevisionStarted,
     /// A knowledge item was proposed (not yet trusted).
     KnowledgeProposed,
     /// A knowledge item became trusted, with the evidence that promoted it.
@@ -92,12 +102,17 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 21] = [
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
         Self::RouteDecided,
         Self::ContextPackRecorded,
+        Self::CandidateFrozen,
+        Self::CheckEvidence,
+        Self::ReviewVerdict,
+        Self::GateDecided,
+        Self::RevisionStarted,
         Self::KnowledgeProposed,
         Self::KnowledgePromoted,
         Self::KnowledgeInjected,
@@ -120,6 +135,11 @@ impl EventKind {
             Self::WriteSetDeclared => "task.write_set_declared",
             Self::RouteDecided => "route.decided",
             Self::ContextPackRecorded => "context_pack.recorded",
+            Self::CandidateFrozen => "candidate.frozen",
+            Self::CheckEvidence => "check.evidence",
+            Self::ReviewVerdict => "review.verdict",
+            Self::GateDecided => "gate.decided",
+            Self::RevisionStarted => "revision.started",
             Self::KnowledgeProposed => "knowledge.proposed",
             Self::KnowledgePromoted => "knowledge.promoted",
             Self::KnowledgeInjected => "knowledge.injected",

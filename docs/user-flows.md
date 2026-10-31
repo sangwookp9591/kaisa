@@ -369,6 +369,9 @@ Each flow lists the trigger, what the user sees and does, what Kaisa does, and t
 - **Only verified results reach this screen.** Blocking review findings were already sent back to the
   agent and fixed (at most twice). If the loop could not fix them, you see the findings and the
   attempts instead of a candidate, with [R] retry with guidance · [T] take over · [X] drop.
+  **M1 status:** an exhausted revision budget ends as `not delivered` (exit 4), printing the remaining
+  findings and next steps. The interactive human handoff above awaits `kaisa review`; today you can
+  start a new goal with guidance or inspect the preserved branch and continue manually.
 - **Reject.** The work is kept with a visible countdown (default 14 days) and a `[K] Keep` option.
 
 #### F17 Undo and restore

@@ -233,7 +233,7 @@ pub(crate) fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError
     }
 }
 
-fn record(
+pub(crate) fn record(
     ledger: &mut EventStore,
     kind: EventKind,
     subject: &str,

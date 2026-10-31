@@ -1,12 +1,12 @@
 //! What `kaisa` tells the user, and its exit code, for a delivery decision (T22b; CI contract,
 //! architecture §ADR-0026, user-flows F26).
 
-use kaisa_daemon::Delivery;
+use kaisa_daemon::{Delivery, RevisionReason};
 
 /// Exit status of a run waiting for a person (CI contract code 3).
 pub const EXIT_WAITING_FOR_HUMAN: u8 = 3;
 
-/// One line for the user and the exit status for scripts.
+/// The decision and next steps for the user, and the exit status for scripts.
 #[must_use]
 pub fn report_delivery(delivery: &Delivery) -> (String, u8) {
     match delivery {
@@ -21,13 +21,33 @@ pub fn report_delivery(delivery: &Delivery) -> (String, u8) {
         Delivery::NeedsPerson(reason) => {
             (format!("waiting for you: {reason}"), EXIT_WAITING_FOR_HUMAN)
         }
-        Delivery::Revise(reasons) => (
-            format!(
-                "not delivered: {} problem(s) remain after the revisions allowed",
-                reasons.len()
-            ),
-            crate::EXIT_RUN_FAILED,
-        ),
+        Delivery::Revise(reasons) => {
+            let findings: Vec<String> = reasons
+                .iter()
+                .map(|reason| match reason {
+                    RevisionReason::FailingCheck(command) => {
+                        format!("- failing check: {}", command.join(" "))
+                    }
+                    RevisionReason::Finding(finding) => {
+                        let location = finding.line.map_or_else(
+                            || finding.path.to_string(),
+                            |line| format!("{}:{line}", finding.path),
+                        );
+                        format!("- {location}: {}", finding.message)
+                    }
+                })
+                .collect();
+            (
+                format!(
+                    "not delivered: {} problem(s) remain after the revisions allowed\n{}\n\
+                     Next: run kaisa again with these findings as guidance, or inspect the preserved \
+                     branches above and continue manually.",
+                    reasons.len(),
+                    findings.join("\n")
+                ),
+                crate::EXIT_RUN_FAILED,
+            )
+        }
         Delivery::Refuse(reason) => (format!("not delivered: {reason}"), crate::EXIT_RUN_FAILED),
     }
 }
