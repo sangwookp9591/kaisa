@@ -428,7 +428,7 @@ fn assert_missing_agent_is_reclaimed(observed: bool) {
             + decision_lifetime.as_millis();
         command.args([
             "--accept-reduced",
-            "write,tcp,udp,descendants",
+            "write,tcp,udp,state-read,descendants",
             "--accept-until",
             &expires.to_string(),
             "--reviewer-arg",
