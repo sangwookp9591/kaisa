@@ -693,12 +693,17 @@ fn rust_covered(path: &str, source: &str, files: &BTreeMap<String, String>) -> b
                         .unwrap_or(ts.len());
                     let body = &ts[open..end];
                     (test_path == path
-                        && body.iter().any(|token| functions.contains(token.as_str())))
-                        || body.windows(4).any(|w| {
-                            qualifiers.contains(&w[0])
+                        && body.windows(2).enumerate().any(|(i, w)| {
+                            functions.contains(w[0].as_str())
+                                && w[1] == "("
+                                && (i == 0 || !matches!(body[i - 1].as_str(), ":" | "."))
+                        }))
+                        || body.windows(5).any(|w| {
+                            (qualifiers.contains(&w[0]) || (test_path == path && w[0] == "Self"))
                                 && w[1] == ":"
                                 && w[2] == ":"
                                 && functions.contains(w[3].as_str())
+                                && w[4] == "("
                         })
                 })
         })
@@ -1371,6 +1376,25 @@ mod tests {
     }
 
     #[test]
+    fn same_file_unrelated_calls_do_not_cover_legacy_constructors() {
+        for call in ["Vec::<u8>::new()", "String::new()", "value.new()"] {
+            let fixture = LegacyFixture::untested();
+            std::fs::write(
+                fixture.repository.join("src/lib.rs"),
+                format!("pub fn new() {{}} #[test] fn unrelated() {{ let _ = {call}; }}"),
+            )
+            .expect("same-file constructor fixture");
+            let areas = detect_legacy_areas(&fixture.repository, &[], &[])
+                .expect("same-file legacy detection");
+            assert_eq!(
+                areas.len(),
+                1,
+                "{call} does not cover the legacy constructor"
+            );
+        }
+    }
+
+    #[test]
     fn only_correct_dispositions_may_carry_a_criterion_id() {
         let fixture = LegacyFixture::untested();
         let areas = detect_legacy_areas(&fixture.repository, &[], &[]).expect("legacy areas");
@@ -1410,6 +1434,13 @@ mod tests {
             format!("{source} #[test] fn local() {{ new(); }}"),
         );
         assert!(super::rust_covered("src/legacy.rs", source, &files));
+        for call in ["Self::new()", "Legacy::new()", "legacy::new()"] {
+            files.insert(
+                "src/legacy.rs".into(),
+                format!("{source} #[test] fn local() {{ {call}; }}"),
+            );
+            assert!(super::rust_covered("src/legacy.rs", source, &files));
+        }
     }
 
     #[test]
