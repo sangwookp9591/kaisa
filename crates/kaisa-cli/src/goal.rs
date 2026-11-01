@@ -706,15 +706,16 @@ fn trusted_program(name: &str) -> io::Result<PathBuf> {
 
 pub(crate) fn build(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
     match GoalCommand::parse(args) {
-        Ok(command) if command.spec.is_some() => command.run(out, err),
-        _ => {
-            writeln!(
-                err,
-                "usage: kaisa build --spec <id> [--version n] [goal options]"
-            )?;
-            Ok(crate::EXIT_USAGE)
-        }
+        Ok(command) if command.spec.is_some() => return command.run(out, err),
+        Err(GoalParseError::UnknownFlag(error)) => writeln!(err, "kaisa build: {error}")?,
+        Err(GoalParseError::NoGoal) => writeln!(err, "kaisa build: --spec requires an id")?,
+        Ok(_) => {}
     }
+    writeln!(
+        err,
+        "usage: kaisa build --spec <id> [--version n] [goal options]"
+    )?;
+    Ok(crate::EXIT_USAGE)
 }
 
 /// Early waits have no attempt: persist a goal and gate without inventing an agent run.
@@ -804,6 +805,30 @@ mod tests {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
 
+    #[test]
+    fn build_reports_the_specific_parse_error_before_usage() {
+        for (args, expected) in [
+            (
+                vec!["--spec", "spec_good", "--version", "0"],
+                "--version requires a positive integer",
+            ),
+            (vec!["--spec", "../bad"], "expected spec_ identifier"),
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let code = super::build(&words(&args), &mut out, &mut err).expect("parse diagnostic");
+            let diagnostic = String::from_utf8(err).expect("UTF-8");
+            assert_eq!(code, crate::EXIT_USAGE);
+            assert!(
+                diagnostic
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.contains(expected)),
+                "specific error precedes usage: {diagnostic}"
+            );
+            assert!(diagnostic.contains("usage: kaisa build"));
+        }
+    }
     #[test]
     fn a_goal_of_several_unquoted_words_and_a_quoted_sentence_both_parse() {
         let unquoted = super::GoalCommand::parse(&words(&["fix", "the", "login", "bug"]));

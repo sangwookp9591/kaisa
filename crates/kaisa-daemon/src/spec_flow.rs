@@ -290,6 +290,7 @@ fn missing_evidence() -> AcceptanceEvidence {
     AcceptanceEvidence {
         final_tree: None,
         provisional: false,
+        reduced_assurance_approval: false,
         approval: unknown(),
         spec_digest: unknown(),
         traceability: unknown(),
@@ -308,6 +309,24 @@ fn approval_check(
     evidence: &str,
 ) -> GateCheck {
     match stored.approval.as_ref().filter(|_| stored.frozen) {
+        Some(record)
+            if record.kind == "human-approved"
+                && record.receipt["attempts_unconfined_since_draft"] == true =>
+        {
+            GateCheck::recorded(
+                if policy.policy().accept_reduced_assurance_approval {
+                    AcceptanceStatus::Pass
+                } else {
+                    AcceptanceStatus::Inconclusive
+                },
+                format!(
+                    "human-approved (reduced assurance); terminal receipt verified; accept_reduced_assurance_approval={}",
+                    policy.policy().accept_reduced_assurance_approval
+                ),
+                evidence,
+                None,
+            )
+        }
         Some(record) if record.kind == "human-approved" => GateCheck::recorded(
             AcceptanceStatus::Pass,
             "human-approved; terminal receipt verified",
@@ -371,6 +390,10 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
         .approval
         .as_ref()
         .is_some_and(|approval| approval.kind == "provisional");
+    evidence.reduced_assurance_approval = stored.approval.as_ref().is_some_and(|approval| {
+        approval.kind == "human-approved"
+            && approval.receipt["attempts_unconfined_since_draft"] == true
+    });
     let spec_receipt = artifact(
         state,
         &run_id,
@@ -563,19 +586,33 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
         if evidence.spec_digest.status == AcceptanceStatus::Fail {
             break;
         }
-        let developed = attempts.last().expect("developer receipt");
-        let evaluation =
-            evaluate_candidate(request, &context, developed, &mut suites, &mut evidence);
+        let mut stage = EvaluationStage::Deterministic;
+        let evaluation = evaluate_candidate(
+            request,
+            &context,
+            &attempts,
+            &mut suites,
+            &mut evidence,
+            &mut stage,
+        );
         let (trace, next_feedback) = match evaluation {
             Ok(result) => result,
             Err(error) => {
-                evidence.preservation = hook_receipt(
+                let check = stage.check(&mut evidence);
+                let failure = hook_receipt(
                     &context,
                     "incomplete-stage",
-                    AcceptanceStatus::Inconclusive,
-                    &error.to_string(),
+                    if check.status == AcceptanceStatus::Fail {
+                        AcceptanceStatus::Fail
+                    } else {
+                        AcceptanceStatus::Inconclusive
+                    },
+                    &format!("{}; {error}", check.detail),
                     None,
                 )?;
+                check.detail = failure.detail;
+                check.status = failure.status;
+                check.evidence_ids.extend(failure.evidence_ids);
                 break;
             }
         };
@@ -627,6 +664,7 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
         // All tree-dependent evidence must be replaced on the next revision.
         evidence = AcceptanceEvidence {
             provisional: evidence.provisional,
+            reduced_assurance_approval: evidence.reduced_assurance_approval,
             approval: evidence.approval,
             spec_digest: evidence.spec_digest,
             ..missing_evidence()
@@ -654,13 +692,51 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
     )
 }
 
+#[derive(Clone, Copy)]
+enum EvaluationStage {
+    Deterministic,
+    PrivateQa,
+    Traceability,
+    TestReview,
+    StagedReview,
+    Preservation,
+}
+impl EvaluationStage {
+    fn check(self, evidence: &mut AcceptanceEvidence) -> &mut GateCheck {
+        match self {
+            Self::Deterministic => &mut evidence.deterministic,
+            Self::PrivateQa => &mut evidence.private_qa,
+            Self::Traceability => &mut evidence.traceability,
+            Self::TestReview => &mut evidence.test_review,
+            Self::StagedReview => &mut evidence.staged_review,
+            Self::Preservation => &mut evidence.preservation,
+        }
+    }
+}
+// Retain every observed gap: a later full admission cannot undo a previous disclosure.
+fn worst_qa_isolation(isolations: impl IntoIterator<Item = QaIsolation>) -> QaIsolation {
+    let mut gaps = std::collections::BTreeSet::new();
+    for isolation in isolations {
+        if let QaIsolation::Reduced(reason) = isolation {
+            gaps.insert(reason);
+        }
+    }
+    if gaps.is_empty() {
+        QaIsolation::Full
+    } else {
+        QaIsolation::Reduced(gaps.into_iter().collect::<Vec<_>>().join("; "))
+    }
+}
+
 fn evaluate_candidate(
     request: &SpecRequest<'_, '_>,
     context: &HookContext<'_>,
-    developer: &GoalOutcome,
+    developers: &[GoalOutcome],
     suites: &mut Vec<QaSuite>,
     evidence: &mut AcceptanceEvidence,
+    stage: &mut EvaluationStage,
 ) -> Result<(TraceabilityReport, Vec<String>), GoalError> {
+    let developer = developers.last().expect("developer receipt");
     let workflow = request.workflow;
     let candidate = context.candidate.expect("candidate frozen");
     let state = context.state_directory;
@@ -744,7 +820,8 @@ fn evaluate_candidate(
         ),
         Some(tree),
     )?;
-    let isolation = qa_isolation(developer);
+    let isolation = worst_qa_isolation(developers.iter().map(qa_isolation));
+    *stage = EvaluationStage::PrivateQa;
     let results: Vec<QaResult> = if suites.is_empty() {
         let spec_json = serde_json::to_value(context.specification).expect("spec JSON");
         let outcome = run_private_qa(&QaRequest {
@@ -838,6 +915,7 @@ fn evaluate_candidate(
         &qa_id,
         Some(tree),
     );
+    *stage = EvaluationStage::Deterministic;
     let development_sources = test_sources(checkout.path())?;
     let mut all_sources = development_sources.clone();
     let mut mappings = request.development_mappings.to_vec();
@@ -917,6 +995,7 @@ fn evaluate_candidate(
         })
         .cloned()
         .collect();
+    *stage = EvaluationStage::Traceability;
     let trace = traceability_report(
         context.run_id,
         context.specification,
@@ -944,6 +1023,7 @@ fn evaluate_candidate(
         trace_id,
         Some(tree),
     );
+    *stage = EvaluationStage::Deterministic;
     let lint_id = artifact(state, context.run_id, &format!("deterministic-{tree}.json"), &serde_json::to_vec(&json!({"blocking":deterministic_failures,"lint":lint.iter().map(ToString::to_string).collect::<Vec<_>>()})).expect("lint JSON"))?;
     evidence.deterministic = GateCheck::recorded(
         if deterministic_failures.is_empty() {
@@ -959,6 +1039,7 @@ fn evaluate_candidate(
         lint_id,
         Some(tree),
     );
+    *stage = EvaluationStage::TestReview;
     let review_repo = run_directory(state, context.run_id).join(format!("test-review-{tree}"));
     prepare_review_repository(&review_repo).map_err(at("preparing isolated domain test review"))?;
     let spec_text = String::from_utf8(context.specification.canonical_json()).expect("spec UTF-8");
@@ -1007,6 +1088,7 @@ fn evaluate_candidate(
         &format!("test-review-transcript-{tree}.log"),
         transcript(state, &domain.attempt)?.as_bytes(),
     )?);
+    *stage = EvaluationStage::StagedReview;
     let review_evidence = json!({"private_qa":results_json,"deterministic":evidence.deterministic,"traceability":trace,"domain_test_review":evidence.test_review});
     let decisions = json!({"spec_approval":evidence.approval,"policy":workflow.policy.canonical()});
     let developer_transcript = transcript(state, developer)?;
@@ -1022,6 +1104,7 @@ fn evaluate_candidate(
         developer,
         developer_final_answer: &developer_answer,
     })?;
+    *stage = EvaluationStage::Preservation;
     let ledger = EventStore::open(&state.join("kaisa.db"))
         .map_err(at("verifying preserved evidence ledger"))?;
     ledger
@@ -1049,11 +1132,7 @@ fn evaluate_candidate(
             )
         })
         .collect::<Vec<_>>();
-    feedback.extend(
-        deterministic_failures
-            .into_iter()
-            .filter(|finding| !finding.contains("private/")),
-    );
+    feedback.extend(public_deterministic_findings(deterministic_failures));
     if review_status == AcceptanceStatus::Fail {
         feedback.push(format!("domain test review: {review_detail}"));
     }
@@ -1064,6 +1143,11 @@ fn evaluate_candidate(
         feedback.extend(trace.gaps.clone());
     }
     Ok((trace, redact_revision_findings(feedback, &labelled)))
+}
+fn public_deterministic_findings(findings: Vec<String>) -> impl Iterator<Item = String> {
+    findings
+        .into_iter()
+        .filter(|finding| !finding.contains("private/"))
 }
 // Reviewers see private tests, so their free-form findings need the same source boundary as
 // QA diagnostics. Reject whole fields with source overlap instead of forwarding source fragments.
@@ -1155,17 +1239,97 @@ fn spec_copies(
     base: &Candidate,
     spec: &Specification,
 ) -> Result<Vec<(String, Vec<u8>)>, GoalError> {
-    let mut copies = Vec::new();
-    for path in tracked_paths(repository, Some(&base.tree))
-        .map_err(at("finding repository specification copies"))?
-    {
-        let bytes = git_blob(repository, &base.tree, &path)
-            .map_err(at("reading protected specification copies"))?;
-        if serde_json::from_slice::<Specification>(&bytes).is_ok_and(|copy| copy.id == spec.id) {
-            copies.push((path, bytes));
+    fn read_copies(
+        repository: &Path,
+        base: &Candidate,
+        spec: &Specification,
+    ) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+        use std::io::{BufRead, Read, Write};
+        use std::process::Stdio;
+        let tree = Command::new("git")
+            .current_dir(repository)
+            .args(["ls-tree", "-rz", "--full-tree", &base.tree])
+            .output()?;
+        if !tree.status.success() {
+            return Err(std::io::Error::other("cannot walk specification tree"));
         }
+        let mut blobs = Vec::new();
+        for entry in tree
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let tab = entry
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or_else(|| std::io::Error::other("invalid tree entry"))?;
+            let path =
+                String::from_utf8(entry[tab + 1..].to_vec()).map_err(std::io::Error::other)?;
+            let header = std::str::from_utf8(&entry[..tab]).map_err(std::io::Error::other)?;
+            let fields: Vec<_> = header.split_whitespace().collect();
+            if fields.len() == 3 && fields[1] == "blob" {
+                blobs.push((path, fields[2].to_owned()));
+            }
+        }
+        if blobs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut child = Command::new("git")
+            .current_dir(repository)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let requests = blobs
+            .iter()
+            .map(|(_, id)| format!("{id}\n"))
+            .collect::<String>();
+        // Drain stdout while feeding stdin so large trees cannot deadlock either pipe.
+        let writer = std::thread::spawn(move || stdin.write_all(requests.as_bytes()));
+        let mut cursor = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        let scanned = (|| -> std::io::Result<Vec<(String, Vec<u8>)>> {
+            let mut copies = Vec::new();
+            for (path, id) in blobs {
+                let mut header = String::new();
+                cursor.read_line(&mut header)?;
+                let fields: Vec<_> = header.split_whitespace().collect();
+                if fields.len() != 3 || fields[0] != id || fields[1] != "blob" {
+                    return Err(std::io::Error::other("invalid batch blob header"));
+                }
+                let size = fields[2].parse::<usize>().map_err(std::io::Error::other)?;
+                let mut bytes = vec![0; size];
+                cursor.read_exact(&mut bytes)?;
+                let mut newline = [0];
+                cursor.read_exact(&mut newline)?;
+                if newline != *b"\n" {
+                    return Err(std::io::Error::other("invalid batch blob terminator"));
+                }
+                if serde_json::from_slice::<Specification>(&bytes)
+                    .is_ok_and(|copy| copy.id == spec.id)
+                {
+                    copies.push((path, bytes));
+                }
+            }
+            Ok(copies)
+        })();
+        drop(cursor);
+        if scanned.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait();
+        let fed = writer
+            .join()
+            .map_err(|_| std::io::Error::other("batch input writer panicked"))?;
+        let copies = scanned?;
+        fed?;
+        if !status?.success() {
+            return Err(std::io::Error::other("cannot read specification blobs"));
+        }
+        Ok(copies)
     }
-    Ok(copies)
+    read_copies(repository, base, spec).map_err(at("reading protected specification copies"))
 }
 fn test_sources(repository: &Path) -> Result<Vec<SourceFile>, GoalError> {
     let mut sources = Vec::new();
@@ -1271,24 +1435,13 @@ fn finish(
         "traceability.json",
         &serde_json::to_vec_pretty(&trace).expect("trace JSON"),
     )?;
-    artifact(
-        state,
-        &run_id,
-        "acceptance.json",
-        &serde_json::to_vec_pretty(&decision).expect("gate JSON"),
-    )?;
-    let report_id = artifact(state, &run_id, "report.md", markdown.as_bytes())?;
+    // Record the pure PASS before publication; the final receipt below binds the report
+    // and names only a branch that git actually created.
     event(
         state,
         &run_id,
         EventKind::GateAcceptance,
-        json!({"decision":decision,"final_tree":evidence.final_tree,"spec_id":request.spec_id.as_str(),"report":"report.md","report_evidence_id":report_id}),
-    )?;
-    event(
-        state,
-        &run_id,
-        EventKind::GateDecided,
-        json!({"decision":match decision.status { AcceptanceStatus::Pass => "Deliver", AcceptanceStatus::Fail => "Refuse", AcceptanceStatus::Inconclusive => "NeedsPerson" },"acceptance_status":decision.status,"goal":request.workflow.goal,"reason":format!("{}; {}", decision.label(), decision.lines.iter().filter(|line| line.check.status != AcceptanceStatus::Pass).map(|line| format!("{}: {}", line.requirement, line.check.detail)).collect::<Vec<_>>().join("; "))}),
+        json!({"decision":decision,"final_tree":evidence.final_tree,"spec_id":request.spec_id.as_str()}),
     )?;
     // This is the only delivery mutation. Internal attempt commits exist solely for recovery.
     let result_branch = if decision.status == AcceptanceStatus::Pass {
@@ -1308,6 +1461,32 @@ fn finish(
     } else {
         None
     };
+    if let Some(branch) = &result_branch {
+        markdown.push_str(&format!(
+            "\nResult: {branch}; retrieve with git merge --ff-only {branch}\n"
+        ));
+    }
+    let report_id = artifact(state, &run_id, "report.md", markdown.as_bytes())?;
+    let mut receipt = serde_json::to_value(&decision).expect("gate JSON");
+    receipt["result_branch"] = json!(result_branch);
+    artifact(
+        state,
+        &run_id,
+        "acceptance.json",
+        &serde_json::to_vec_pretty(&receipt).expect("receipt JSON"),
+    )?;
+    event(
+        state,
+        &run_id,
+        EventKind::GateAcceptance,
+        json!({"decision":decision,"final_tree":evidence.final_tree,"spec_id":request.spec_id.as_str(),"result_branch":result_branch,"report":"report.md","report_evidence_id":report_id}),
+    )?;
+    event(
+        state,
+        &run_id,
+        EventKind::GateDecided,
+        json!({"decision":match decision.status { AcceptanceStatus::Pass => "Deliver", AcceptanceStatus::Fail => "Refuse", AcceptanceStatus::Inconclusive => "NeedsPerson" },"acceptance_status":decision.status,"result_branch":result_branch,"goal":request.workflow.goal,"reason":format!("{}; {}", decision.label(), decision.lines.iter().filter(|line| line.check.status != AcceptanceStatus::Pass).map(|line| format!("{}: {}", line.requirement, line.check.detail)).collect::<Vec<_>>().join("; "))}),
+    )?;
     Ok(SpecOutcome {
         report_path: run_directory(state, &run_id).join("report.md"),
         run_id,
@@ -1348,6 +1527,140 @@ pub fn spec_report(state: &Path, run_id: &str) -> std::io::Result<String> {
 mod tests {
     use super::redact_revision_findings;
     use crate::{LabelledTest, TestOrigin};
+    #[test]
+    fn batched_spec_copy_scan_preserves_extensionless_and_unusual_path_copies() {
+        let root =
+            std::env::temp_dir().join(format!("kaisa-spec-batch-{}", crate::ids::fresh_suffix()));
+        crate::prepare_review_repository(&root).expect("test repository");
+        let spec: kaisa_domain::Specification = serde_json::from_value(serde_json::json!({
+            "id":"spec_batch", "version":1, "title":"contract", "requirements":[], "criteria":[], "ambiguities":[], "invariants":[], "error_behaviour":[]
+        })).expect("spec");
+        let unusual = if cfg!(windows) {
+            "copy with spaces.json"
+        } else {
+            "copy\twith\nnewlines.json"
+        };
+        for path in ["contract", unusual] {
+            std::fs::write(root.join(path), spec.canonical_json()).expect("copy");
+        }
+        std::fs::write(root.join("binary"), vec![0xff; 100_000]).expect("non-JSON blob");
+        for args in [
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Kaisa",
+                "-c",
+                "user.email=kaisa@localhost.invalid",
+                "commit",
+                "-qm",
+                "copies",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&root)
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success()
+            );
+        }
+        let base = kaisa_workspace::freeze_candidate(&root, "HEAD").expect("frozen tree");
+        let copies = super::spec_copies(&root, &base, &spec).expect("batch scan");
+        let _ = std::fs::remove_dir_all(root);
+        assert_eq!(copies.len(), 2);
+        for path in ["contract", unusual] {
+            assert!(
+                copies
+                    .iter()
+                    .any(|(name, bytes)| name == path && *bytes == spec.canonical_json()),
+                "batch framing preserves {path:?} and its exact bytes"
+            );
+        }
+    }
+    #[test]
+    fn deterministic_revision_feedback_drops_private_paths_before_source_redaction() {
+        let findings = vec![
+            "private/acceptance/empty.rs: a weak assertion".into(),
+            "src/lib.rs: missing rejection".into(),
+            "copy private/adversarial/edge.rs".into(),
+        ];
+        assert_eq!(
+            super::public_deterministic_findings(findings).collect::<Vec<_>>(),
+            vec!["src/lib.rs: missing rejection"],
+            "private paths are removed even without source overlap"
+        );
+    }
+    #[test]
+    fn qa_isolation_keeps_middle_attempt_gaps_after_a_full_final_attempt() {
+        use crate::qa::QaIsolation::{Full, Reduced};
+        assert_eq!(
+            super::worst_qa_isolation([Full, Reduced("unconfined developer".into()), Full]),
+            Reduced("unconfined developer".into())
+        );
+        assert_eq!(
+            super::worst_qa_isolation([Reduced("observed developer".into()), Full]),
+            Reduced("observed developer".into())
+        );
+        assert_eq!(super::worst_qa_isolation([Full, Full]), Full);
+        let combined = super::worst_qa_isolation([
+            Reduced("observed developer".into()),
+            Reduced("unconfined developer".into()),
+        ])
+        .label();
+        assert!(
+            combined.contains("observed developer") && combined.contains("unconfined developer"),
+            "every distinct gap remains named"
+        );
+    }
+    #[test]
+    fn reduced_human_approval_requires_policy_and_keeps_its_assurance_label() {
+        let stored = kaisa_ledger::spec::StoredSpec {
+            specification: serde_json::from_value(serde_json::json!({
+                "id":"spec_reduced", "version":1, "title":"contract",
+                "requirements":[], "criteria":[], "ambiguities":[],
+                "invariants":[], "error_behaviour":[]
+            }))
+            .expect("spec fixture"),
+            digest: "digest".into(),
+            frozen: true,
+            approval: Some(kaisa_ledger::spec::ApprovalRecord {
+                kind: "human-approved".into(),
+                user: Some("person".into()),
+                receipt: serde_json::json!({"attempts_unconfined_since_draft":true}),
+            }),
+        };
+        let policy = kaisa_domain::Policy::personal_default();
+        let check = super::approval_check(&stored, &policy.snapshot().expect("policy"), "receipt");
+        assert_eq!(
+            check.status,
+            crate::acceptance::AcceptanceStatus::Inconclusive,
+            "reduced human approval requires explicit policy acceptance"
+        );
+        assert!(check.detail.contains("human-approved (reduced assurance)"));
+        let mut accepted = policy;
+        accepted.accept_reduced_assurance_approval = true;
+        let check = super::approval_check(
+            &stored,
+            &accepted.snapshot().expect("accepted policy"),
+            "receipt",
+        );
+        assert_eq!(check.status, crate::acceptance::AcceptanceStatus::Pass);
+        assert!(check.detail.contains("human-approved (reduced assurance)"));
+        let mut evidence = super::missing_evidence();
+        evidence.approval = check;
+        evidence.reduced_assurance_approval = true;
+        let decision = crate::acceptance::acceptance_gate(&evidence);
+        assert!(
+            decision
+                .label()
+                .contains("human-approved (reduced assurance)")
+        );
+        assert_eq!(
+            serde_json::to_value(&decision).expect("receipt")["reduced_assurance_approval"],
+            true
+        );
+    }
     #[test]
     fn review_findings_cannot_copy_private_test_source_into_revision_feedback() {
         let private_source = "#[test] fn an_empty_input_is_rejected() { assert_eq!(accept(EMPTY_INPUT), REJECTED); }";

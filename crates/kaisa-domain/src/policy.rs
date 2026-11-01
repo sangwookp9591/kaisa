@@ -7,6 +7,8 @@ use crate::grade::Grade;
 /// The user's policy for newly started runs; changes apply to future snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
+    /// Accepts human approval after unconfined attempts, with reduced assurance labelled.
+    pub accept_reduced_assurance_approval: bool,
     /// Allows explicitly labelled provisional specification approval.
     pub allow_provisional_spec: bool,
     /// How many revisions may follow a failed review.
@@ -66,6 +68,7 @@ impl Policy {
     #[must_use]
     pub fn personal_default() -> Self {
         Self {
+            accept_reduced_assurance_approval: false,
             allow_provisional_spec: false,
             revision_limit: 2,
             allowed_egress_hosts: vec!["api.anthropic.com".into(), "api.openai.com".into()],
@@ -127,7 +130,8 @@ impl Policy {
             Grade::T3 => "T3",
         };
         format!(
-            "allow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
+            "accept_reduced_assurance_approval={}\nallow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
+            self.accept_reduced_assurance_approval,
             self.allow_provisional_spec,
             self.confine_agents,
             self.require_person_when_check_definitions_change,
@@ -247,6 +251,7 @@ mod tests {
     #[test]
     fn the_canonical_text_contains_every_rule_in_key_order() {
         let expected: &str = concat!(
+            "accept_reduced_assurance_approval=false\n",
             "allow_provisional_spec=false\n",
             "allowed_egress_hosts=api.anthropic.com,api.openai.com\n",
             "confine_agents=true\n",

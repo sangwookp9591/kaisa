@@ -30,6 +30,7 @@ pub(super) struct RunCard {
     pub evidence: Vec<Value>,
     pub reviews: Vec<Value>,
     pub candidate_attempt: Option<String>,
+    pub result_branch: Option<String>,
     pub repository: Option<String>,
     pub order: u64,
     pub waiting_order: u64,
@@ -120,6 +121,15 @@ pub(super) fn load(state: &Path) -> Result<Snapshot, Box<dyn std::error::Error>>
             EventKind::GateDecided => {
                 run.decision = payload["decision"].as_str().unwrap_or_default().to_owned();
                 run.reason = payload["reason"].as_str().unwrap_or_default().to_owned();
+                run.result_branch = payload["result_branch"]
+                    .as_str()
+                    .filter(|branch| {
+                        run.decision == "Deliver"
+                            && branch
+                                .strip_prefix("kaisa/result/")
+                                .is_some_and(|id| kaisa_domain::RunId::try_new(id).is_ok())
+                    })
+                    .map(str::to_owned);
                 if run.needs_person() {
                     run.waiting_order = chained.recorded.sequence.value();
                 }
@@ -334,6 +344,9 @@ pub(super) fn details(run: &RunCard, selected_attempt: Option<usize>) -> String 
             .and_then(|identity| identity["root"].as_str())
             .unwrap_or(repository);
         output.push_str(&message(Message::Repository, &[&root]));
+    }
+    if let Some(branch) = &run.result_branch {
+        output.push_str(&format!("Result: {branch}\ngit merge --ff-only {branch}\n"));
     }
     if let Some(attempt) = &run.candidate_attempt {
         output.push_str(&message(Message::Branch, &[&attempt]));

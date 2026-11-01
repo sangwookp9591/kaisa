@@ -69,6 +69,8 @@ pub struct AcceptanceEvidence {
     pub final_tree: Option<String>,
     /// Whether approval was policy-based, never a claim of human confirmation.
     pub provisional: bool,
+    /// Human approval followed unconfined attempts and retains its reduced assurance.
+    pub reduced_assurance_approval: bool,
     /// Verified approval/freeze receipt under the run policy.
     pub approval: GateCheck,
     /// Approved bytes and receipt remained unchanged after every agent.
@@ -106,22 +108,23 @@ pub struct AcceptanceDecision {
     pub status: AcceptanceStatus,
     /// Explicitly retained provenance label.
     pub provisional: bool,
+    /// Retains WP1 approval assurance in receipts and every display surface.
+    #[serde(default)]
+    pub reduced_assurance_approval: bool,
     /// All §5 requirements, including successful lines.
     pub lines: Vec<AcceptanceLine>,
 }
 impl AcceptanceDecision {
     /// Display status without manufacturing human approval.
     pub fn label(&self) -> String {
-        format!(
-            "{:?}{}",
-            self.status,
-            if self.provisional {
-                " (provisional spec)"
-            } else {
-                ""
-            }
-        )
-        .to_uppercase()
+        let status = format!("{:?}", self.status).to_uppercase();
+        if self.provisional {
+            format!("{status} (PROVISIONAL SPEC)")
+        } else if self.reduced_assurance_approval {
+            format!("{status} — human-approved (reduced assurance)")
+        } else {
+            status
+        }
     }
 }
 
@@ -196,6 +199,7 @@ pub fn acceptance_gate(evidence: &AcceptanceEvidence) -> AcceptanceDecision {
     AcceptanceDecision {
         status,
         provisional: evidence.provisional,
+        reduced_assurance_approval: evidence.reduced_assurance_approval,
         lines,
     }
 }
@@ -214,6 +218,7 @@ mod tests {
         AcceptanceEvidence {
             final_tree: Some("final-tree".into()),
             provisional: false,
+            reduced_assurance_approval: false,
             approval: receipt.clone(),
             spec_digest: receipt.clone(),
             traceability: receipt.clone(),

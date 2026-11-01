@@ -50,7 +50,7 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 /// them as literal `kaisa <verb>`, in the command tables of user-flows §7 and architecture §4
 /// (`handoff`, `handback`, `wrap`, `console`, `memory` appear only there), and in process-model
 /// rows.
-const PLANNED_COMMANDS: [&str; 25] = [
+const PLANNED_COMMANDS: [&str; 24] = [
     "review",
     "ask",
     "attach",
@@ -60,7 +60,6 @@ const PLANNED_COMMANDS: [&str; 25] = [
     "cancel",
     "undo",
     "restore",
-    "status",
     "console",
     "memory",
     "team",
@@ -135,6 +134,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
+        Some("status") => home::run(out, err),
         Some("watch") => watch::run(out, err),
         Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
@@ -270,7 +270,7 @@ mod tests {
     /// Every verb the docs name as a command: the planned ones answer "not implemented", the
     /// others work today. Collected from literal `kaisa <verb>` text and from the command tables
     /// in docs/user-flows.md §7 and docs/architecture.md §4.
-    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 25] = [
+    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 24] = [
         "review",
         "ask",
         "attach",
@@ -280,7 +280,6 @@ mod tests {
         "cancel",
         "undo",
         "restore",
-        "status",
         "console",
         "memory",
         "team",

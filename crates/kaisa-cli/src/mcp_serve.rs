@@ -722,11 +722,14 @@ impl Snapshot {
 }
 
 /// The result branch Kaisa named on its `Result:` line. The branch must have the shape of a
-/// Kaisa attempt branch, so text in a log can never become a different command.
+/// Kaisa attempt or accepted specification-result branch, so text in a log can never become a different command.
 fn result_branch(log: &[String]) -> Option<String> {
     let line: &str = log.iter().rev().find(|line| line.starts_with("Result: "))?;
     let branch: &str = line.strip_prefix("Result: ")?.split_whitespace().next()?;
-    let suffix: &str = branch.strip_prefix("kaisa/att_")?;
+    let branch = branch.strip_suffix(';').unwrap_or(branch);
+    let suffix: &str = branch
+        .strip_prefix("kaisa/att_")
+        .or_else(|| branch.strip_prefix("kaisa/result/run_"))?;
     (!suffix.is_empty()
         && suffix
             .chars()
@@ -874,9 +877,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_attempt_branch_becomes_a_merge_command() {
+    fn only_a_kaisa_result_branch_becomes_a_merge_command() {
         let honest = vec!["Result: kaisa/att_abc123 at deadbeef; retrieve with git merge --ff-only kaisa/att_abc123".to_owned()];
         let hostile = vec!["Result: main; rm -rf / at deadbeef".to_owned()];
+        assert_eq!(result_branch(&["Result: kaisa/result/run_abc123; retrieve with git merge --ff-only kaisa/result/run_abc123".into()]).as_deref(), Some("kaisa/result/run_abc123"));
+        assert_eq!(
+            result_branch(&["Result: kaisa/result/run_abc/../../main".into()]),
+            None
+        );
 
         assert_eq!(
             result_branch(&honest).as_deref(),
