@@ -444,6 +444,15 @@ Workers keep running during a coordinator handoff, because the daemon and their 
 - A conformance suite checks that `gix` agrees with `git` on submodules, symlinks, long paths and sparse checkouts (review M9).
 - On Windows, worktrees use `\\?\` paths and `core.longpaths=true`.
 - Shared `.git` metadata is mounted read-only into sandboxes, except for the attempt's own worktree refs.
+- Kaisa serializes Git worktree commands (add, remove, prune, move, repair and listing) by
+  canonical common Git directory. Both workspace Git runners take a repository mutex, then
+  an advisory file lock at `<common-git-dir>/kaisa-worktree.lock`; linked worktrees and
+  independent Kaisa processes share it. The persistent lock file is never unlinked.
+  Lock order is attempt owner lock (when applicable), repository mutex, advisory file lock;
+  the mutex registry is released before waiting. Only one Git worktree command runs in the
+  critical section: no agent/check execution, preservation scans, ledger writes, or owner
+  lock acquisition. Recovery, verification, candidates and mission cleanup use these same
+  workspace APIs. Unrelated repositories remain independent.
 
 **Source state (user-flows F31).** Worktrees are created from **committed** state by default.
 - **Dirty tree.** If the user's tree is dirty, the run request records one of three choices:

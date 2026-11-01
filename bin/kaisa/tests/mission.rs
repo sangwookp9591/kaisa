@@ -806,6 +806,12 @@ fn an_observed_task_writing_outside_its_declared_set_reports_a_blocking_file_con
             .any(|event| event.payload.contains("src/outside.md")),
         "blocking conflicts retain affected files in the ledger"
     );
+    assert!(
+        repository.events(kaisa_domain::EventKind::GateDecided).iter().all(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.payload).expect("gate JSON")["decision"] != "Eligible"
+        }),
+        "ownership must pass before the task can publish eligibility"
+    );
 }
 
 #[test]
@@ -1041,19 +1047,33 @@ fn a_finished_task_leaves_status_and_tui_before_its_slow_sibling() {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Allow the small gap between gate append and worker settlement, but never the wave.
-        let until = Instant::now() + Duration::from_secs(1);
-        let progress = loop {
-            let progress =
-                kaisa_ledger::EventStore::open_read_only(&repository.state.join("kaisa.db"))
-                    .expect("ledger")
-                    .task_progress()
-                    .expect("progress");
-            if !progress.running.contains(&task("task_fast")) || Instant::now() >= until {
-                break progress;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        // Seeing an eligible task gate must imply its settlement is already visible.
+        let ledger = kaisa_ledger::EventStore::open_read_only(&repository.state.join("kaisa.db"))
+            .expect("ledger");
+        let progress = ledger.task_progress().expect("progress");
+        let events = ledger
+            .read_from(kaisa_domain::Sequence::FIRST)
+            .expect("events");
+        let finished_at = events
+            .iter()
+            .position(|event| {
+                event.recorded.event.kind == kaisa_domain::EventKind::TaskFinished
+                    && event.recorded.event.subject == "task_fast"
+            })
+            .expect("fast settlement precedes eligibility");
+        let eligible_at = events
+            .iter()
+            .position(|event| {
+                event.recorded.event.kind == kaisa_domain::EventKind::GateDecided
+                    && serde_json::from_str::<serde_json::Value>(&event.recorded.event.payload)
+                        .expect("gate JSON")["decision"]
+                        == "Eligible"
+            })
+            .expect("eligible gate");
+        assert!(
+            finished_at < eligible_at,
+            "task settlement must precede its eligible gate"
+        );
         assert!(
             !progress.running.contains(&task("task_fast")),
             "finished verified task must leave running state before slow sibling: {progress:?}"

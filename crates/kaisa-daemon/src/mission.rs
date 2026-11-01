@@ -117,6 +117,7 @@ struct TaskResult {
     candidate: Option<Candidate>,
     succeeded: bool,
     conflict: Option<IntegrationError>,
+    eligible_gate: Option<Event>,
 }
 
 /// Runs deterministic concurrent DAG waves and verifies their final integration.
@@ -238,8 +239,8 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                             .get(&task.id)
                             .map_or("", String::as_str);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let (attempt, candidate, passed) = if policy.verify_each_task {
-                                let result = run_verified_task(
+                            let (attempt, candidate, passed, eligible_gate) = if policy.verify_each_task {
+                                let (result, eligible_gate) = run_verified_task(
                                     &verified_request(request, goal, &task.write_set),
                                     base,
                                     task.role,
@@ -254,6 +255,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                                     attempt,
                                     result.candidate,
                                     matches!(result.delivery, Delivery::Deliver { .. }),
+                                    eligible_gate,
                                 )
                             } else {
                                 let attempt = run_goal(&GoalRequest {
@@ -280,7 +282,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                                     .map_err(at("freezing task result"))?;
                                 let passed = attempt.exit == Some(ProcessExit::Code(0))
                                     && attempt.kept_back.is_empty();
-                                (Some(attempt), candidate, passed)
+                                (Some(attempt), candidate, passed, None)
                             };
                             let conflict = candidate.as_ref().and_then(|candidate| {
                                 check_write_set(
@@ -296,6 +298,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                                 candidate,
                                 succeeded: passed && conflict.is_none(),
                                 conflict,
+                                eligible_gate,
                             })
                         })).unwrap_or_else(|_| Err(GoalError {
                             step: "task worker",
@@ -308,6 +311,13 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                             task.id.as_str(),
                             json!({"mission_id":mission,"succeeded":succeeded,"elapsed_ms":start.elapsed().as_millis(),"base":base,"error":result.as_ref().err().map(ToString::to_string)}),
                         )?;
+                        if succeeded
+                            && let Some(gate) = result.as_ref().ok().and_then(|result| result.eligible_gate.as_ref())
+                        {
+                            EventStore::open(&request.state_directory.join("kaisa.db"))
+                                .and_then(|mut ledger| ledger.append(gate.clone()))
+                                .map_err(at("recording settled task eligibility"))?;
+                        }
                         result
                     }))
                 })

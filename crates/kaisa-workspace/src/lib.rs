@@ -14,6 +14,7 @@ mod status;
 #[cfg(test)]
 mod test_support;
 mod worktree;
+mod worktree_lock;
 
 pub use candidate::{
     Candidate, CandidateCheckout, candidate_diff, changed_check_definitions, changed_paths,

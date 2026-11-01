@@ -2,10 +2,11 @@
 //! a reviewer attempt on the same candidate, the delivery gate, and bounded revision. Nothing
 //! reaches the user unless the gate says so.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use kaisa_context::DetectedCommand;
-use kaisa_domain::{EventKind, ReviewVerdict, Role, WriteSet};
+use kaisa_domain::{Event, EventKind, ReviewVerdict, Role, WriteSet};
 use kaisa_ledger::EventStore;
 use kaisa_sys::ProcessExit;
 use kaisa_workspace::{Candidate, CandidateCheckout, RiskFinding, freeze_candidate};
@@ -244,15 +245,29 @@ pub(crate) fn run_verified_goal_from(
     request: &VerifiedRequest<'_>,
     base: &str,
 ) -> Result<VerifiedOutcome, GoalError> {
-    run_verified_task(request, base, Role::Developer)
+    run_verified_with_delivery(request, base, Role::Developer, true)
 }
 
 pub(crate) fn run_verified_task(
     request: &VerifiedRequest<'_>,
     base: &str,
     role: Role,
-) -> Result<VerifiedOutcome, GoalError> {
-    run_verified_with_delivery(request, base, role, true)
+) -> Result<(VerifiedOutcome, Option<Event>), GoalError> {
+    // A planned task still has an ownership check to pass. Its owner publishes the eligible
+    // gate only after recording TaskFinished, so readers cannot see eligibility with a stale
+    // running task. Alternatives retain their existing immediate gate publication.
+    let deferred_gate = RefCell::new(None);
+    let mut attempts = Vec::new();
+    let outcome = run_verified_goal_inner(
+        request,
+        base,
+        role,
+        true,
+        Some(&deferred_gate),
+        &mut attempts,
+    )
+    .map_err(|error| preservation_error(error, &attempts))?;
+    Ok((outcome, deferred_gate.into_inner()))
 }
 
 fn run_verified_with_delivery(
@@ -262,7 +277,7 @@ fn run_verified_with_delivery(
     defer_delivery: bool,
 ) -> Result<VerifiedOutcome, GoalError> {
     let mut attempts = Vec::new();
-    run_verified_goal_inner(request, base, role, defer_delivery, &mut attempts)
+    run_verified_goal_inner(request, base, role, defer_delivery, None, &mut attempts)
         .map_err(|error| preservation_error(error, &attempts))
 }
 
@@ -297,6 +312,7 @@ struct VerificationContext<'a, 'request> {
     mission_id: String,
     repository: Option<String>,
     defer_delivery: bool,
+    deferred_gate: Option<&'a RefCell<Option<Event>>>,
 }
 
 fn run_verified_goal_inner(
@@ -304,6 +320,7 @@ fn run_verified_goal_inner(
     base: &str,
     role: Role,
     defer_delivery: bool,
+    deferred_gate: Option<&RefCell<Option<Event>>>,
     attempts: &mut Vec<GoalOutcome>,
 ) -> Result<VerifiedOutcome, GoalError> {
     std::fs::create_dir_all(request.state_directory)
@@ -317,6 +334,7 @@ fn run_verified_goal_inner(
         mission_id: format!("mis_{}", fresh_suffix()),
         repository: crate::learn::repository_identity(request.repository),
         defer_delivery,
+        deferred_gate,
     };
     record_verification(
         &context,
@@ -730,15 +748,23 @@ fn record_verification(
     context: &VerificationContext<'_, '_>,
     kind: EventKind,
     subject: &str,
-    mut payload: serde_json::Value,
+    payload: serde_json::Value,
 ) -> Result<(), GoalError> {
-    payload["run_id"] = json!(context.run_id);
-    payload["mission_id"] = json!(context.mission_id);
-    payload["repository"] = json!(context.repository);
+    let payload = verification_payload(context, payload);
     let request = context.request;
     let mut ledger = EventStore::open(&request.state_directory.join("kaisa.db"))
         .map_err(at("opening the verification ledger"))?;
     record(&mut ledger, kind, subject, payload)
+}
+
+fn verification_payload(
+    context: &VerificationContext<'_, '_>,
+    mut payload: serde_json::Value,
+) -> serde_json::Value {
+    payload["run_id"] = json!(context.run_id);
+    payload["mission_id"] = json!(context.mission_id);
+    payload["repository"] = json!(context.repository);
+    payload
 }
 
 fn record_gate(
@@ -760,17 +786,25 @@ fn record_gate(
         Delivery::NeedsPerson(reason) => ("NeedsPerson", reason.clone()),
         Delivery::Revise(reasons) => ("revision_exhausted", format!("{reasons:?}")),
     };
-    record_verification(
-        context,
-        EventKind::GateDecided,
-        candidate
-            .map(|candidate| candidate.tree.as_str())
-            .or_else(|| attempt.map(|attempt| attempt.attempt.as_str()))
-            .unwrap_or(context.run_id.as_str()),
-        json!({"decision": decision, "reason": safe_reason(&reason),
+    let subject = candidate
+        .map(|candidate| candidate.tree.as_str())
+        .or_else(|| attempt.map(|attempt| attempt.attempt.as_str()))
+        .unwrap_or(context.run_id.as_str());
+    let payload = json!({"decision": decision, "reason": safe_reason(&reason),
             "candidate_tree": candidate.map(|candidate| &candidate.tree),
-            "attempt": attempt.map(|attempt| attempt.attempt.as_str())}),
-    )
+            "attempt": attempt.map(|attempt| attempt.attempt.as_str())});
+    if decision == "Eligible"
+        && let Some(deferred_gate) = context.deferred_gate
+    {
+        *deferred_gate.borrow_mut() = Some(Event {
+            kind: EventKind::GateDecided,
+            subject: subject.to_owned(),
+            payload_version: 1,
+            payload: verification_payload(context, payload).to_string(),
+        });
+        return Ok(());
+    }
+    record_verification(context, EventKind::GateDecided, subject, payload)
 }
 
 fn record_revision(
@@ -827,6 +861,7 @@ pub(crate) fn verify_integration(
         mission_id: format!("mis_{}", fresh_suffix()),
         repository: crate::learn::repository_identity(request.repository),
         defer_delivery: false,
+        deferred_gate: None,
     };
     record_verification(
         &context,
@@ -1054,6 +1089,7 @@ mod tests {
             mission_id: "mis_test".to_owned(),
             repository: None,
             defer_delivery: false,
+            deferred_gate: None,
         };
         let candidate = Candidate {
             commit: "commit".to_owned(),

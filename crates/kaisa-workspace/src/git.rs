@@ -22,6 +22,8 @@ pub enum GitError {
     Spawn(std::io::Error),
     /// Preservation was refused because no private empty hooks directory could be created.
     HooksUnavailable(std::io::Error),
+    /// Shared worktree metadata could not be locked; no mutation was attempted.
+    MetadataLock(std::io::Error),
     /// `git` ran and exited unsuccessfully.
     Failed {
         /// The arguments that were passed to git.
@@ -39,6 +41,7 @@ impl fmt::Display for GitError {
                 f,
                 "refusing preservation: could not create an empty hooks directory: {error}"
             ),
+            Self::MetadataLock(error) => write!(f, "could not lock Git worktree metadata: {error}"),
             Self::Failed { args, stderr } => write!(f, "`git {}` failed: {stderr}", args.join(" ")),
         }
     }
@@ -47,7 +50,9 @@ impl fmt::Display for GitError {
 impl std::error::Error for GitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn(error) | Self::HooksUnavailable(error) => Some(error),
+            Self::Spawn(error) | Self::HooksUnavailable(error) | Self::MetadataLock(error) => {
+                Some(error)
+            }
             Self::Failed { .. } => None,
         }
     }
@@ -63,12 +68,33 @@ impl std::error::Error for GitError {
 /// Returns [`GitError::Spawn`] if git cannot be started, or [`GitError::Failed`] if it exits
 /// unsuccessfully.
 pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
-    let output: Output = Command::new("git")
-        .args(args)
-        .current_dir(directory)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(GitError::Spawn)?;
+    run_command(args, || {
+        let mut command = Command::new("git");
+        command
+            .current_dir(directory)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    })
+}
+
+/// Both regular and preservation runners use this boundary. All worktree subcommands
+/// (including add/remove/prune/move/repair and list) participate, so new callers cannot
+/// accidentally bypass serialization. Discovery uses the same pinned Git configuration
+/// as the mutation, and never recurses through the locking runner.
+fn run_command(args: &[&str], command: impl Fn() -> Command) -> Result<Vec<u8>, GitError> {
+    let run = || command_output(command().args(args).output(), args);
+    if args.first() == Some(&"worktree") {
+        let discovery = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let common = command_output(command().args(discovery).output(), &discovery)?;
+        let common = String::from_utf8_lossy(&common);
+        crate::worktree_lock::with_lock(Path::new(common.trim()), run)
+    } else {
+        run()
+    }
+}
+
+fn command_output(output: std::io::Result<Output>, args: &[&str]) -> Result<Vec<u8>, GitError> {
+    let output = output.map_err(GitError::Spawn)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -171,16 +197,7 @@ pub(crate) fn run_git_for_preservation(
     hooks: &EmptyHooksDirectory,
     args: &[&str],
 ) -> Result<Vec<u8>, GitError> {
-    let mut command = preservation_command(directory, hooks);
-    let output = command.args(args).output().map_err(GitError::Spawn)?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(GitError::Failed {
-            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        })
-    }
+    run_command(args, || preservation_command(directory, hooks))
 }
 
 /// Every preservation command, including configuration discovery, uses this policy.

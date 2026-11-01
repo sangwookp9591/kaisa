@@ -60,3 +60,75 @@ one second while the slow task remains running. It also checks both `status` and
   `== all checks passed`).
 
 All agent execution uses `kaisa-fake-agent`; no real Claude/Codex or external network was used.
+
+# Review follow-up 2
+
+Addresses the blocking shared-repository worktree metadata race and the small live-status
+gap identified in `target/kaisa-review/REVIEW-RRWP8.md` against `f0727ea`.
+
+## Shared worktree metadata serialization
+
+Both workspace Git runners now serialize every `worktree` subcommand, including add,
+remove, prune, move, repair and listing. They discover the canonical common Git directory
+using the same Git configuration and pinned metadata as the command, take its in-process
+mutex, then take an advisory OS file lock at `<common-git-dir>/kaisa-worktree.lock`.
+The lock file is permanent, outside `worktrees/`, and is never unlinked; closing its handle
+releases ownership on success, error, unwind or process exit. No dependency or unsafe code
+was added. Linked worktree entry points and independent processes converge on the same
+lock, while unrelated repositories remain independent.
+
+The production mutation audit found only the workspace attempt add/remove and detached
+`CandidateCheckout` add/drop paths. Trusted verification (`verify.rs`), reviewer and
+alternative checkouts, integration, scheduling and recovery all reach these APIs; recovery's
+remaining direct `worktree list` is read-only. The critical section contains one Git
+worktree command, never agent/check execution, preservation inventory or ledger work.
+Lock order is documented in the implementation and architecture: attempt owner lock when
+present, repository mutex, advisory file lock. The registry mutex is released before
+waiting, and no operation under the repository lock acquires an attempt owner lock.
+
+`crates/kaisa-workspace/tests/worktree_metadata.rs` retains the reviewer's isolated mixed
+case through the real public APIs: two threads perform 150 detached and 150 branch
+creations/removals, with metadata integrity and complete cleanup assertions. An initial
+held metadata lock makes contention observable without relying only on the rare Git
+failure. Two child test processes additionally perform 100 detached and 100 branch
+creations/removals; they are killed and reaped on failure and have bounded waits.
+Separate regressions cover both add APIs through a linked worktree, both removal paths,
+cross-process exclusion, and progress in an unrelated repository.
+
+## Task settlement precedes eligibility
+
+Planned-task verification returns its pending Eligible event to the owning mission worker.
+The worker completes the ownership check, records `TaskFinished`, then publishes eligibility
+only for a successful task. Alternative-candidate and plain-goal gate behavior is retained.
+The status/TUI regression now samples progress immediately when eligibility appears and
+asserts settlement precedes that gate in ledger order, with no one-second grace period.
+The outside-write-set regression additionally refuses an Eligible event for failed ownership.
+
+## Validation
+
+- The advisory-lock regression failed against the original implementation with
+  `worktree metadata changed while another owner held its advisory lock`
+  (`target/wp8c-lock-before.log`).
+- The final committed mixed-thread test was copied into an isolated, dependency-free
+  workspace crate exported from pre-fix HEAD and run with
+  `CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 cargo test --manifest-path
+  target/wp8c-before/Cargo.toml --test worktree_metadata mixed_two_thread_worktree_stress
+  -- --nocapture`. It failed in 12.89 seconds with `could not create directory of
+  '.git/worktrees/check-2': No such file or directory`, reproducing the actual metadata race
+  (`target/wp8c-stress-before-final.log`). An earlier unguarded stress run passed, as expected
+  for an intermittent race; it is not claimed as red evidence.
+- The strict status test failed before its fix with `fast settlement precedes eligibility`
+  (`target/wp8c-status-before.log`) and passed afterward (`target/wp8c-status-after.log`).
+- The initial six metadata regressions passed together after a clean rebuild
+  (`target/wp8c-metadata-after.log`). The first full default-parallel script run, also
+  including the added removal regression, passed (`target/wp8c-check-1.log`).
+- Two full runs of `CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 scripts/check.sh`
+  passed with default parallelism (no `RUST_TEST_THREADS` override), including formatting,
+  workspace all-target clippy/tests, and the installed Windows/Linux cross-compilation
+  checks (`target/wp8c-check-1.log`, `target/wp8c-check-2.log`, both exit 0 and ending
+  `== all checks passed`). The second run includes the final contention assertion;
+  all seven metadata regressions, all 18 mission tests and all 30 team tests passed.
+
+Cargo used offline mode throughout. All agent execution used `kaisa-fake-agent`; no real
+Claude/Codex or external network was used. Initial scratch stress validation encountered
+disk exhaustion; generated review build caches were cleaned before the successful runs.
