@@ -39,18 +39,7 @@ pub struct QaTestFile {
     pub contents: String,
 }
 
-/// Content-addressed receipt for a private test file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QaManifestEntry {
-    /// Stable scenario identifier.
-    pub test_id: String,
-    /// Acceptance criteria exercised.
-    pub criterion_ids: Vec<String>,
-    /// Filename relative to the private suite directory.
-    pub file: String,
-    /// BLAKE3 of the recorded UTF-8 source.
-    pub digest: String,
-}
+pub use kaisa_domain::spec::QaManifestEntry;
 
 /// A frozen suite. The manifest digest is pinned in memory and in the ledger receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]

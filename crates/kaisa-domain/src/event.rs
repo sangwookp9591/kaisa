@@ -85,6 +85,8 @@ pub enum EventKind {
     ReviewVerdict,
     /// The delivery gate decided what happens next.
     GateDecided,
+    /// Specification workflow acceptance receipt with every requirement and evidence id.
+    GateAcceptance,
     /// A bounded revision began from a frozen candidate.
     RevisionStarted,
     /// A knowledge item was proposed (not yet trusted).
@@ -113,7 +115,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::SpecDrafted,
         Self::SpecApproved,
         Self::SpecFrozen,
@@ -128,6 +130,7 @@ impl EventKind {
         Self::QaResult,
         Self::ReviewVerdict,
         Self::GateDecided,
+        Self::GateAcceptance,
         Self::RevisionStarted,
         Self::KnowledgeProposed,
         Self::KnowledgePromoted,
@@ -160,6 +163,7 @@ impl EventKind {
             Self::QaResult => "qa.result",
             Self::ReviewVerdict => "review.verdict",
             Self::GateDecided => "gate.decided",
+            Self::GateAcceptance => "gate.acceptance",
             Self::RevisionStarted => "revision.started",
             Self::KnowledgeProposed => "knowledge.proposed",
             Self::KnowledgePromoted => "knowledge.promoted",

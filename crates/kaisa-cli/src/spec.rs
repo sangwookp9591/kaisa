@@ -7,7 +7,7 @@ use kaisa_domain::spec::approval::confirm_on_process_terminal;
 use kaisa_domain::{ReducedModeBasis, Role, SpecApproval, SpecId, WriteSet};
 use kaisa_ledger::spec::{SpecStore, StoredSpec};
 
-const USAGE: &str = "usage: kaisa spec draft \"<requirements>\"|--file <path> [--id <spec_id>] [--agent-program <path> --agent-arg <arg> ...]\n       kaisa spec show <id> [--version <n>]\n       kaisa spec list\n       kaisa spec approve <id> [--version <n>] [--provisional]";
+const USAGE: &str = "usage: kaisa spec draft \"<requirements>\"|--file <path> [--id <spec_id>] [--agent-program <path> --agent-arg <arg> ...]\n       kaisa spec show <id> [--version <n>]\n       kaisa spec list\n       kaisa spec report <run>\n       kaisa spec approve <id> [--version <n>] [--provisional]";
 
 fn print_spec(spec: &StoredSpec, out: &mut dyn Write) -> io::Result<()> {
     let approval = spec
@@ -181,6 +181,11 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
         kaisa_sys::ensure_private_directory(&state).map_err(|e| e.to_string())?;
         let store = SpecStore::new(&state);
         match args {
+            [verb, run] if verb == "report" => {
+                let report = kaisa_daemon::spec_flow::spec_report(&state, run)
+                    .map_err(|error| error.to_string())?;
+                write!(out, "{report}").map_err(|error| error.to_string())
+            }
             [verb, rest @ ..] if verb == "draft" => draft(rest, &state, &store, out),
             [verb] if verb == "list" => {
                 for spec in store.list().map_err(|e| e.to_string())? {

@@ -741,10 +741,20 @@ mod tests {
             CriterionRef {
                 id: "AC-1".to_owned(),
                 kind: CriterionKind::Normal,
+                requirement_ids: vec!["R1".into()],
+                given: "fixture".into(),
+                when: "exercised".into(),
+                then: "expected outcome".into(),
+                correction: false,
             },
             CriterionRef {
                 id: "AC-2".to_owned(),
                 kind: CriterionKind::Error,
+                requirement_ids: vec!["R1".into()],
+                given: "fixture".into(),
+                when: "exercised".into(),
+                then: "expected outcome".into(),
+                correction: false,
             },
         ]
     }

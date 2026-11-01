@@ -97,7 +97,9 @@ More commands:
   kaisa doctor             read-only setup diagnosis
   kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
-  kaisa spec <command>     draft, show, list or approve versioned requirements
+  kaisa build --spec <id> [--version n] [goal options]
+                           build and independently verify a frozen specification
+  kaisa spec <command>     draft, show, list, approve or report versioned requirements
   kaisa policy show|set    view or change your personal policy
 
 Goal options:
@@ -138,6 +140,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
         Some("spec") => spec::run(&args[1..], out, err),
+        Some("build") => goal::build(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
         Some("mcp") => mcp_serve::run(&args[1..], out, err),
         Some(command) if PLANNED_COMMANDS.contains(&command) => {

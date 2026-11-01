@@ -68,39 +68,10 @@ pub struct SourceFile {
     pub source: String,
 }
 
-/// What kind of behaviour an acceptance criterion states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CriterionKind {
-    /// The ordinary path.
-    Normal,
-    /// A boundary or unusual input.
-    Edge,
-    /// A failure the system must report.
-    Error,
-    /// A property that must always hold.
-    Invariant,
-}
-
-/// A criterion as the lint needs it: identity and kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CriterionRef {
-    /// For example `AC-1`.
-    pub id: String,
-    /// What the criterion states.
-    pub kind: CriterionKind,
-}
-
-/// One manifest row: which criteria a test is written for.
-///
-/// `test_id` is the Rust function name or the Node test title, optionally prefixed with
-/// `<path>::` to tell equal names in different files apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManifestEntry {
-    /// The test.
-    pub test_id: String,
-    /// The criteria it covers.
-    pub criterion_ids: Vec<String>,
-}
+/// The frozen specification is the single criterion model used by lint and review.
+pub use kaisa_domain::spec::{
+    AcceptanceCriterion as CriterionRef, CriterionKind, TestMapping as ManifestEntry,
+};
 
 /// A lint rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1704,6 +1675,11 @@ mod tests {
         CriterionRef {
             id: id.to_owned(),
             kind,
+            requirement_ids: vec!["R1".into()],
+            given: "fixture".into(),
+            when: "exercised".into(),
+            then: "expected outcome".into(),
+            correction: false,
         }
     }
 
