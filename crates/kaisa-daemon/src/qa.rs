@@ -2,6 +2,10 @@
 //! allow-listed public interface, proposes files through one strict fence, and never writes
 //! the candidate. A suite builds once in a disposable checkout; each scenario checks immutable
 //! external private inputs, artifact digests and positive named-test harness evidence.
+//! Runtime private-QA write denial and author isolation were exercised only on macOS;
+//! native Linux/Windows guarantees remain unverified (NFR-04/NFR-08). The Linux/Windows
+//! cross-clippy checks in scripts/check.sh are compile-only; this macOS host's Windows
+//! cross-check excludes the SQLite-dependent daemon.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -151,6 +155,7 @@ pub struct QaResult {
     /// Same-process candidate code can forge harness output (NFR-04).
     pub qa_evidence: &'static str,
     /// OS write denial, or an explicit reduced label; a digest alone is not integrity proof.
+    /// `write-denied` reports mechanism availability, not native platform validation.
     pub private_test_integrity: &'static str,
     /// Blocking findings require reviewer justification with evidence before acceptance.
     pub blocking_findings: Vec<String>,

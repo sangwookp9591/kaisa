@@ -49,6 +49,11 @@ requirements ─► Specification agent ─► spec draft (v1, provisional)
 
 ## 3. Isolation — enforced by mechanisms, labelled where it cannot be
 
+Runtime isolation was exercised only on macOS: native Linux and Windows guarantees for
+private-QA write denial and author isolation remain **unverified** (NFR-04/NFR-08).
+The Linux/Windows cross-clippy checks in `scripts/check.sh` are compile-only evidence;
+this macOS host's Windows cross-check excludes the SQLite-dependent daemon.
+
 | Boundary | Mechanism | Where it is weaker (always labelled, never silent) |
 |---|---|---|
 | Developer cannot change the approved spec | Spec lives only in the state directory; the developer writes only through the broker write set (Claude) or its own workspace sandbox (Codex). The gate re-hashes the spec and compares with the `spec.approved` digest; any mismatch is FAIL. | — (the digest check holds even if a write slipped through) |
@@ -73,6 +78,7 @@ Landlock grants. Every scenario verifies all private input digests before and af
 and compiled executables are pinned and read-only during execution. A platform without the
 write-deny records `private_test_integrity: reduced(write-deny unavailable; digests only)` and
 `private_test_unchanged: false`; matching bytes alone are never presented as integrity evidence.
+The `write-denied` label reports an available OS mechanism, not native platform validation.
 
 Cargo compiles all private targets once per suite using a Kaisa-owned `CARGO_HOME`, outside
 candidate Cargo/toolchain configuration discovery, with explicit wrapper/environment overrides.
