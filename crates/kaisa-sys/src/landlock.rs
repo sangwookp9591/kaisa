@@ -22,6 +22,10 @@ const CREATE_RULESET_VERSION: libc::c_uint = 1;
 /// `landlock_add_rule` rule type for a path and everything beneath it.
 const RULE_PATH_BENEATH: libc::c_int = 1;
 
+const ACCESS_FS_EXECUTE: u64 = 1;
+const ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const READS: u64 = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
 const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
 const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
 const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
@@ -73,7 +77,8 @@ const WRITES_ABI_1: u64 = ACCESS_FS_WRITE_FILE
     | ACCESS_FS_MAKE_SYM;
 
 /// The rights Landlock accepts on a rule for a regular file rather than a directory.
-const FILE_RIGHTS: u64 = ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE;
+const FILE_RIGHTS: u64 =
+    ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE | ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE;
 
 /// `struct landlock_ruleset_attr`, first field only: the kernel accepts the shorter struct of
 /// an older ABI.
@@ -218,10 +223,32 @@ pub fn write_ruleset(
     writable: &[PathBuf],
     broker_port: Option<u16>,
 ) -> io::Result<Option<LandlockRuleset>> {
+    scoped_ruleset(writable, None, broker_port)
+}
+
+/// Confines QA authors to explicit readable inputs and runtime files as well as their scratch.
+/// Unlike the normal agent write ruleset, no other filesystem reads or execution are granted.
+/// # Errors
+/// Returns an error if the kernel cannot install a requested path grant.
+pub fn read_write_ruleset(
+    writable: &[PathBuf],
+    readable: &[PathBuf],
+) -> io::Result<Option<LandlockRuleset>> {
+    scoped_ruleset(writable, Some(readable), None)
+}
+
+fn scoped_ruleset(
+    writable: &[PathBuf],
+    readable: Option<&[PathBuf]>,
+    broker_port: Option<u16>,
+) -> io::Result<Option<LandlockRuleset>> {
     let Some(abi) = abi_version() else {
         return Ok(None);
     };
     let mut handled: u64 = WRITES_ABI_1;
+    if readable.is_some() {
+        handled |= READS;
+    }
     if abi >= 2 {
         handled |= ACCESS_FS_REFER;
     }
@@ -274,6 +301,11 @@ pub fn write_ruleset(
         .chain([Path::new("/dev")])
     {
         allow_beneath(&ruleset, path, handled)?;
+    }
+    if let Some(readable) = readable {
+        for path in readable {
+            allow_beneath(&ruleset, path, READS)?;
+        }
     }
     if let (true, Some(port)) = (tcp_confined, broker_port) {
         allow_port(&ruleset, port)?;

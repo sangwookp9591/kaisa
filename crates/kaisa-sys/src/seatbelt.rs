@@ -28,6 +28,8 @@ pub struct SeatbeltPolicy {
     /// Directories (or files) the agent may change: the write set and the scratch area. Paths
     /// must be absolute and canonical (`/private/var`, not `/var`).
     pub writable: Vec<PathBuf>,
+    /// Explicit write denials, including immutable private QA inputs under broad grants.
+    pub unwritable: Vec<PathBuf>,
     /// Repository root whose Git controls must stay read-only, even under a root grant.
     pub git_control_root: Option<PathBuf>,
     /// The loopback port of the attempt's egress broker; `None` means no network at all.
@@ -154,6 +156,12 @@ pub fn seatbelt_profile(policy: &SeatbeltPolicy) -> String {
     for path in &policy.writable {
         profile.push_str(&format!(
             "(allow file-write* (subpath {}))\n",
+            sbpl_string(&path.to_string_lossy())
+        ));
+    }
+    for path in &policy.unwritable {
+        profile.push_str(&format!(
+            "(deny file-write* (subpath {}))\n",
             sbpl_string(&path.to_string_lossy())
         ));
     }

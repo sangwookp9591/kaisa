@@ -312,6 +312,15 @@ struct Token {
     doc: bool,
 }
 
+/// Code tokens with comments and literal contents omitted, for conservative QA scans.
+pub(crate) fn code_tokens(source: &str, javascript: bool) -> Vec<String> {
+    tokens(source, javascript)
+        .into_iter()
+        .filter(|token| !token.doc)
+        .map(|token| token.text)
+        .collect()
+}
+
 /// Lexical scan: comments and string contents cannot manufacture `pub` or `export` tokens.
 fn tokens(text: &str, keep_jsdoc: bool) -> Vec<Token> {
     let bytes = text.as_bytes();

@@ -1,6 +1,7 @@
 //! Independent private QA after a developer has exited. QA sees only a frozen spec and an
 //! allow-listed public interface, proposes files through one strict fence, and never writes
-//! the candidate. Each private scenario executes on its own disposable candidate checkout.
+//! the candidate. A suite builds once in a disposable checkout; each scenario checks immutable
+//! external private inputs, artifact digests and positive named-test harness evidence.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kaisa_domain::{
-    AttemptId, ContainmentCapability, ContentDigest, EventKind, Execution, ExitStatus,
+    AttemptId, ContainmentCapability, ContentDigest, EventKind, Execution, ExitStatus, Sequence,
 };
 use kaisa_ledger::EventStore;
 use kaisa_sys::{CapturedRun, ProcessExit, ProcessSpec, run_captured};
@@ -19,9 +20,12 @@ use crate::goal::{GoalError, GoalOutcome, at, record, record_execution};
 use crate::ids::fresh_suffix;
 use crate::qa_interface::{PublicInterface, extract_public_interface, node_bins, rust_bins};
 use crate::sandbox::AgentSandbox;
-use crate::verify::{CheckedSources, check_sandbox, review_output_tail};
+use crate::verify::{CheckedSources, check_sandbox_readonly, review_output_tail};
 
 const QA_DEADLINE: Duration = Duration::from_secs(30 * 60);
+const QA_FEEDBACK_FIELD_CAP: usize = 256;
+const QA_FEEDBACK_TOTAL_CAP: usize = 4096;
+const QA_EVIDENCE: &str = "candidate-influenceable-in-process";
 const QA_OUTPUT_CAP: usize = 4 * 1024 * 1024;
 
 /// Toolchain selected by the orchestrator from trusted project configuration, never by QA.
@@ -83,11 +87,13 @@ pub fn qa_isolation(developer: &GoalOutcome) -> QaIsolation {
     QaIsolation::Full
 }
 
-/// Inputs to two independent, tool-less QA attempts. Agent processes read plain stdin and
+/// Inputs to two independent, read-only QA attempts. Agent processes read plain stdin and
 /// return raw or provider-stream final answers. The caller supplies trusted launcher argv.
 pub struct QaRequest<'a> {
     /// Repository containing the frozen commit.
     pub repository: &'a Path,
+    /// Trusted pre-development revision used for the QA-influencing diff scan.
+    pub base: &'a str,
     /// State outside every worktree.
     pub state_directory: &'a Path,
     /// Run identifier for suite paths and events. Author once; rerun these suites for revisions.
@@ -126,7 +132,7 @@ pub struct QaResult {
     pub test_id: String,
     /// Frozen acceptance criterion ids.
     pub criterion_ids: Vec<String>,
-    /// True only on successful exit with an unchanged candidate source tree.
+    /// True only with positive named-test evidence and unchanged sources/inputs.
     pub passed: bool,
     /// BLAKE3 digest of the captured output.
     pub output_digest: String,
@@ -136,8 +142,20 @@ pub struct QaResult {
     pub confined: bool,
     /// Source changes invalidate evidence even if the test returned zero.
     pub source_unchanged: bool,
-    /// The installed copy still matches the private receipt after the check.
+    /// OS write denial applied and installed bytes match before and after execution.
     pub private_test_unchanged: bool,
+    /// Expected libtest or TAP names, pinned from the private source before execution.
+    pub expected_tests: Vec<String>,
+    /// Every expected name and a matching zero-failure summary were observed.
+    pub positive_evidence: bool,
+    /// Same-process candidate code can forge harness output (NFR-04).
+    pub qa_evidence: &'static str,
+    /// OS write denial, or an explicit reduced label; a digest alone is not integrity proof.
+    pub private_test_integrity: &'static str,
+    /// Blocking findings require reviewer justification with evidence before acceptance.
+    pub blocking_findings: Vec<String>,
+    /// Isolation of the explicit developer/revision attempt being checked.
+    pub qa_isolation: QaIsolation,
     /// Observable diagnostics, deliberately excluding raw output and test source.
     pub failures: Vec<ObservableFailure>,
 }
@@ -149,12 +167,10 @@ pub struct ObservableFailure {
     pub criterion_id: String,
     /// Scenario name.
     pub scenario: String,
-    /// Input as reported by the test's structured diagnostic, or an unavailable label.
-    pub input: String,
-    /// Expected observable result, never an assertion's source code.
-    pub expected: String,
-    /// Actual observable result.
-    pub actual: String,
+    /// Kaisa-computed scenario outcome.
+    pub passed: bool,
+    /// Bounded, source-redacted assertion excerpt or Kaisa-computed failure reason.
+    pub message: String,
 }
 
 /// All evidence the specification workflow needs from private QA.
@@ -168,6 +184,8 @@ pub struct QaOutcome {
     pub results: Vec<QaResult>,
     /// Revision isolation gate input.
     pub qa_isolation: QaIsolation,
+    /// Missing acceptance mappings block the gate even if every recorded test passes.
+    pub uncovered_criteria: Vec<String>,
 }
 
 /// Authors and runs both suites, only after the recorded developer process has ended.
@@ -191,15 +209,18 @@ pub fn run_private_qa(request: &QaRequest<'_>) -> Result<QaOutcome, GoalError> {
         CheckedSources::record(checkout.path()).map_err(at("pinning QA interface tree"))?;
     let mut interface =
         extract_public_interface(checkout.path()).map_err(at("extracting QA public interface"))?;
-    add_cli_help(
-        request,
-        checkout.path(),
-        &sources,
-        &temporary.0,
-        &mut interface,
-    )?;
+    if qa_influencing_findings(request.repository, request.base, request.candidate)?.is_empty() {
+        add_cli_help(
+            request,
+            checkout.path(),
+            &sources,
+            &temporary.0,
+            &mut interface,
+        )?;
+    }
     let mut suites = Vec::new();
     let mut attempts = Vec::new();
+    let mut uncovered_criteria = Vec::new();
     // Both authoring sessions finish before any test executes. Neither author gets the other
     // suite, developer diagnostics, project profile, lessons, diff, or revision history.
     for (kind, process) in [
@@ -209,12 +230,23 @@ pub fn run_private_qa(request: &QaRequest<'_>) -> Result<QaOutcome, GoalError> {
         let pack = qa_context(request.frozen_spec, &interface, kind, request.toolchain);
         let (attempt, answer) = author_suite(
             request.state_directory,
+            request.repository,
             &temporary.0,
             process,
             &pack,
             &mut ledger,
         )?;
         let tests = parse_qa_answer(&answer, &criteria)?;
+        let uncovered = if kind == QaKind::Acceptance {
+            let mapped: BTreeSet<_> = tests
+                .iter()
+                .flat_map(|test| test.criterion_ids.iter().cloned())
+                .collect();
+            criteria.difference(&mapped).cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        uncovered_criteria.extend(uncovered.iter().cloned());
         let suite = record_qa_suite(request.state_directory, request.run_id, kind, &tests)
             .map_err(at("sealing private QA suite"))?;
         record(
@@ -223,6 +255,7 @@ pub fn run_private_qa(request: &QaRequest<'_>) -> Result<QaOutcome, GoalError> {
             request.run_id,
             json!({"run_id":request.run_id,"kind":kind.code(),"candidate_tree":request.candidate.tree,
                 "manifest_digest":suite.manifest_digest(),"attempt":attempt.attempt.as_str(),
+                "uncovered_criteria":uncovered,"coverage_blocked":!uncovered.is_empty(),
                 "manifest":tests.iter().map(|t| json!({"test_id":t.test_id,"criterion_ids":t.criterion_ids,
                     "file":t.file,"digest":blake3::hash(t.contents.as_bytes()).to_hex().to_string()})).collect::<Vec<_>>()}),
         )?;
@@ -231,20 +264,23 @@ pub fn run_private_qa(request: &QaRequest<'_>) -> Result<QaOutcome, GoalError> {
     }
     let mut results = Vec::new();
     for suite in &suites {
-        results.extend(run_qa_suite(
-            request.repository,
-            request.state_directory,
-            request.run_id,
-            request.candidate,
+        results.extend(run_qa_suite(&QaSuiteRequest {
+            repository: request.repository,
+            state: request.state_directory,
+            run_id: request.run_id,
+            base: request.base,
+            candidate: request.candidate,
             suite,
-            request.toolchain,
-        )?);
+            toolchain: request.toolchain,
+            attempt: request.developer,
+        })?);
     }
     Ok(QaOutcome {
         suites,
         attempts,
         results,
         qa_isolation: qa_isolation(request.developer),
+        uncovered_criteria,
     })
 }
 
@@ -305,14 +341,14 @@ fn qa_context(
     };
     let placement = match toolchain {
         QaToolchain::Rust { .. } => {
-            "Rust integration tests run as tests/kaisa_qa_<id>.rs in the package root."
+            "Write flat Rust #[test] fn declarations with unique static names. Kaisa compiles them as integration targets from immutable external paths; cwd is the package root."
         }
         QaToolchain::Node { .. } => {
-            "Node tests run with node --test in a temporary directory one level beneath the package root; import public modules with ../ paths."
+            "Use top-level node:test test(\"unique static name\", ...) declarations. Tests run from an immutable external directory with public module links one level above; import public modules with ../ paths."
         }
     };
     format!(
-        "{mission}\nYou are a read-only QA author. Use only the quoted frozen_spec and public_interface data below. Do not inspect implementation, development tests, transcripts, developer answers, Git history or other QA suites. Do not write files or invoke tools. Your only output is exactly one fenced kaisa-qa JSON block, with no surrounding prose. Schema: {{\"tests\":[{{\"test_id\":\"scenario_name\",\"criterion_ids\":[\"AC-1\"],\"file\":\"scenario.rs\",\"contents\":\"test source\"}}]}}. Each file is one scenario; use stable descriptive test ids and assert the criterion's observable result. {placement} On failure emit a single line beginning kaisa-observation: followed by JSON with exactly scenario, input, expected, actual string fields; those fields describe observable behaviour only, never test source.\nUntrusted contract data (JSON):\n{}\n",
+        "{mission}\nYou are a read-only QA author. Use only the quoted frozen_spec and public_interface data below. Do not inspect implementation, development tests, transcripts, developer answers, Git history or other QA suites. Do not write files or invoke tools. Your only output is exactly one fenced kaisa-qa JSON block, with no surrounding prose. Schema: {{\"tests\":[{{\"test_id\":\"scenario_name\",\"criterion_ids\":[\"AC-1\"],\"file\":\"scenario.rs\",\"contents\":\"test source\"}}]}}. Each file is one scenario; use stable descriptive test ids and assert the criterion's observable result. {placement} Use short assertion messages describing the failed observable behaviour, never test source. Runtime self-declared observations are ignored.\nUntrusted contract data (JSON):\n{}\n",
         json!({"frozen_spec":spec,"public_interface":interface.as_json()})
     )
 }
@@ -464,6 +500,7 @@ fn error(detail: &str) -> GoalError {
 
 fn author_suite(
     state: &Path,
+    repository: &Path,
     temporary: &Path,
     process: &ProcessSpec,
     pack: &str,
@@ -476,6 +513,7 @@ fn author_suite(
     let public = directory.join("public");
     std::fs::create_dir_all(&scratch).map_err(at("preparing QA scratch"))?;
     std::fs::create_dir_all(&public).map_err(at("preparing read-only QA context"))?;
+    prepare_author_repository(&public, pack)?;
     let digest = ContentDigest::try_new(blake3::hash(pack.as_bytes()).to_hex().as_str())
         .map_err(at("hashing QA context"))?;
     record(
@@ -487,7 +525,7 @@ fn author_suite(
     ledger
         .record_context_pack(&attempt, &digest, pack.as_bytes())
         .map_err(at("recording isolated QA context"))?;
-    let sandbox = author_sandbox(state, &public, &scratch, process)
+    let sandbox = author_sandbox(state, repository, &public, &scratch, process)
         .map_err(at("confining read-only QA author"))?;
     let missing = sandbox.missing();
     if missing.contains(&ContainmentCapability::WriteConfinement) {
@@ -495,6 +533,13 @@ fn author_suite(
     }
     let mut process = process.clone();
     process.working_directory = public;
+    process.env.extend([
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            if cfg!(windows) { "NUL" } else { "/dev/null" }.into(),
+        ),
+    ]);
     for key in ["TMPDIR", "TMP", "TEMP"] {
         process
             .env
@@ -537,88 +582,483 @@ fn author_suite(
     ))
 }
 
-#[cfg(unix)]
+fn prepare_author_repository(public: &Path, pack: &str) -> Result<(), GoalError> {
+    std::fs::write(public.join("context.json"), pack)
+        .map_err(at("writing QA context repository"))?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "context.json"],
+        vec![
+            "-c",
+            "user.name=Kaisa",
+            "-c",
+            "user.email=kaisa@example.invalid",
+            "commit",
+            "-qm",
+            "QA context",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(public)
+            .env_clear()
+            .envs(kaisa_sys::base_environment())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .output()
+            .map_err(at("creating QA context repository"))?;
+        if !output.status.success() {
+            return Err(error("cannot create isolated QA context repository"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn developer_private_roots(repository: &Path) -> io::Result<Vec<PathBuf>> {
+    let common = git_output(repository, &["rev-parse", "--git-common-dir"])?;
+    let mut roots = vec![
+        repository.canonicalize()?,
+        repository.join(common.trim()).canonicalize()?,
+    ];
+    let worktrees = git_output(repository, &["worktree", "list", "--porcelain", "-z"])?;
+    for path in worktrees
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree "))
+    {
+        roots.push(Path::new(path).canonicalize()?);
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+#[cfg(target_os = "macos")]
 fn author_sandbox(
     state: &Path,
+    repository: &Path,
     public: &Path,
     scratch: &Path,
     _: &ProcessSpec,
 ) -> io::Result<AgentSandbox> {
-    crate::sandbox::agent_sandbox(
-        state,
-        public,
-        scratch,
-        &[],
-        &scratch.join("unused.sock"),
-        None,
-        false,
-    )
+    let mut policy = kaisa_sys::SeatbeltPolicy {
+        readable: vec![public.canonicalize()?, scratch.canonicalize()?],
+        writable: vec![scratch.canonicalize()?],
+        ..kaisa_sys::SeatbeltPolicy::default()
+    };
+    policy.protect_state(state)?;
+    policy
+        .unreadable
+        .extend(developer_private_roots(repository)?);
+    Ok(AgentSandbox::Seatbelt(policy))
 }
-#[cfg(windows)]
+#[cfg(target_os = "linux")]
 fn author_sandbox(
-    _: &Path,
+    state: &Path,
+    repository: &Path,
     public: &Path,
     scratch: &Path,
     process: &ProcessSpec,
 ) -> io::Result<AgentSandbox> {
+    let mut readable = vec![
+        public.canonicalize()?,
+        scratch.canonicalize()?,
+        process.program.canonicalize()?,
+    ];
+    for path in ["/usr", "/bin", "/lib", "/lib64", "/etc", "/dev"] {
+        if Path::new(path).exists() {
+            readable.push(Path::new(path).canonicalize()?);
+        }
+    }
+    let roots = developer_private_roots(repository)?;
+    let state = state.canonicalize()?;
+    if readable.iter().any(|grant| {
+        state.starts_with(grant)
+            || roots
+                .iter()
+                .any(|root| root.starts_with(grant) || grant.starts_with(root))
+    }) {
+        return Err(io::Error::other(
+            "QA author runtime read grant overlaps developer repository",
+        ));
+    }
+    Ok(
+        match kaisa_sys::read_write_ruleset(&[scratch.canonicalize()?], &readable)? {
+            Some(ruleset) => AgentSandbox::Landlock(ruleset),
+            None => AgentSandbox::Unconfined,
+        },
+    )
+}
+#[cfg(windows)]
+fn author_sandbox(
+    state: &Path,
+    repository: &Path,
+    public: &Path,
+    scratch: &Path,
+    process: &ProcessSpec,
+) -> io::Result<AgentSandbox> {
+    let program = process.program.canonicalize()?;
+    let parent = program
+        .parent()
+        .ok_or_else(|| io::Error::other("QA author executable has no parent"))?;
+    let state = state.canonicalize()?;
+    if state.starts_with(parent)
+        || parent.starts_with(&state)
+        || developer_private_roots(repository)?
+            .iter()
+            .any(|root| root.starts_with(parent) || parent.starts_with(root))
+    {
+        return Err(io::Error::other(
+            "QA author executable grant overlaps developer repository",
+        ));
+    }
     let mut container =
         crate::sandbox::ContainedAttempt::create(scratch, &format!("kaisaQa{}", fresh_suffix()))?;
     container.grant_for_agent(public, public, scratch, &[&process.program])?;
     Ok(AgentSandbox::AppContainer(container))
 }
-#[cfg(not(any(unix, windows)))]
-fn author_sandbox(_: &Path, _: &Path, _: &Path, _: &ProcessSpec) -> io::Result<AgentSandbox> {
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn author_sandbox(
+    _: &Path,
+    _: &Path,
+    _: &Path,
+    _: &Path,
+    _: &ProcessSpec,
+) -> io::Result<AgentSandbox> {
     Ok(AgentSandbox::Unconfined)
 }
 
-/// Runs a previously recorded suite, verifying all digests again before *every* scenario.
-/// Injected tests go only into a disposable checkout, never the developer or frozen source.
-///
+/// Explicit inputs for checking a suite against one developer or revision attempt.
+pub struct QaSuiteRequest<'a> {
+    /// Repository containing the frozen commit.
+    pub repository: &'a Path,
+    /// Trusted pre-development revision for configuration and termination scanning.
+    pub base: &'a str,
+    /// Private state outside every worktree.
+    pub state: &'a Path,
+    /// Run receipt identifier.
+    pub run_id: &'a str,
+    /// Frozen candidate to execute.
+    pub candidate: &'a Candidate,
+    /// Previously sealed private suite.
+    pub suite: &'a QaSuite,
+    /// Trusted compiler or runner.
+    pub toolchain: &'a QaToolchain,
+    /// Actual developer/revision attempt; never reuse the first developer's isolation label.
+    pub attempt: &'a GoalOutcome,
+}
+
+/// Runs a suite with one checkout/build and immutable private inputs outside its write grants.
+/// Every scenario rechecks all input digests; only positive named-test evidence can pass.
 /// # Errors
-/// Returns an error before execution on tampering; failed tests are recorded failing evidence.
-pub fn run_qa_suite(
-    repository: &Path,
-    state: &Path,
-    run_id: &str,
-    candidate: &Candidate,
-    suite: &QaSuite,
-    toolchain: &QaToolchain,
-) -> Result<Vec<QaResult>, GoalError> {
-    let mut results = Vec::new();
-    let mut ledger =
-        EventStore::open(&state.join("kaisa.db")).map_err(at("opening QA result ledger"))?;
-    let initial = suite
+/// Returns an error before execution on storage tampering or infrastructure failure.
+pub fn run_qa_suite(request: &QaSuiteRequest<'_>) -> Result<Vec<QaResult>, GoalError> {
+    let QaSuiteRequest {
+        repository,
+        state,
+        run_id,
+        candidate,
+        suite,
+        toolchain,
+        ..
+    } = request;
+    let tests = suite
         .verified_tests()
         .map_err(at("verifying private QA digest"))?;
-    for original in &initial {
-        let tests = suite
-            .verified_tests()
-            .map_err(at("rechecking private QA digest before execution"))?;
-        let test = tests
-            .iter()
-            .find(|test| test.test_id == original.test_id)
-            .ok_or_else(|| error("QA manifest changed"))?;
-        let temporary = QaTemporary::create(state)?;
-        let checkout =
-            CandidateCheckout::create(repository, candidate, &temporary.0.join("candidate"))
-                .map_err(at("checking out private QA candidate"))?;
-        let sources = CheckedSources::record(checkout.path())
-            .map_err(at("pinning private QA source tree"))?;
-        let (spec, installed) = install_test(checkout.path(), test, toolchain)?;
-        let (run, confined, unchanged) = candidate_command(
+    let mut ledger =
+        EventStore::open(&state.join("kaisa.db")).map_err(at("opening QA result ledger"))?;
+    let mut feedback_sources = tests.clone();
+    for event in ledger
+        .read_from(Sequence::FIRST)
+        .map_err(at("reading private QA suite receipts"))?
+    {
+        if event.recorded.event.kind != EventKind::QaSuiteRecorded {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(&event.recorded.event.payload)
+            .map_err(at("reading QA suite receipt"))?;
+        if payload["run_id"].as_str() != Some(run_id) {
+            continue;
+        }
+        let kind = match payload["kind"].as_str() {
+            Some("acceptance") => QaKind::Acceptance,
+            Some("adversarial") => QaKind::Adversarial,
+            _ => return Err(error("invalid private suite kind receipt")),
+        };
+        let digest = payload["manifest_digest"]
+            .as_str()
+            .ok_or_else(|| error("private suite receipt lacks digest"))?;
+        let recorded = QaSuite::open(
+            &state.join("qa").join(run_id).join(kind.code()),
+            kind,
+            digest,
+        )
+        .map_err(at("verifying feedback redaction suite"))?;
+        feedback_sources.extend(
+            recorded
+                .verified_tests()
+                .map_err(at("reading feedback redaction suite"))?,
+        );
+    }
+    let findings = qa_influencing_findings(repository, request.base, candidate)?;
+    let temporary = QaTemporary::create(state)?;
+    let runtime = temporary.0.join("runtime");
+    let inputs = temporary.0.join("inputs");
+    std::fs::create_dir_all(&runtime).map_err(at("creating QA runtime"))?;
+    std::fs::create_dir_all(&inputs).map_err(at("creating immutable QA inputs"))?;
+    let checkout = CandidateCheckout::create(repository, candidate, &temporary.0.join("candidate"))
+        .map_err(at("checking out private QA candidate"))?;
+    let sources =
+        CheckedSources::record(checkout.path()).map_err(at("pinning private QA source tree"))?;
+    let manifest = checkout.path().join("Cargo.toml");
+    if matches!(toolchain, QaToolchain::Rust { .. }) {
+        crate::qa_interface::read_public(checkout.path(), Path::new("Cargo.toml"))
+            .map_err(at("validating regular QA package manifest"))?;
+    }
+    let original_manifest = if matches!(toolchain, QaToolchain::Rust { .. }) {
+        Some(std::fs::read(&manifest).map_err(at("reading original QA manifest"))?)
+    } else {
+        None
+    };
+    let mut installed = Vec::new();
+    let mut expected = Vec::new();
+    let mut names = Vec::new();
+    for test in &tests {
+        expected.push(expected_test_names(test, toolchain)?);
+        let name = format!("kaisa_qa_{}", fresh_suffix());
+        let path = match toolchain {
+            QaToolchain::Rust { .. } => {
+                if !test.file.ends_with(".rs") {
+                    return Err(error("Rust private QA requires .rs files"));
+                }
+                inputs.join(format!("{name}.rs"))
+            }
+            QaToolchain::Node { .. } => {
+                let extension = Path::new(&test.file)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| ["js", "mjs", "cjs"].contains(s))
+                    .ok_or_else(|| error("Node private QA requires JS files"))?;
+                let parent = inputs.join("node");
+                let directory = parent.join("tests");
+                if !parent.exists() {
+                    prepare_node_inputs(checkout.path(), &parent)?;
+                }
+                std::fs::create_dir_all(&directory).map_err(at("creating immutable Node tests"))?;
+                directory.join(format!("{name}.{extension}"))
+            }
+        };
+        std::fs::write(&path, &test.contents).map_err(at("installing immutable QA source"))?;
+        let mut permissions = std::fs::metadata(&path)
+            .map_err(at("reading QA input permissions"))?
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).map_err(at("sealing QA input"))?;
+        if matches!(toolchain, QaToolchain::Rust { .. }) {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&manifest)
+                .map_err(at("opening QA manifest"))?;
+            writeln!(
+                file,
+                "\n[[test]]\nname = {}\npath = {}",
+                json!(name),
+                json!(path.to_string_lossy())
+            )
+            .map_err(at("adding immutable QA target"))?;
+        }
+        installed.push(path);
+        names.push(name);
+    }
+    let generated_manifest = if original_manifest.is_some() {
+        std::fs::read(&manifest).ok()
+    } else {
+        None
+    };
+    if !inputs_match(&installed, &tests) {
+        return Err(error(
+            "installed private QA inputs changed before compilation",
+        ));
+    }
+    let readonly = vec![inputs.clone(), manifest.clone()];
+    let mut build = None;
+    if findings.is_empty()
+        && let QaToolchain::Rust { cargo } = toolchain
+    {
+        let mut args = vec![
+            "test".into(),
+            "--offline".into(),
+            "--no-run".into(),
+            "--message-format=json".into(),
+            "--manifest-path".into(),
+            manifest.to_string_lossy().into_owned(),
+        ];
+        args.extend(cargo_configuration_overrides(cargo, &runtime)?);
+        for name in &names {
+            args.extend(["--test".into(), name.clone()]);
+        }
+        let process = ProcessSpec {
+            program: cargo.clone(),
+            args,
+            working_directory: runtime.clone(),
+            env: Vec::new(),
+        };
+        build = Some(qa_command(
             state,
             checkout.path(),
-            &temporary.0,
-            &sources,
-            &candidate.tree,
-            &spec,
-        )?;
-        let private_test_unchanged =
-            std::fs::read(&installed).is_ok_and(|bytes| bytes == test.contents.as_bytes());
-        let passed = !run.truncated
+            &runtime,
+            &readonly,
+            &process,
+        )?);
+    }
+    let artifacts: Vec<(PathBuf, blake3::Hash)> = build
+        .as_ref()
+        .into_iter()
+        .flat_map(|(run, _)| {
+            String::from_utf8_lossy(&run.output)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|v| v["reason"] == "compiler-artifact")
+                .filter_map(|v| v["executable"].as_str().map(PathBuf::from))
+                .collect::<Vec<_>>()
+        })
+        .map(|path| {
+            let path = path
+                .canonicalize()
+                .map_err(at("resolving compiled QA artifact"))?;
+            if !path.starts_with(&runtime) {
+                return Err(error(
+                    "compiled QA artifact is outside the Kaisa build directory",
+                ));
+            }
+            let bytes = std::fs::read(&path).map_err(at("pinning compiled QA artifact"))?;
+            Ok((path, blake3::hash(&bytes)))
+        })
+        .collect::<Result<Vec<_>, GoalError>>()?;
+    let artifacts_match = || {
+        artifacts.iter().all(|(path, digest)| {
+            std::fs::read(path).is_ok_and(|bytes| blake3::hash(&bytes) == *digest)
+        })
+    };
+    let execution_scratch = temporary.0.join("execution");
+    std::fs::create_dir(&execution_scratch).map_err(at("creating QA execution scratch"))?;
+    let mut execution_readonly = readonly.clone();
+    execution_readonly.push(runtime.clone());
+    let mut results = Vec::new();
+    let mut tainted = false;
+    for (index, test) in tests.iter().enumerate() {
+        suite
+            .verified_tests()
+            .map_err(at("rechecking private QA digest before execution"))?;
+        let before = !tainted && inputs_match(&installed, &tests) && artifacts_match();
+        let mut command = None;
+        if findings.is_empty() && before {
+            match toolchain {
+                QaToolchain::Rust { .. } => {
+                    if let Some((built, _)) = &build
+                        && !built.truncated
+                        && built.exit == Some(ProcessExit::Code(0))
+                    {
+                        let executable = String::from_utf8_lossy(&built.output)
+                            .lines()
+                            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                            .find(|v| {
+                                v["reason"] == "compiler-artifact"
+                                    && v["target"]["name"] == names[index]
+                                    && v["executable"].is_string()
+                            })
+                            .and_then(|v| v["executable"].as_str().map(PathBuf::from));
+                        if let Some(program) = executable {
+                            command = Some(ProcessSpec {
+                                program,
+                                args: vec![
+                                    "--nocapture".into(),
+                                    "--format=pretty".into(),
+                                    "--test-threads=1".into(),
+                                ],
+                                working_directory: checkout.path().to_owned(),
+                                env: Vec::new(),
+                            });
+                        }
+                    }
+                }
+                QaToolchain::Node { node } => {
+                    command = Some(ProcessSpec {
+                        program: node.clone(),
+                        args: vec![
+                            "--test".into(),
+                            "--test-reporter=tap".into(),
+                            installed[index].to_string_lossy().into_owned(),
+                        ],
+                        working_directory: checkout.path().to_owned(),
+                        env: Vec::new(),
+                    })
+                }
+            }
+        }
+        let executed = command.is_some();
+        let (run, confined) = if let Some(process) = command {
+            qa_command(
+                state,
+                checkout.path(),
+                &execution_scratch,
+                &execution_readonly,
+                &process,
+            )?
+        } else if let Some(build) = &build {
+            build.clone()
+        } else {
+            (
+                CapturedRun {
+                    exit: None,
+                    output: Vec::new(),
+                    truncated: false,
+                },
+                false,
+            )
+        };
+        let input_bytes_unchanged = before && inputs_match(&installed, &tests) && artifacts_match();
+        // The manifest is harness-owned. Verify its generated bytes, restore the frozen bytes
+        // only for Git's tracked-source comparison, then put the identical harness bytes back.
+        let manifest_unchanged =
+            original_manifest.is_none() || std::fs::read(&manifest).ok() == generated_manifest;
+        if let Some(bytes) = &original_manifest {
+            std::fs::write(&manifest, bytes)
+                .map_err(at("restoring frozen manifest for comparison"))?;
+        }
+        let unchanged = manifest_unchanged
+            && sources
+                .matches(checkout.path(), &candidate.tree)
+                .map_err(at("checking private QA candidate integrity"))?;
+        if let Some(bytes) = &generated_manifest {
+            std::fs::write(&manifest, bytes).map_err(at("restoring QA manifest"))?;
+        }
+        let write_denied = confined && qa_write_deny_available();
+        let private_test_unchanged = write_denied && input_bytes_unchanged;
+        let positive_evidence =
+            executed && positive_test_evidence(&run, &expected[index], toolchain);
+        let passed = findings.is_empty()
+            && !run.truncated
             && unchanged
-            && private_test_unchanged
+            && input_bytes_unchanged
+            && positive_evidence
             && run.exit == Some(ProcessExit::Code(0));
+        let failures = if passed {
+            Vec::new()
+        } else {
+            observable_diagnostics(
+                test,
+                &feedback_sources,
+                &run,
+                unchanged && input_bytes_unchanged,
+                positive_evidence,
+                &findings,
+            )
+        };
         let result = QaResult {
             kind: suite.kind(),
             test_id: test.test_id.clone(),
@@ -629,101 +1069,209 @@ pub fn run_qa_suite(
             confined,
             source_unchanged: unchanged,
             private_test_unchanged,
-            failures: if passed {
-                Vec::new()
+            expected_tests: expected[index].clone(),
+            positive_evidence,
+            qa_evidence: QA_EVIDENCE,
+            private_test_integrity: if write_denied {
+                "write-denied"
             } else {
-                observable_diagnostics(test, &run, unchanged && private_test_unchanged)
+                "reduced(write-deny unavailable; digests only)"
             },
+            blocking_findings: findings.clone(),
+            qa_isolation: qa_isolation(request.attempt),
+            failures,
         };
         record(
             &mut ledger,
             EventKind::QaResult,
             &test.test_id,
-            json!({"run_id":run_id,"test_id":result.test_id,
-            "kind":result.kind.code(),"criterion_ids":result.criterion_ids,"passed":result.passed,
-            "output_digest":result.output_digest,"candidate_tree":result.candidate_tree,"confined":result.confined,
-            "source_unchanged":result.source_unchanged,"private_test_unchanged":result.private_test_unchanged}),
+            json!({"run_id":run_id,"test_id":result.test_id,"kind":result.kind.code(),"criterion_ids":result.criterion_ids,
+                "passed":result.passed,"output_digest":result.output_digest,"candidate_tree":result.candidate_tree,"confined":result.confined,
+                "source_unchanged":result.source_unchanged,"private_test_unchanged":result.private_test_unchanged,
+                "private_test_integrity":result.private_test_integrity,"qa_evidence":result.qa_evidence,"expected_tests":result.expected_tests,
+                "positive_evidence":result.positive_evidence,"blocking_findings":result.blocking_findings,
+                "attempt":request.attempt.attempt.as_str(),"qa_isolation":result.qa_isolation.label()}),
         )?;
         results.push(result);
+        // A mutated shared build invalidates the remainder; never reuse tainted artifacts.
+        if !unchanged || !input_bytes_unchanged {
+            build = None;
+            tainted = true;
+        }
     }
     Ok(results)
 }
 
-fn install_test(
-    checkout: &Path,
-    test: &QaTestFile,
-    toolchain: &QaToolchain,
-) -> Result<(ProcessSpec, PathBuf), GoalError> {
-    let name = format!(
-        "kaisa_qa_{}",
-        blake3::hash(test.test_id.as_bytes()).to_hex()
+fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<String>, GoalError> {
+    let output = std::process::Command::new(cargo)
+        .arg("-vV")
+        .current_dir(directory)
+        .env_clear()
+        .envs(kaisa_sys::base_environment())
+        .output()
+        .map_err(at("identifying trusted Cargo host"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let host = text
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .filter(|host| {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        })
+        .ok_or_else(|| error("trusted Cargo did not identify its host target"))?;
+    // Cargo has no null runner value. This explicit fail-closed sentinel disables both
+    // cfg and exact-host runners: --no-run is mandatory and Kaisa executes binaries itself.
+    let runner = format!(
+        "[{}, \"--kaisa-no-runner\"]",
+        json!(cargo.to_string_lossy())
     );
-    let (program, args, path) = match toolchain {
-        QaToolchain::Rust { cargo } => {
-            if !test.file.ends_with(".rs") {
-                return Err(error("Rust private QA requires .rs files"));
-            }
-            let directory = checkout.join("tests");
-            safe_scratch_directory(&directory)?;
-            (
-                cargo.clone(),
-                vec![
-                    "test".into(),
-                    "--offline".into(),
-                    "--test".into(),
-                    name.clone(),
-                    "--".into(),
-                    "--nocapture".into(),
-                ],
-                directory.join(format!("{name}.rs")),
-            )
-        }
-        QaToolchain::Node { node } => {
-            let extension = Path::new(&test.file)
-                .extension()
-                .and_then(|s| s.to_str())
-                .filter(|s| ["js", "mjs", "cjs"].contains(s))
-                .ok_or_else(|| error("Node private QA requires JS files"))?;
-            let directory = checkout.join(format!(".kaisa-qa_{}", fresh_suffix()));
-            std::fs::create_dir(&directory).map_err(at("creating private Node test scratch"))?;
-            let path = directory.join(format!("{name}.{extension}"));
-            (
-                node.clone(),
-                vec!["--test".into(), path.to_string_lossy().into_owned()],
-                path,
-            )
-        }
-    };
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(at("installing private QA in disposable checkout"))?;
-    file.write_all(test.contents.as_bytes())
-        .map_err(at("writing disposable QA test"))?;
-    Ok((
-        ProcessSpec {
-            program,
-            args,
-            working_directory: checkout.to_owned(),
-            env: Vec::new(),
-        },
-        path,
-    ))
+    Ok(vec![
+        "--config".into(),
+        format!("target.'cfg(all())'.runner={runner}"),
+        "--config".into(),
+        format!("target.{host}.runner={runner}"),
+        "--config".into(),
+        "build.rustc-wrapper=\"\"".into(),
+        "--config".into(),
+        "build.rustc-workspace-wrapper=\"\"".into(),
+    ])
 }
 
-fn safe_scratch_directory(path: &Path) -> Result<(), GoalError> {
-    if path.try_exists().map_err(at("checking QA scratch"))? {
-        let metadata =
-            std::fs::symlink_metadata(path).map_err(at("checking QA scratch metadata"))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(error("QA scratch directory is not a regular directory"));
+fn qa_write_deny_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return kaisa_sys::landlock_abi().is_some_and(|abi| abi >= 3);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cfg!(target_os = "macos")
+    }
+}
+
+fn inputs_match(paths: &[PathBuf], tests: &[QaTestFile]) -> bool {
+    paths.iter().zip(tests).all(|(path, test)| {
+        std::fs::read(path)
+            .is_ok_and(|bytes| blake3::hash(&bytes) == blake3::hash(test.contents.as_bytes()))
+    })
+}
+
+fn prepare_node_inputs(checkout: &Path, parent: &Path) -> Result<(), GoalError> {
+    std::fs::create_dir(parent).map_err(at("creating Node public module links"))?;
+    for entry in std::fs::read_dir(checkout).map_err(at("listing Node public modules"))? {
+        let entry = entry.map_err(at("reading Node public entry"))?;
+        if entry.file_name() == ".git" || entry.file_name() == "tests" {
+            continue;
         }
-    } else {
-        std::fs::create_dir(path).map_err(at("creating QA scratch"))?;
+        let destination = parent.join(entry.file_name());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(entry.path(), destination)
+            .map_err(at("linking public Node module"))?;
+        #[cfg(windows)]
+        if entry
+            .file_type()
+            .map_err(at("Node entry metadata"))?
+            .is_dir()
+        {
+            std::os::windows::fs::symlink_dir(entry.path(), destination)
+                .map_err(at("linking public Node directory"))?;
+        } else {
+            std::os::windows::fs::symlink_file(entry.path(), destination)
+                .map_err(at("linking public Node module"))?;
+        }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn readonly_cargo_cache(cargo_home: &Path) -> Result<Vec<PathBuf>, GoalError> {
+    let mut paths = Vec::new();
+    // Reuse only trusted offline dependency sources, never user/candidate Cargo config,
+    // credentials or executables. Symlink targets stay outside all writable grants.
+    {
+        let cache = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+        if let Some(cache) = cache {
+            for directory in ["registry", "git"] {
+                let source = cache.join(directory);
+                if source.is_dir() {
+                    let source = source
+                        .canonicalize()
+                        .map_err(at("resolving trusted Cargo cache"))?;
+                    let destination = cargo_home.join(directory);
+                    if !destination.exists() {
+                        std::os::unix::fs::symlink(&source, &destination)
+                            .map_err(at("linking read-only Cargo dependency cache"))?;
+                    }
+                    paths.push(source);
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+#[cfg(not(unix))]
+fn readonly_cargo_cache(_: &Path) -> Result<Vec<PathBuf>, GoalError> {
+    Ok(Vec::new())
+}
+
+fn qa_command(
+    state: &Path,
+    checkout: &Path,
+    runtime: &Path,
+    readonly: &[PathBuf],
+    process: &ProcessSpec,
+) -> Result<(CapturedRun, bool), GoalError> {
+    let cargo_home = runtime.join("cargo-home");
+    std::fs::create_dir_all(&cargo_home).map_err(at("preparing Kaisa Cargo home"))?;
+    let mut protected = readonly.to_vec();
+    protected.extend(readonly_cargo_cache(&cargo_home)?);
+    let mut sandbox = check_sandbox_readonly(state, checkout, runtime, &protected)
+        .map_err(at("confining immutable QA inputs"))?;
+    #[cfg(target_os = "macos")]
+    if let crate::verify::CheckSandbox::Seatbelt(policy) = &mut sandbox {
+        policy.readable.extend(protected.iter().cloned());
+        policy
+            .protect_state(state)
+            .map_err(at("granting read-only QA inputs"))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = &mut sandbox;
+    let mut process = process.clone();
+    for (key, value) in [
+        ("CARGO_HOME", cargo_home.to_string_lossy().into_owned()),
+        (
+            "CARGO_TARGET_DIR",
+            runtime.join("target").to_string_lossy().into_owned(),
+        ),
+        ("RUSTC_WRAPPER", String::new()),
+        ("RUSTC_WORKSPACE_WRAPPER", String::new()),
+        ("CARGO_BUILD_RUSTC_WRAPPER", String::new()),
+        ("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", String::new()),
+        ("CARGO_BUILD_RUSTFLAGS", String::new()),
+        ("CARGO_ENCODED_RUSTFLAGS", String::new()),
+        ("NODE_OPTIONS", String::new()),
+        (
+            "KAISA_STATE_DIR",
+            runtime.join("test-state").to_string_lossy().into_owned(),
+        ),
+        ("TMPDIR", runtime.to_string_lossy().into_owned()),
+        ("TMP", runtime.to_string_lossy().into_owned()),
+        ("TEMP", runtime.to_string_lossy().into_owned()),
+    ] {
+        process.env.push((key.to_owned(), value));
+    }
+    let run = run_captured(
+        &process,
+        &sandbox.confinement(),
+        &[],
+        QA_DEADLINE,
+        QA_OUTPUT_CAP,
+    )
+    .map_err(at("running immutable private QA"))?;
+    Ok((run, sandbox.is_confined()))
 }
 
 fn candidate_command(
@@ -734,30 +1282,11 @@ fn candidate_command(
     tree: &str,
     process: &ProcessSpec,
 ) -> Result<(CapturedRun, bool, bool), GoalError> {
-    let sandbox = check_sandbox(state, checkout, temporary)
-        .map_err(at("building private QA check sandbox"))?;
-    let mut process = process.clone();
-    process.env.push((
-        "KAISA_STATE_DIR".to_owned(),
-        temporary.join("test-state").to_string_lossy().into_owned(),
-    ));
-    for key in ["TMPDIR", "TEMP", "TMP"] {
-        process
-            .env
-            .push((key.to_owned(), temporary.to_string_lossy().into_owned()));
-    }
-    let run = run_captured(
-        &process,
-        &sandbox.confinement(),
-        &[],
-        QA_DEADLINE,
-        QA_OUTPUT_CAP,
-    )
-    .map_err(at("running private QA check"))?;
+    let (run, confined) = qa_command(state, checkout, temporary, &[], process)?;
     let unchanged = sources
         .matches(checkout, tree)
         .map_err(at("checking private QA candidate integrity"))?;
-    Ok((run, sandbox.is_confined(), unchanged))
+    Ok((run, confined, unchanged))
 }
 
 fn add_cli_help(
@@ -791,12 +1320,13 @@ fn add_cli_help(
                     ProcessSpec {
                         program: cargo.clone(),
                         args: vec![
-                            "run".into(),
+                            "build".into(),
                             "--offline".into(),
+                            "--message-format=json".into(),
+                            "--manifest-path".into(),
+                            checkout.join("Cargo.toml").to_string_lossy().into_owned(),
                             "--bin".into(),
                             name,
-                            "--".into(),
-                            "--help".into(),
                         ],
                         working_directory: checkout.to_owned(),
                         env: Vec::new(),
@@ -805,8 +1335,13 @@ fn add_cli_help(
             })
             .collect(),
     };
-    for (name, spec) in commands {
-        let (run, confined, unchanged) = candidate_command(
+    for (name, mut spec) in commands {
+        if let QaToolchain::Rust { cargo } = request.toolchain {
+            spec.working_directory = temporary.to_owned();
+            spec.args
+                .extend(cargo_configuration_overrides(cargo, temporary)?);
+        }
+        let (mut run, confined, mut unchanged) = candidate_command(
             request.state_directory,
             checkout,
             temporary,
@@ -814,6 +1349,33 @@ fn add_cli_help(
             &request.candidate.tree,
             &spec,
         )?;
+        if matches!(request.toolchain, QaToolchain::Rust { .. })
+            && run.exit == Some(ProcessExit::Code(0))
+            && !run.truncated
+        {
+            let executable = String::from_utf8_lossy(&run.output)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|v| v["reason"] == "compiler-artifact" && v["executable"].is_string())
+                .and_then(|v| v["executable"].as_str().map(PathBuf::from));
+            if let Some(program) = executable {
+                let checked = candidate_command(
+                    request.state_directory,
+                    checkout,
+                    temporary,
+                    sources,
+                    &request.candidate.tree,
+                    &ProcessSpec {
+                        program,
+                        args: vec!["--help".into()],
+                        working_directory: checkout.to_owned(),
+                        env: Vec::new(),
+                    },
+                )?;
+                run = checked.0;
+                unchanged &= checked.2;
+            }
+        }
         if !unchanged {
             return Err(error("CLI --help modified the frozen candidate sources"));
         }
@@ -830,65 +1392,384 @@ fn add_cli_help(
     Ok(())
 }
 
+fn git_output(repository: &Path, args: &[&str]) -> io::Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repository)
+        .env_clear()
+        .envs(kaisa_sys::base_environment())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("QA Git query failed"));
+    }
+    String::from_utf8(output.stdout).map_err(io::Error::other)
+}
+
+fn qa_influencing_findings(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<Vec<String>, GoalError> {
+    let paths = kaisa_workspace::changed_paths(repository, base, candidate)
+        .map_err(at("scanning QA-influencing paths"))?;
+    let mut findings = BTreeSet::new();
+    for path in paths {
+        let file = path.rsplit('/').next().unwrap_or(&path);
+        let configuration = (path.split('/').any(|part| part == ".cargo")
+            && file.starts_with("config"))
+            || file == "build.rs"
+            || file.starts_with("rust-toolchain")
+            || file == ".npmrc"
+            || [
+                "jest.config",
+                "vitest.config",
+                "mocha",
+                ".mocharc",
+                "node.options",
+            ]
+            .iter()
+            .any(|prefix| file.starts_with(prefix));
+        let package_configuration = if file == "package.json" {
+            let config = |revision: &str| -> Option<Value> {
+                git_output(repository, &["show", &format!("{revision}:{path}")])
+                    .ok()
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            };
+            let before = config(base);
+            let after = config(&candidate.commit);
+            [
+                "scripts",
+                "jest",
+                "vitest",
+                "mocha",
+                "ava",
+                "nyc",
+                "nodeOptions",
+                "node-options",
+            ]
+            .iter()
+            .any(|key| {
+                before.as_ref().and_then(|v| v.get(key)) != after.as_ref().and_then(|v| v.get(key))
+            })
+        } else {
+            false
+        };
+        if configuration || package_configuration {
+            findings.insert(format!("QA-influencing configuration: {path}; reviewer justification with evidence required"));
+        }
+        if !matches!(
+            Path::new(&path).extension().and_then(|s| s.to_str()),
+            Some("rs" | "js" | "mjs" | "cjs" | "ts")
+        ) || path.split('/').any(|part| part == "tests")
+            || file.contains(".test.")
+            || file.contains(".spec.")
+        {
+            continue;
+        }
+        let source = |revision: &str| {
+            git_output(repository, &["show", &format!("{revision}:{path}")]).unwrap_or_default()
+        };
+        let before = source(base);
+        let after = source(&candidate.commit);
+        let javascript = !path.ends_with(".rs");
+        let before_code = crate::qa_interface::code_tokens(&before, javascript).join("");
+        let after_code = crate::qa_interface::code_tokens(&after, javascript).join("");
+        if [
+            "std::process::exit(",
+            "process::abort(",
+            "process.exit(",
+            "process.kill(process.pid",
+        ]
+        .iter()
+        .any(|call| after_code.matches(call).count() > before_code.matches(call).count())
+        {
+            findings.insert(format!("Added process-termination call in {path}; reviewer justification with evidence required"));
+        }
+        let added = after;
+        if added.contains("NODE_OPTIONS") {
+            findings.insert(format!("QA-influencing configuration: {path} changes node options; reviewer justification with evidence required"));
+        }
+    }
+    Ok(findings.into_iter().collect())
+}
+
+/// Only flat Rust #[test] functions and Node test('static name', ...) are supported. This
+/// deliberately refuses dynamic/ignored/nested declarations rather than guessing test counts.
+fn expected_test_names(
+    test: &QaTestFile,
+    toolchain: &QaToolchain,
+) -> Result<Vec<String>, GoalError> {
+    let names = match toolchain {
+        QaToolchain::Rust { .. } => {
+            let tokens = crate::qa_interface::code_tokens(&test.contents, false);
+            let mut names = Vec::new();
+            for window in tokens.windows(7) {
+                if window[..5] == ["#", "[", "test", "]", "fn"] && window[6] == "(" {
+                    names.push(window[5].clone());
+                }
+            }
+            names
+        }
+        QaToolchain::Node { .. } => node_test_names(&test.contents)?,
+    };
+    if names.is_empty() || names.iter().collect::<BTreeSet<_>>().len() != names.len() {
+        return Err(error(
+            "private QA requires unique, statically named expected tests",
+        ));
+    }
+    Ok(names)
+}
+
+fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
+    // A tiny JS lexical scan preserves only static string operands, skipping comments and
+    // consuming templates whole. Other API extraction uses the opaque-literal lexer.
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    let mut tokens = Vec::new();
+    while at < bytes.len() {
+        if bytes[at].is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if bytes[at..].starts_with(b"//") {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if bytes[at..].starts_with(b"/*") {
+            at += 2;
+            while at + 1 < bytes.len() && !bytes[at..].starts_with(b"*/") {
+                at += 1;
+            }
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        if matches!(bytes[at], b'\'' | b'"' | b'`') {
+            let quote = bytes[at];
+            at += 1;
+            let start = at;
+            let mut escaped = false;
+            while at < bytes.len() && bytes[at] != quote {
+                if bytes[at] == b'\\' {
+                    escaped = true;
+                    at += 1;
+                }
+                at += 1;
+            }
+            let value = source.get(start..at).unwrap_or_default();
+            tokens.push(if escaped || quote == b'`' {
+                "<dynamic>".into()
+            } else {
+                format!("string:{value}")
+            });
+            at = (at + 1).min(bytes.len());
+            continue;
+        }
+        let start = at;
+        if bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_' || bytes[at] == b'$' {
+            while at < bytes.len()
+                && (bytes[at].is_ascii_alphanumeric() || b"_$".contains(&bytes[at]))
+            {
+                at += 1;
+            }
+        } else {
+            at += 1;
+        }
+        tokens.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
+    }
+    let mut names = Vec::new();
+    for window in tokens.windows(4) {
+        if window[0] == "test" && window[1] == "(" && window[3] == "," {
+            let name = window[2]
+                .strip_prefix("string:")
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| error("Node QA requires static test names"))?;
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+fn positive_test_evidence(run: &CapturedRun, expected: &[String], toolchain: &QaToolchain) -> bool {
+    if expected.is_empty() || run.truncated {
+        return false;
+    }
+    let output = String::from_utf8_lossy(&run.output);
+    let mut observed = Vec::new();
+    match toolchain {
+        QaToolchain::Rust { .. } => {
+            for line in output.lines() {
+                if let Some(name) = line
+                    .strip_prefix("test ")
+                    .and_then(|line| line.strip_suffix(" ... ok"))
+                {
+                    observed.push(name.to_owned());
+                }
+            }
+            let summary = format!(
+                "test result: ok. {} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;",
+                expected.len()
+            );
+            if output
+                .lines()
+                .filter(|line| line.starts_with("test result: "))
+                .count()
+                != 1
+                || output
+                    .lines()
+                    .filter(|line| line.starts_with(&summary))
+                    .count()
+                    != 1
+            {
+                return false;
+            }
+        }
+        QaToolchain::Node { .. } => {
+            for line in output.lines() {
+                if let Some(rest) = line
+                    .strip_prefix("ok ")
+                    .and_then(|line| line.split_once(" - ").map(|(_, name)| name))
+                {
+                    observed.push(rest.to_owned());
+                }
+            }
+            for required in [
+                format!("1..{}", expected.len()),
+                format!("# tests {}", expected.len()),
+                format!("# pass {}", expected.len()),
+                "# fail 0".into(),
+                "# cancelled 0".into(),
+                "# skipped 0".into(),
+                "# todo 0".into(),
+            ] {
+                if output.lines().filter(|line| *line == required).count() != 1 {
+                    return false;
+                }
+            }
+        }
+    }
+    observed.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
+    observed == expected
+}
+
+fn normalized(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+fn redact_private(text: &str, suite: &[QaTestFile]) -> String {
+    const MIN_SUBSTRING: usize = 16;
+    const SHINGLE_WORDS: usize = 8;
+    let text: String = text.chars().take(QA_FEEDBACK_FIELD_CAP).collect();
+    let compact = normalized(&text);
+    let tokens = words(&text);
+    let overlaps = suite.iter().any(|test| {
+        let source = normalized(&test.contents);
+        (!compact.is_empty() && source.contains(&compact))
+            || compact
+                .chars()
+                .collect::<Vec<_>>()
+                .windows(MIN_SUBSTRING)
+                .any(|window| source.contains(&window.iter().collect::<String>()))
+            || test
+                .contents
+                .lines()
+                .map(normalized)
+                .any(|line| line.len() >= MIN_SUBSTRING && compact.contains(&line))
+            || words(&test.contents)
+                .iter()
+                .any(|word| word.len() >= MIN_SUBSTRING && compact.contains(word))
+            || tokens.windows(SHINGLE_WORDS).any(|shingle| {
+                words(&test.contents)
+                    .windows(SHINGLE_WORDS)
+                    .any(|private| private == shingle)
+            })
+    });
+    if overlaps {
+        "[private source redacted]".into()
+    } else {
+        text
+    }
+}
+
 fn observable_diagnostics(
     test: &QaTestFile,
+    suite: &[QaTestFile],
     run: &CapturedRun,
     unchanged: bool,
+    positive: bool,
+    findings: &[String],
 ) -> Vec<ObservableFailure> {
-    // Raw compiler/panic output can echo test source. Copy only the dedicated observable
-    // diagnostic's scalar fields, never output snippets, stack traces or assertion lines.
+    // No self-declared observation data is consumed. Both assertion messages and ids are
+    // scanned before forwarding, because the candidate shares the harness output channel.
     let output = review_output_tail(run);
-    let observed = output
-        .lines()
-        .filter_map(|line| {
-            line.trim_start_matches("# ")
-                .strip_prefix("kaisa-observation:")
+    let mut excerpt = None;
+    let mut panic_next = false;
+    for line in output.lines() {
+        if line.contains("kaisa-observation:") {
+            continue;
+        }
+        if panic_next {
+            excerpt = Some(line.trim().to_owned());
+            break;
+        }
+        if line.starts_with("thread '") && line.contains("panicked at") {
+            panic_next = true;
+        }
+        if let Some(message) = line.trim().strip_prefix("error: ") {
+            excerpt = Some(message.to_owned());
+            break;
+        }
+    }
+    let message = if !findings.is_empty() {
+        "blocked: QA-influencing configuration or termination call requires reviewer evidence"
+            .into()
+    } else if !unchanged {
+        "candidate or private test inputs changed".into()
+    } else if !positive && run.exit == Some(ProcessExit::Code(0)) {
+        "no positive evidence for every expected test".into()
+    } else {
+        excerpt.unwrap_or_else(|| {
+            format!(
+                "test process {:?}; truncated={}; no positive evidence",
+                run.exit, run.truncated
+            )
         })
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-        .find(|value| {
-            exact_keys(value, &["scenario", "input", "expected", "actual"]).is_ok()
-                && ["scenario", "input", "expected", "actual"]
-                    .iter()
-                    .all(|key| value[*key].is_string())
-        });
+    };
     test.criterion_ids
         .iter()
-        .map(|id| {
-            let field = |key: &str, fallback: &str| {
-                observed
-                    .as_ref()
-                    .and_then(|v| v[key].as_str())
-                    .unwrap_or(fallback)
-                    .chars()
-                    .take(512)
-                    .collect::<String>()
-            };
-            ObservableFailure {
-                criterion_id: id.clone(),
-                scenario: field("scenario", &test.test_id),
-                input: field("input", "not reported"),
-                expected: field("expected", "scenario exits successfully"),
-                actual: if !unchanged {
-                    "test changed candidate or installed private test sources".into()
-                } else {
-                    field(
-                        "actual",
-                        &format!("test process {:?}; truncated={}", run.exit, run.truncated),
-                    )
-                },
-            }
+        .map(|id| ObservableFailure {
+            criterion_id: redact_private(id, suite),
+            scenario: redact_private(&test.test_id, suite),
+            passed: false,
+            message: redact_private(&message, suite),
         })
         .collect()
 }
 
-/// Source-free revision feedback: criterion, scenario, input, expected and actual only.
+/// Bounded, already source-redacted Kaisa feedback; raw output is never forwarded.
 #[must_use]
 pub fn revision_feedback(results: &[QaResult]) -> Vec<ObservableFailure> {
-    results
-        .iter()
-        .filter(|result| !result.passed)
-        .flat_map(|result| result.failures.clone())
-        .collect()
+    let mut remaining = QA_FEEDBACK_TOTAL_CAP.saturating_sub(2);
+    results.iter().filter(|result| !result.passed).flat_map(|result| result.failures.iter()).take_while(|failure| {
+        let size = json!({"criterion_id":failure.criterion_id,"scenario":failure.scenario,"passed":failure.passed,"message":failure.message}).to_string().len() + 1;
+        if size > remaining { false } else { remaining -= size; true }
+    }).cloned().collect()
 }
 
 struct QaTemporary(PathBuf);
@@ -944,6 +1825,7 @@ mod tests {
         repository: PathBuf,
         state: PathBuf,
         candidate: Candidate,
+        base: String,
     }
     impl Fixture {
         fn new() -> Self {
@@ -1000,6 +1882,7 @@ mod tests {
                 root,
                 repository,
                 state,
+                base: candidate.commit.clone(),
                 candidate,
             }
         }
@@ -1182,6 +2065,7 @@ mod tests {
         let author = fixture.fake(private_test("acceptance", PASSING_TEST));
         let request = QaRequest {
             repository: &fixture.repository,
+            base: &fixture.base,
             state_directory: &fixture.state,
             run_id: "run_qa",
             candidate: &fixture.candidate,
@@ -1215,6 +2099,7 @@ mod tests {
         let blind = fixture.fake(private_test("nonempty_input_is_accepted", PASSING_TEST));
         let outcome = run_private_qa(&QaRequest {
             repository: &fixture.repository,
+            base: &fixture.base,
             state_directory: &fixture.state,
             run_id: "run_qa",
             candidate: &fixture.candidate,
@@ -1281,11 +2166,10 @@ mod tests {
         );
         let feedback = revision_feedback(&outcome.results);
         assert!(
-            feedback.iter().any(|f| f.criterion_id == CRITERION
-                && f.input == "empty string"
-                && f.expected == "rejection"
-                && f.actual == "accepted"),
-            "revision feedback carries the observed input and expected versus actual outcome: {feedback:?}"
+            feedback
+                .iter()
+                .any(|f| f.criterion_id == CRITERION && !f.passed),
+            "revision feedback carries Kaisa-computed criterion and failure status: {feedback:?}"
         );
         assert!(
             !format!("{feedback:?}").contains(PRIVATE_MARKER),
@@ -1335,14 +2219,16 @@ mod tests {
         make_writable(&path);
         std::fs::remove_file(&path).expect("attacker replaces sealed file");
         std::fs::write(path, FAILING_TEST).expect("attacker test");
-        let result = run_qa_suite(
-            &fixture.repository,
-            &fixture.state,
-            "run_tamper",
-            &fixture.candidate,
-            &suite,
-            &fixture.toolchain(),
-        );
+        let result = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_tamper",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &fixture.developer(true),
+        });
         assert!(
             result
                 .expect_err("tampering is refused before the toolchain starts")
@@ -1373,14 +2259,16 @@ mod tests {
             &[private_test("source_mutator", source)],
         )
         .expect("suite");
-        let results = run_qa_suite(
-            &fixture.repository,
-            &fixture.state,
-            "run_mutator",
-            &fixture.candidate,
-            &suite,
-            &fixture.toolchain(),
-        )
+        let results = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_mutator",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &fixture.developer(true),
+        })
         .expect("test exits but sources checked");
         assert!(
             results
@@ -1483,7 +2371,7 @@ mod tests {
     fn private_node_tests_run_with_the_trusted_runner_and_sandboxed_bin_help_enters_only_qa_context()
      {
         let mut fixture = Fixture::new();
-        std::fs::write(fixture.repository.join("package.json"), json!({"type":"module","main":"index.js","bin":{"accept":"cli.mjs"},"scripts":{"test":DEVELOPER_MARKER}}).to_string()).expect("public Node entry points");
+        std::fs::write(fixture.repository.join("package.json"), json!({"type":"module","main":"index.js","bin":{"accept":"cli.mjs"},"description":"Public Node API"}).to_string()).expect("public Node entry points");
         std::fs::write(
             fixture.repository.join("index.js"),
             "/** Reject empty input. */ export function accept(input) { return true; }",
@@ -1524,6 +2412,7 @@ mod tests {
         let spec = fixture.spec();
         let outcome = run_private_qa(&QaRequest {
             repository: &fixture.repository,
+            base: &fixture.base,
             state_directory: &fixture.state,
             run_id: "run_node",
             candidate: &fixture.candidate,
@@ -1558,7 +2447,7 @@ mod tests {
         assert!(
             revision_feedback(&outcome.results)
                 .iter()
-                .any(|failure| failure.expected == "rejection" && failure.actual == "accepted"),
+                .any(|failure| failure.criterion_id == CRITERION && !failure.passed),
             "Node TAP diagnostics yield observable feedback without source"
         );
     }
@@ -1611,6 +2500,7 @@ mod tests {
         super::add_cli_help(
             &QaRequest {
                 repository: &fixture.repository,
+                base: &fixture.base,
                 state_directory: &fixture.state,
                 run_id: "run_help",
                 candidate: &fixture.candidate,
@@ -1654,6 +2544,7 @@ mod tests {
         ]);
         let outcome = run_private_qa(&QaRequest {
             repository: &fixture.repository,
+            base: &fixture.base,
             state_directory: &fixture.state,
             run_id: "run_readonly",
             candidate: &fixture.candidate,
@@ -1690,24 +2581,671 @@ mod tests {
             &[private_test("private_mutator", source)],
         )
         .expect("private suite");
-        let results = run_qa_suite(
-            &fixture.repository,
-            &fixture.state,
-            "run_private_mutator",
-            &fixture.candidate,
-            &suite,
-            &fixture.toolchain(),
-        )
+        let results = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_private_mutator",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &fixture.developer(true),
+        })
         .expect("record source tamper evidence");
         assert!(
-            results
-                .iter()
-                .all(|result| !result.passed && !result.private_test_unchanged),
+            results.iter().all(|result| !result.passed
+                && (result.private_test_unchanged || !super::qa_write_deny_available())),
             "installed private test mutation must fail even when the process exits successfully: {results:?}"
         );
         assert!(
             suite.verified_tests().is_ok(),
             "the private original remains sealed outside the disposable checkout"
+        );
+    }
+    // RWP2 regressions: these assertions failed against the reviewed implementation.
+    fn review_recommit(fixture: &mut Fixture, files: &[(&str, &str)]) {
+        for (path, text) in files {
+            let full = fixture.repository.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("dir");
+            std::fs::write(&full, text).expect("write");
+            git(&fixture.repository, &["add", path]);
+        }
+        git(
+            &fixture.repository,
+            &[
+                "-c",
+                "user.name=r",
+                "-c",
+                "user.email=r@e.invalid",
+                "commit",
+                "-qm",
+                "repro",
+            ],
+        );
+        fixture.candidate = freeze_candidate(&fixture.repository, "HEAD").expect("refreeze");
+    }
+    fn review_run(fixture: &Fixture, run: &str) -> Vec<super::QaResult> {
+        let suite = record_qa_suite(
+            &fixture.state,
+            run,
+            QaKind::Acceptance,
+            &[private_test("empty_input_is_rejected", FAILING_TEST)],
+        )
+        .expect("suite");
+        run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: run,
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &fixture.developer(true),
+        })
+        .expect("ran")
+    }
+    #[test]
+    fn review_repro_a_control_buggy_candidate_fails() {
+        let fixture = Fixture::new();
+        let results = review_run(&fixture, "run_control");
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "the buggy candidate fails its real private assertion"
+        );
+    }
+    #[test]
+    fn review_repro_b_candidate_exit_zero_cannot_pass_a_private_criterion() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                "src/lib.rs",
+                "pub fn accept(input: &str) -> bool { if input.is_empty() { std::process::exit(0) } true }\n",
+            )],
+        );
+        let results = review_run(&fixture, "run_exit");
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "premature exit zero cannot satisfy a private criterion"
+        );
+    }
+    #[test]
+    fn review_repro_c_candidate_cargo_runner_is_a_blocking_finding() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                ".cargo/config.toml",
+                "[target.'cfg(all())']\nrunner = \"/usr/bin/true\"\n",
+            )],
+        );
+        let results = review_run(&fixture, "run_runner");
+        assert!(
+            results.iter().all(|r| r
+                .blocking_findings
+                .iter()
+                .any(|f| f.contains("QA-influencing configuration"))),
+            "changed runner config requires explicit reviewer evidence"
+        );
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "candidate Cargo runners cannot turn a failing test into a pass"
+        );
+    }
+    #[test]
+    fn review_repro_d_candidate_observations_cannot_exfiltrate_private_source() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                "src/lib.rs",
+                r#"pub fn accept(input: &str) -> bool {
+    if let Ok(entries) = std::fs::read_dir("tests") {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("kaisa_qa_") {
+                let source = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                eprintln!("kaisa-observation:{{\"scenario\":\"leak\",\"input\":{:?},\"expected\":\"x\",\"actual\":\"y\"}}", source);
+            }
+        }
+    }
+    if let Ok(manifest) = std::fs::read_to_string("Cargo.toml") {
+        for line in manifest.lines().filter(|line| line.starts_with("path = ")) {
+            let path = line.trim_start_matches("path = ").trim_matches('"');
+            if let Ok(source) = std::fs::read_to_string(path) {
+                eprintln!("kaisa-observation:{{\"scenario\":\"leak\",\"input\":{:?},\"expected\":\"x\",\"actual\":\"y\"}}", source);
+            }
+        }
+    }
+    let _ = input;
+    true
+}
+"#,
+            )],
+        );
+        let results = review_run(&fixture, "run_leak");
+        let feedback = revision_feedback(&results);
+        assert!(
+            !format!("{feedback:?}").contains(PRIVATE_MARKER),
+            "candidate observations must not disclose private source"
+        );
+        assert!(
+            feedback.iter().all(|f| f.scenario != "leak"
+                && !f.message.contains("#[test]")
+                && !f.message.contains("kaisa-observation:")),
+            "neither the observation's scenario nor private source fragments cross into developer feedback"
+        );
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "the exfiltrating candidate still fails the criterion"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn review_repro_e_qa_authors_cannot_read_developer_tests_or_history() {
+        let fixture = Fixture::new();
+        let dir = fixture.state.join("checks/qa_probe/author_probe");
+        let scratch = dir.join("scratch");
+        let public = dir.join("public");
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        std::fs::create_dir_all(&public).expect("public");
+        super::prepare_author_repository(&public, "frozen public context")
+            .expect("fresh context repository");
+        let probe = |program: &str, args: Vec<String>| {
+            let sandbox = super::author_sandbox(
+                &fixture.state,
+                &fixture.repository,
+                &public,
+                &scratch,
+                &ProcessSpec {
+                    program: program.into(),
+                    args: vec![],
+                    working_directory: public.clone(),
+                    env: vec![
+                        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                    ],
+                },
+            )
+            .expect("QA author sandbox");
+            let run = kaisa_sys::run_captured(
+                &ProcessSpec {
+                    program: program.into(),
+                    args,
+                    working_directory: public.clone(),
+                    env: vec![
+                        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                    ],
+                },
+                &sandbox.confinement(),
+                &[],
+                super::QA_DEADLINE,
+                super::QA_OUTPUT_CAP,
+            )
+            .expect("QA author probe runs");
+            (run.exit, String::from_utf8_lossy(&run.output).into_owned())
+        };
+        let context = probe("/bin/cat", vec!["context.json".into()]);
+        assert_eq!(
+            context.1, "frozen public context",
+            "the author can read its context-only repository"
+        );
+        let own_history = probe(
+            "/usr/bin/git",
+            vec!["log".into(), "-1".into(), "--format=%s".into()],
+        );
+        assert_eq!(
+            own_history.1.trim(),
+            "QA context",
+            "the author sees only freshly created context history"
+        );
+        let cat = probe(
+            "/bin/cat",
+            vec![
+                fixture
+                    .repository
+                    .join("tests/developer.rs")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        );
+        assert_ne!(
+            cat.0,
+            Some(ProcessExit::Code(0)),
+            "QA authors cannot read developer tests by absolute path"
+        );
+        let log = probe(
+            "/usr/bin/git",
+            vec![
+                "-C".into(),
+                fixture.repository.to_string_lossy().into_owned(),
+                "log".into(),
+                "-1".into(),
+                "--format=%s".into(),
+            ],
+        );
+        assert_ne!(
+            log.0,
+            Some(ProcessExit::Code(0)),
+            "QA authors cannot inspect developer Git history"
+        );
+        let state = probe(
+            "/bin/cat",
+            vec![
+                fixture
+                    .state
+                    .join("kaisa.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        );
+        assert_ne!(
+            state.0,
+            Some(ProcessExit::Code(0)),
+            "QA authors cannot read the state ledger"
+        );
+    }
+
+    #[test]
+    fn review_repro_f_build_script_swaps_and_restores_the_installed_private_test() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                "build.rs",
+                r##"fn main() {
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    if let Ok(entries) = std::fs::read_dir(root.join("tests")) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("kaisa_qa_") {
+                let backup = root.join("target").join("qa_backup.rs");
+                std::fs::create_dir_all(root.join("target")).unwrap();
+                std::fs::copy(entry.path(), &backup).unwrap();
+                std::fs::write(entry.path(), format!("#[test] fn forged() {{ std::fs::copy({:?}, {:?}).unwrap(); }}", backup, entry.path())).unwrap();
+            }
+        }
+    }
+}
+"##,
+            )],
+        );
+        let results = review_run(&fixture, "run_swap");
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "build scripts must not swap and restore a private test to obtain a pass"
+        );
+    }
+
+    #[test]
+    fn a_preexisting_exit_zero_has_no_positive_harness_evidence() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                "src/lib.rs",
+                "pub fn accept(_: &str) -> bool { std::process::exit(0) }",
+            )],
+        );
+        fixture.base = fixture.candidate.commit.clone();
+        let results = review_run(&fixture, "run_baseline_exit");
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.passed && !r.positive_evidence && r.blocking_findings.is_empty()),
+            "positive harness evidence must independently reject early exit, even without a diff finding: {results:?}"
+        );
+        assert!(
+            revision_feedback(&results)
+                .iter()
+                .all(|f| f.message.contains("no positive evidence")),
+            "a clean exit without every expected test is explained explicitly"
+        );
+    }
+
+    #[test]
+    fn a_node_exit_zero_cannot_substitute_the_file_wrapper_for_expected_tests() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[
+                ("package.json", r#"{"type":"module","main":"index.js"}"#),
+                (
+                    "index.js",
+                    "export function accept(s) { if (s === '') process.exit(0); return true; }",
+                ),
+            ],
+        );
+        fixture.base = fixture.candidate.commit.clone();
+        let test = QaTestFile { test_id: "empty_node_input".into(), criterion_ids: vec![CRITERION.into()], file: "empty.mjs".into(),
+            contents: "import test from 'node:test'; import assert from 'node:assert/strict'; import {accept} from '../index.js'; test('normal input', () => assert.equal(accept('hello'), true)); test('empty input', () => assert.equal(accept(''), false));".into() };
+        let suite = record_qa_suite(&fixture.state, "run_node_exit", QaKind::Acceptance, &[test])
+            .expect("private Node suite");
+        let results = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_node_exit",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &QaToolchain::Node {
+                node: program("node"),
+            },
+            attempt: &fixture.developer(true),
+        })
+        .expect("Node test run");
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.passed && !r.positive_evidence && r.blocking_findings.is_empty()),
+            "Node's success for a prematurely exited file is not evidence for its named tests: {results:?}"
+        );
+    }
+
+    #[test]
+    fn preexisting_cargo_runners_and_wrappers_cannot_replace_the_trusted_build_or_execution() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                ".cargo/config.toml",
+                "[target.'cfg(all())']\nrunner = '/usr/bin/true'\n[build]\nrustc-wrapper = '/usr/bin/false'\n",
+            )],
+        );
+        fixture.base = fixture.candidate.commit.clone();
+        let tests = [
+            private_test("passing_control", PASSING_TEST),
+            private_test("unmet_criterion", FAILING_TEST),
+        ];
+        let suite = record_qa_suite(
+            &fixture.state,
+            "run_owned_build",
+            QaKind::Acceptance,
+            &tests,
+        )
+        .expect("suite");
+        let started = std::time::Instant::now();
+        let results = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_owned_build",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &fixture.developer(true),
+        })
+        .expect("neutralized config");
+        eprintln!(
+            "WP2b fixture: {} scenarios, one suite build, {:.3} seconds total",
+            tests.len(),
+            started.elapsed().as_secs_f64()
+        );
+        assert!(
+            results.iter().any(|r| r.passed && r.positive_evidence)
+                && results.iter().any(|r| !r.passed),
+            "both the real passing control and real failed criterion execute despite candidate Cargo config: {results:?}"
+        );
+        assert!(
+            results.iter().all(|r| r.blocking_findings.is_empty()),
+            "this regression exercises neutralization independently of changed-config blocking"
+        );
+    }
+
+    #[test]
+    fn a_preexisting_build_script_cannot_write_the_external_private_source() {
+        let mut fixture = Fixture::new();
+        review_recommit(
+            &mut fixture,
+            &[(
+                "build.rs",
+                r###"fn main() {
+            let manifest = std::fs::read_to_string("Cargo.toml").unwrap();
+            for line in manifest.lines().filter(|line| line.starts_with("path = ")) {
+                let path = line.trim_start_matches("path = ").trim_matches('"');
+                if path.contains("kaisa_qa_") {
+                    let backup = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("target/qa_backup.rs");
+                    std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+                    std::fs::copy(path, &backup).unwrap();
+                    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)); }
+                    #[cfg(windows)] { let mut permissions = std::fs::metadata(path).unwrap().permissions(); permissions.set_readonly(false); let _ = std::fs::set_permissions(path, permissions); }
+                    std::fs::write(path, format!("#[test] fn an_empty_input_is_rejected() {{ std::fs::copy({:?}, {:?}).unwrap(); }}", backup, path)).expect("attempt to replace external private test");
+                }
+            }
+        }"###,
+            )],
+        );
+        fixture.base = fixture.candidate.commit.clone();
+        let results = review_run(&fixture, "run_external_write");
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.passed && r.blocking_findings.is_empty()),
+            "write denial or input digest checks must reject a preexisting script independently of configuration scanning: {results:?}"
+        );
+        if super::qa_write_deny_available() {
+            assert!(results.iter().all(|r| r.private_test_unchanged && r.private_test_integrity == "write-denied"),
+                "the build failed because immutable source was denied, and original bytes survived");
+        } else {
+            assert!(
+                results.iter().all(|r| !r.private_test_unchanged
+                    && r.private_test_integrity.starts_with("reduced")),
+                "digests must not be presented as OS write-denial evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn source_bearing_panic_messages_are_redacted_even_without_observation_lines() {
+        let test = private_test("redaction_probe", FAILING_TEST);
+        let suite = [test.clone()];
+        let run = kaisa_sys::CapturedRun { exit: Some(ProcessExit::Code(1)), truncated: false,
+            output: format!("kaisa-observation:{{\"input\":{PRIVATE_MARKER:?}}}\nthread 'probe' panicked at private.rs:1:1:\nprefix {PRIVATE_MARKER} suffix\n").into_bytes() };
+        let feedback = super::observable_diagnostics(&test, &suite, &run, true, false, &[]);
+        assert!(
+            feedback
+                .iter()
+                .all(|f| f.message == "[private source redacted]"),
+            "assertion excerpts must pass private-source overlap scanning"
+        );
+        assert_eq!(
+            super::redact_private("actual", &suite),
+            "[private source redacted]",
+            "a complete source-bearing field is redacted even below the embedded-fragment threshold"
+        );
+        let shuffled_whitespace = "assert ! ( ! actual ,";
+        assert_eq!(
+            super::redact_private(shuffled_whitespace, &suite),
+            "[private source redacted]",
+            "normalization must catch source fragments despite inserted whitespace"
+        );
+        let sentence = private_test(
+            "shingle_probe",
+            "one two three four five six seven eight nine",
+        );
+        assert_eq!(
+            super::redact_private(
+                "prefix one,two;three/four:five-six+seven=eight suffix",
+                &[sentence]
+            ),
+            "[private source redacted]",
+            "eight-token overlaps must be removed despite changed punctuation"
+        );
+    }
+
+    #[test]
+    fn a_suite_that_omits_a_frozen_criterion_is_explicitly_coverage_blocked() {
+        let fixture = Fixture::new();
+        let developer = fixture.developer(true);
+        let mut spec = fixture.spec();
+        let uncovered = "AC-uncovered";
+        spec["criteria"]
+            .as_array_mut()
+            .expect("criteria")
+            .push(json!({"id":uncovered}));
+        let author = fixture.fake(private_test("covered_scenario", PASSING_TEST));
+        let outcome = run_private_qa(&QaRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state_directory: &fixture.state,
+            run_id: "run_coverage",
+            candidate: &fixture.candidate,
+            frozen_spec: &spec,
+            developer: &developer,
+            author: &author,
+            blind: &author,
+            toolchain: &fixture.toolchain(),
+        })
+        .expect("flag incomplete suite");
+        assert_eq!(
+            outcome.uncovered_criteria,
+            vec![uncovered.to_owned()],
+            "an untested criterion must never silently disappear from gate evidence"
+        );
+        let ledger = EventStore::open_read_only(&fixture.state.join("kaisa.db")).expect("ledger");
+        assert!(
+            ledger
+                .read_from(Sequence::FIRST)
+                .expect("events")
+                .iter()
+                .any(
+                    |event| event.recorded.event.kind == EventKind::QaSuiteRecorded && {
+                        let payload: Value = serde_json::from_str(&event.recorded.event.payload)
+                            .expect("suite event");
+                        payload["kind"] == "acceptance"
+                            && payload["uncovered_criteria"] == json!([uncovered])
+                            && payload["coverage_blocked"] == true
+                    }
+                ),
+            "the suite event must carry the same blocking coverage finding as the outcome"
+        );
+    }
+
+    #[test]
+    fn a_revision_suite_uses_the_revision_attempts_isolation_receipt() {
+        let fixture = Fixture::new();
+        let mut revision = fixture.developer(true);
+        revision.observed = true;
+        revision.attempt = AttemptId::try_new("att_revision").expect("revision id");
+        let suite = record_qa_suite(
+            &fixture.state,
+            "run_revision",
+            QaKind::Acceptance,
+            &[private_test("passing_control", PASSING_TEST)],
+        )
+        .expect("suite");
+        let results = run_qa_suite(&super::QaSuiteRequest {
+            repository: &fixture.repository,
+            base: &fixture.base,
+            state: &fixture.state,
+            run_id: "run_revision",
+            candidate: &fixture.candidate,
+            suite: &suite,
+            toolchain: &fixture.toolchain(),
+            attempt: &revision,
+        })
+        .expect("revision QA");
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.qa_isolation, QaIsolation::Reduced(_))),
+            "observed revision evidence must not inherit the first developer's full isolation"
+        );
+    }
+    #[test]
+    fn changed_qa_configuration_and_new_library_termination_calls_require_reviewer_evidence() {
+        for (path, source) in [
+            (".cargo/config", "[build]\nrustc-wrapper = '/usr/bin/true'"),
+            ("rust-toolchain.toml", "[toolchain]\nchannel = 'stable'"),
+            ("build.rs", "fn main() {}"),
+            ("package.json", r#"{"scripts":{"test":"exit 0"}}"#),
+            ("package.json", r#"{"jest":{"testMatch":["trivial.js"]}}"#),
+            (".npmrc", "node-options=--require ./skip.js"),
+        ] {
+            let mut fixture = Fixture::new();
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("configuration scan");
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.contains("QA-influencing configuration")),
+                "candidate-controlled {path} requires reviewer evidence: {findings:?}"
+            );
+        }
+        for source in [
+            "pub fn accept(_: &str) -> bool { std::process::exit(0) }",
+            "pub fn accept(_: &str) -> bool { std::process::abort() }",
+            "export function accept(s) { process.exit(0); }",
+            "export function accept(s) { process.kill(process.pid); }",
+        ] {
+            let mut fixture = Fixture::new();
+            let path = if source.starts_with("pub ") {
+                "src/lib.rs"
+            } else {
+                "index.js"
+            };
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("termination scan");
+            assert!(
+                findings.iter().any(|f| f.contains("process-termination")),
+                "added library termination calls require reviewer evidence: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_results_require_a_single_consistent_summary_and_every_expected_test() {
+        let expected = vec!["first_scenario".to_owned(), "second_scenario".to_owned()];
+        let complete = "test first_scenario ... ok\ntest second_scenario ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let run = |output: &str| kaisa_sys::CapturedRun {
+            exit: Some(ProcessExit::Code(0)),
+            output: output.as_bytes().to_vec(),
+            truncated: false,
+        };
+        let toolchain = QaToolchain::Rust {
+            cargo: PathBuf::from("unused"),
+        };
+        assert!(
+            super::positive_test_evidence(&run(complete), &expected, &toolchain),
+            "the exact expected name set with its zero-failure summary is positive evidence"
+        );
+        for output in [
+            complete.replace("test second_scenario ... ok\n", ""),
+            complete.replace("2 passed", "1 passed"),
+            complete.replace("0 ignored", "1 ignored"),
+            format!("{complete}{complete}"),
+            "".into(),
+        ] {
+            assert!(
+                !super::positive_test_evidence(&run(&output), &expected, &toolchain),
+                "missing names, inconsistent counts, ignored tests and duplicate summaries cannot pass"
+            );
+        }
+        let node = QaToolchain::Node {
+            node: PathBuf::from("unused"),
+        };
+        let tap = "TAP version 13\nok 1 - first_scenario\nok 2 - second_scenario\n1..2\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+        assert!(
+            super::positive_test_evidence(&run(tap), &expected, &node),
+            "named Node TAP tests require a complete matching summary"
+        );
+        assert!(
+            !super::positive_test_evidence(
+                &run(&tap.replace("second_scenario", "/private/qa/test.mjs")),
+                &expected,
+                &node
+            ),
+            "a Node file wrapper cannot substitute for the expected test name"
         );
     }
 }

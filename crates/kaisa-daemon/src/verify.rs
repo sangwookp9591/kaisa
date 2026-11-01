@@ -429,6 +429,16 @@ pub(crate) fn check_sandbox(
     checkout: &Path,
     temporary: &Path,
 ) -> std::io::Result<CheckSandbox> {
+    check_sandbox_readonly(state, checkout, temporary, &[])
+}
+
+/// Checks with immutable harness inputs excluded from every writable grant.
+pub(crate) fn check_sandbox_readonly(
+    state: &Path,
+    checkout: &Path,
+    temporary: &Path,
+    readonly: &[PathBuf],
+) -> std::io::Result<CheckSandbox> {
     #[cfg(not(target_os = "macos"))]
     let _ = state;
     #[cfg(not(target_os = "linux"))]
@@ -438,6 +448,7 @@ pub(crate) fn check_sandbox(
         let mut policy = kaisa_sys::SeatbeltPolicy {
             readable: writable.clone(),
             writable,
+            unwritable: readonly.to_vec(),
             git_control_root: Some(checkout.canonicalize()?),
             ..kaisa_sys::SeatbeltPolicy::default()
         };
@@ -446,7 +457,14 @@ pub(crate) fn check_sandbox(
     }
     #[cfg(target_os = "linux")]
     {
-        let writable = linux_check_writable(checkout, temporary)?;
+        let writable = linux_check_writable(checkout, temporary)?
+            .into_iter()
+            .filter(|path| {
+                !readonly
+                    .iter()
+                    .any(|protected| path == protected || protected.starts_with(path))
+            })
+            .collect::<Vec<_>>();
         Ok(match kaisa_sys::write_ruleset(&writable, None)? {
             Some(ruleset) => CheckSandbox::Landlock(ruleset),
             None => CheckSandbox::Unconfined,
@@ -454,7 +472,7 @@ pub(crate) fn check_sandbox(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = writable;
+        let _ = (writable, readonly);
         Ok(CheckSandbox::Unconfined)
     }
 }
