@@ -408,11 +408,8 @@ fn a_recognised_nextest_command_requires_positive_consistent_completion() {
         let runner = tools.join("cargo");
         // macOS /bin/sh here-documents need a temporary file outside the sandbox's
         // writable paths. Emit the canned harness output without that incidental I/O.
-        std::fs::write(
-            &runner,
-            format!("#!/bin/sh\nprintf '%s\\n' '{summary}'\n"),
-        )
-        .expect("scripted nextest output");
+        std::fs::write(&runner, format!("#!/bin/sh\nprintf '%s\\n' '{summary}'\n"))
+            .expect("scripted nextest output");
         std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755))
             .expect("executable runner");
         let evidence = project.checks(&[runner.to_str().expect("runner path"), "nextest", "run"]);
