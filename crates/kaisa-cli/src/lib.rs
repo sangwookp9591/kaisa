@@ -79,6 +79,26 @@ const PLANNED_COMMANDS: [&str; 24] = [
     "daemon",
 ];
 
+/// Command names accepted by the dispatcher, including explicit goal text.
+const IMPLEMENTED_COMMANDS: &[&str] = &[
+    "doctor",
+    "init",
+    "help",
+    "version",
+    "status",
+    "watch",
+    "tui",
+    "local-agent",
+    "agent",
+    "spec",
+    "build",
+    "policy",
+    "route",
+    "stats",
+    "mcp",
+    "goal",
+];
+
 /// The version of this build, taken from the workspace manifest (single source of truth).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -88,6 +108,8 @@ Kaisa — run coding agents safely
 Usage:
   kaisa \"<goal>\"           a developer agent works on the goal, your checks and a reviewer judge
                            the result, and only a verified candidate is delivered
+  kaisa goal \"<text>\"      explicitly run goal text, including a single word
+  kaisa -- <word>          explicitly run a one-word goal
   kaisa status             running mission tasks and attempt states from the ledger
   kaisa watch              attempts, their state, tokens and cost, from the ledger
   kaisa tui [--plain]      terminal home: needs you, goals, attempts and evidence
@@ -105,6 +127,10 @@ More commands:
   kaisa policy show|set    view or change your personal policy
   kaisa route explain <task|last>  recorded route and candidate constraints
   kaisa stats routing      measured routing cells; unknown costs stay labelled
+
+Unknown single bare words and likely command typos exit 64 before starting an agent.
+Close commands get suggestions. Multi-word goals work as before; use `--` or `goal`
+to bypass command detection (quoting a single word alone does not bypass it).
 
 Goal options:
   --candidates <N>         independent verified attempts; comparative review selects one
@@ -158,6 +184,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
         Some("spec") => spec::run(&args[1..], out, err),
+        Some("goal") => run_goal_args(&args[1..], out, err),
         Some("build") => goal::build(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
         Some("route") => routing::run(&args[1..], false, out, err),
@@ -178,22 +205,77 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             }
             Ok(EXIT_NOT_IMPLEMENTED)
         }
-        Some(_) => match goal::GoalCommand::parse(args) {
-            Ok(command) => command.run(out, err),
-            Err(goal::GoalParseError::UnknownFlag(flag)) => {
-                writeln!(
-                    err,
-                    "kaisa: unknown option `{flag}`. Options are listed in `kaisa --help`; to \
-                     use it in a goal, put `--` before the goal."
-                )?;
-                Ok(EXIT_USAGE)
+        Some(word)
+            if !word.starts_with('-')
+                && !word.chars().any(char::is_whitespace)
+                && (args.len() == 1 || suggested_command(word).is_some()) =>
+        {
+            writeln!(err, "kaisa: unknown command `{word}`.")?;
+            if let Some(command) = suggested_command(word) {
+                writeln!(err, "kaisa: did you mean `{command}`?")?;
             }
-            Err(goal::GoalParseError::NoGoal) => {
-                writeln!(err, "usage: kaisa \"<goal>\"")?;
-                Ok(EXIT_USAGE)
-            }
-        },
+            writeln!(
+                err,
+                "kaisa: to run goal text explicitly, use `kaisa -- {word}` or `kaisa goal \"{}\"`.",
+                args.join(" ")
+            )?;
+            Ok(EXIT_USAGE)
+        }
+        Some(_) => run_goal_args(args, out, err),
     }
+}
+
+// Keep command detection outside the goal parser: MCP and TUI explicitly pass `--`.
+fn run_goal_args(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
+    match goal::GoalCommand::parse(args) {
+        Ok(command) => command.run(out, err),
+        Err(goal::GoalParseError::UnknownFlag(flag)) => {
+            writeln!(
+                err,
+                "kaisa: unknown option `{flag}`. Options are listed in `kaisa --help`; to \
+                     use it in a goal, put `--` before the goal."
+            )?;
+            Ok(EXIT_USAGE)
+        }
+        Err(goal::GoalParseError::NoGoal) => {
+            writeln!(err, "usage: kaisa \"<goal>\"")?;
+            Ok(EXIT_USAGE)
+        }
+    }
+}
+
+/// Closest command within two edits (including adjacent transpositions); ties are stable.
+fn suggested_command(word: &str) -> Option<&'static str> {
+    IMPLEMENTED_COMMANDS
+        .iter()
+        .chain(PLANNED_COMMANDS.iter())
+        .map(|command| (*command, edit_distance(word, command)))
+        .filter(|(_, distance)| *distance <= 2)
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(command, _)| command)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut before_previous = previous.clone();
+    let mut previous_char = None;
+    for (row, left_char) in left.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, right_char) in right.iter().enumerate() {
+            let mut distance = (previous[column + 1] + 1)
+                .min(current[column] + 1)
+                .min(previous[column] + usize::from(left_char != *right_char));
+            if column > 0 && previous_char == Some(*right_char) && left_char == right[column - 1] {
+                distance = distance.min(before_previous[column - 1] + 1);
+            }
+            current.push(distance);
+        }
+        before_previous = previous;
+        previous = current;
+        previous_char = Some(left_char);
+    }
+    previous[right.len()]
 }
 
 #[cfg(test)]

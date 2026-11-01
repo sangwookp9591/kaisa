@@ -320,6 +320,14 @@ A goal ends with one of these results, which scripts and CI can rely on:
 
 The scripted `--agent-program` path without `--reviewer-arg` runs no checks and no review and can still exit `0`; it is for testing, not a verified result.
 
+A single unknown bare word, such as `kaisa stauts` or `kaisa frobnicate`, exits `64`
+without creating state, a ledger, branches or worktrees. Close command names get a
+“did you mean …?” suggestion. A first word within edit distance two of a known command
+also exits `64` when more words follow (`kaisa spce draft requirements`). Multi-word
+goals still work, quoted or as separate words. To explicitly run a one-word goal or
+bypass command detection, use `kaisa -- word` or `kaisa goal "word"`; quotes alone
+do not distinguish a one-word goal from a command.
+
 Words the docs name as commands (`review`, `run`, `gc`, `wrap`, `handoff` and the rest of the planned
 list) never start a run. `kaisa review the parser` exits `2` and prints the quoted form,
 `kaisa "review the parser"`. An unknown option such as `--n 3` exits `64` and names the option. A goal
