@@ -2201,10 +2201,15 @@ fn completed_tap(output: &str, expected: Option<usize>) -> bool {
             if number.parse::<u64>().is_err() {
                 return false;
             }
-            // Absolute file wrappers are not named test evidence. The trusted runner
-            // additionally matches relative wrapper names against actual candidate files.
+            // Rooted file wrappers are not named test evidence. Parse both Unix and
+            // Windows syntax regardless of the host: Path::is_absolute treats a Unix
+            // root as relative on Windows and a Windows drive as relative on Unix.
+            // The trusted runner additionally matches relative wrapper names against
+            // actual candidate files.
             let name = name.split(" #").next().unwrap_or(name);
-            if !private && Path::new(name).is_absolute() {
+            let rooted = name.starts_with(['/', '\\'])
+                || matches!(name.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
+            if !private && rooted {
                 return false;
             }
             observed += 1;
@@ -4149,6 +4154,33 @@ mod tests {
             Some(&expected),
             super::TestHarness::Tap
         ));
+    }
+
+    #[test]
+    fn ordinary_tap_rejects_file_wrappers_independently_of_host_platform() {
+        for name in [
+            "/private/test.mjs",
+            r"C:\private\test.mjs",
+            "C:/private/test.mjs",
+            r"\\server\private\test.mjs",
+            "//server/private/test.mjs",
+            r"\private\test.mjs",
+        ] {
+            let output = format!(
+                "TAP version 13\nok 1 - {name}\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n"
+            );
+            for output in [output.clone(), output.replace('\n', "\r\n")] {
+                let run = kaisa_sys::CapturedRun {
+                    output: output.into_bytes(),
+                    exit: Some(ProcessExit::Code(0)),
+                    truncated: false,
+                };
+                assert!(
+                    !super::harness_test_evidence(&run, None, super::TestHarness::Tap),
+                    "a file wrapper cannot establish named test evidence: {name}"
+                );
+            }
+        }
     }
 
     #[test]

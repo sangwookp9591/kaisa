@@ -1266,12 +1266,26 @@ fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
     );
     // An evidenced deterministic failure dominates missing private-QA isolation on
     // every platform. Do not take the Windows-only INCONCLUSIVE shortcut here.
-    assert_eq!(
-        gate_line(&outcome, "staged review approved").status,
-        AcceptanceStatus::Pass,
-        "{:?}",
-        outcome.acceptance
-    );
+    let staged_review = gate_line(&outcome, "staged review approved");
+    if cfg!(windows) {
+        // Private-QA isolation fails before the staged reviewer can run on Windows.
+        let private_qa = gate_line(&outcome, "private QA all passed on FINAL tree");
+        assert_eq!(private_qa.status, AcceptanceStatus::Inconclusive);
+        assert!(
+            private_qa.detail.contains("private QA write-deny unavailable; digests alone cannot verify private input isolation"),
+            "{}",
+            private_qa.detail
+        );
+        assert_eq!(staged_review.status, AcceptanceStatus::Inconclusive);
+        assert_eq!(staged_review.detail, "stage has not produced evidence");
+    } else {
+        assert_eq!(
+            staged_review.status,
+            AcceptanceStatus::Pass,
+            "{:?}",
+            outcome.acceptance
+        );
+    }
     assert_eq!(
         gate_line(&outcome, "deterministic checks").status,
         AcceptanceStatus::Fail
