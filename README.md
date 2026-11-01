@@ -111,7 +111,7 @@ a narrower question with evidence: **can you trust what an agent hands back?**
 with `/kaisa`, and keep your swarm or workspace tool for everything else. What comes back through
 Kaisa has passed your checks and a review.
 
-**What Kaisa does not do yet:** several candidates or a swarm per goal, a plugin ecosystem, a web
+**What Kaisa does not do yet:** automatic goal decomposition into a swarm, a plugin ecosystem, a web
 console, packaged releases, and real-agent runs on Linux and Windows. See
 [Planned](#planned) and [Current differences from the design](#current-differences-from-the-design).
 
@@ -305,6 +305,43 @@ list) never start a run. `kaisa review the parser` exits `2` and prints the quot
 that must contain `--word` can follow `--`: `kaisa -- fix the --verbose bug`. Run `kaisa` from a
 subdirectory and it uses the enclosing git repository and says so in one line:
 `using the git repository at <root>`. `kaisa watch` only reads the ledger: it does not append events, migrate the database or rebuild projections. A closed ledger is read without any file change; reading a live WAL database can create or update SQLite shared-memory sidecar files (`-shm`).
+
+### Parallel tasks and candidate alternatives
+
+`kaisa "<goal>" --candidates 3` runs independent developer attempts in separate worktrees,
+with the normal trusted checks, review and bounded revision for each. A reviewer compares the
+passing alternatives with bounded peer patches and recorded check receipts. Only one
+comparison-approved candidate is printed as the result; equivalent alternatives prefer the
+lowest candidate index. If none passes, nothing is delivered. Alternatives currently use the same
+configured developer/reviewer routes; automatic model diversity is not implemented.
+
+For tasks that should contribute to one result, supply an explicit plan:
+
+```json
+{"tasks":[
+  {"id":"task_api","instruction":"Implement the API change","write_set":["src/api"]},
+  {"id":"task_web","instruction":"Update the web client","write_set":["src/web"]},
+  {"id":"task_docs","instruction":"Document both changes","role":"documentation",
+   "write_set":["docs"],"depends_on":["task_api","task_web"]}
+]}
+```
+
+Run `kaisa "Update the API and client" --plan mission.json`. Task roles are `developer` (default),
+`tester` or `documentation`. Task starts follow plan order within deterministic concurrent waves.
+Each dependent starts from a three-way merge of **all** its parents' preserved commits. Every task
+passes its own checks and review by default; the integrated tree then gets fresh checks and an
+independent review before delivery. Merge conflicts and writes outside declared ownership block
+the mission and name the files. Git union and external merge drivers are disabled during
+integration; Kaisa does not automatically resolve conflicts.
+
+Policy keys `max_parallel`, `on_failure` (`stop` or `continue_independent`) and `verify_each_task`
+can be set with `kaisa policy set`. Their CLI overrides are `--max-parallel`, `--on-failure` and
+`--verify-each-task true|false`. Default concurrency is half the available CPUs, capped at four,
+with at least one slot; per-task verification defaults to true. `stop` admits no new wave after
+failure; `continue_independent` runs unaffected branches. Both drain admitted siblings through
+existing process-tree supervision and deadlines. Turning per-task verification off is explicitly
+reported: only the final integrated candidate receives checks and review. `kaisa status`,
+`kaisa watch` and the TUI show running mission task IDs from the ledger.
 
 <a id="use-kaisa-from-claude-code"></a>
 
@@ -514,7 +551,7 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 - **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
   off" label yet.
 - **Messages are English only.** There is no `ko`/`en` message catalog yet.
-- **Missions** (`run_mission`) are not reachable from the CLI.
+- **Missions** run explicit JSON DAGs through `--plan`; decomposition into tasks is supplied by the user. Dispatch uses deterministic waves, so a slow admitted sibling delays the next wave. Failure drains admitted siblings under their existing process deadlines; there is no interactive cancellation command.
 - **Trusted checks** are derived from the repository's working tree when the run starts, not from the
   base revision.
 - **Concurrent goals.** Several `kaisa` goals can run at once on one state directory: owner locks keep
@@ -530,8 +567,7 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 
 - Packaged, signed releases per OS (FR-01), so installing does not need a Rust toolchain.
 - `kaisa review` to approve a verified candidate and see exactly what approving will do.
-- Several candidates per goal (`--n 3`), provider failover (for example Claude to GPT when a quota runs
-  out), budgets per run, user and team.
+- Provider failover (for example Claude to GPT when a quota runs out), budgets per run, user and team.
 - A full-screen TUI and `kaisa console` in the browser; `/kaisa` from inside your agent.
 - Team policy packs, approval delegation and an audit log.
 - Korean and English UI.

@@ -102,6 +102,13 @@ fn plain(snapshot: &Snapshot, out: &mut dyn Write) -> io::Result<()> {
     for run in &snapshot.runs {
         writeln!(out, "\n{}", details(run, None))?;
     }
+    if !snapshot.running_tasks.is_empty() {
+        writeln!(
+            out,
+            "Running mission tasks: {}",
+            safe(&snapshot.running_tasks.join(", "))
+        )?;
+    }
     writeln!(out, "{}", totals(snapshot))
 }
 
@@ -480,7 +487,15 @@ fn runs_title(app: &App) -> String {
         Filter::NeedsYou => Message::Needs,
         Filter::Failed => Message::Failed,
     });
-    message(Message::RunsTitle, &[&filter, &safe(&app.search)])
+    let title = message(Message::RunsTitle, &[&filter, &safe(&app.search)]);
+    if app.snapshot.running_tasks.is_empty() {
+        title
+    } else {
+        format!(
+            "{title} | running: {}",
+            safe(&app.snapshot.running_tasks.join(", "))
+        )
+    }
 }
 
 fn input_prompt(app: &App) -> String {

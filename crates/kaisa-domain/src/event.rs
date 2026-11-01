@@ -93,6 +93,14 @@ pub enum EventKind {
     IntentCompleted,
     /// A planned task was handed to an attempt (the subject is the task).
     TaskStarted,
+    /// A task was admitted to a deterministic scheduler wave.
+    TaskScheduled,
+    /// A preserved task result was merged into the mission integration.
+    TaskIntegrated,
+    /// Integration stopped at a textual conflict or ownership violation.
+    IntegrationConflict,
+    /// The integrated mission candidate passed its checks and independent review.
+    MissionVerified,
     /// A planned task is done; tasks waiting on it may start (the subject is the task).
     TaskFinished,
     /// The tokens (and cost, when the agent reports one) an attempt used (T30b).
@@ -103,7 +111,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 25] = [
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -122,6 +130,10 @@ impl EventKind {
         Self::IntentRecorded,
         Self::IntentCompleted,
         Self::TaskStarted,
+        Self::TaskScheduled,
+        Self::TaskIntegrated,
+        Self::IntegrationConflict,
+        Self::MissionVerified,
         Self::TaskFinished,
         Self::UsageRecorded,
         Self::PolicyAdopted,
@@ -148,6 +160,10 @@ impl EventKind {
             Self::AttemptStateChanged => "attempt.state_changed",
             Self::IntentRecorded => "outbox.intent_recorded",
             Self::IntentCompleted => "outbox.intent_completed",
+            Self::TaskScheduled => "task.scheduled",
+            Self::TaskIntegrated => "task.integrated",
+            Self::IntegrationConflict => "integration.conflict",
+            Self::MissionVerified => "mission.verified",
             Self::TaskStarted => "task.started",
             Self::TaskFinished => "task.finished",
             Self::UsageRecorded => "attempt.usage_recorded",

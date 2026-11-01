@@ -1,7 +1,7 @@
 //! A pipeline's progress, folded from `task.started` and `task.finished` events (T20c). The
 //! scheduler reads only this to decide what runs next: no model call advances a pipeline.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kaisa_domain::{EventKind, Sequence, TaskId};
 
@@ -15,6 +15,8 @@ pub struct TaskProgress {
     pub running: BTreeSet<TaskId>,
     /// Tasks that are done.
     pub finished: BTreeSet<TaskId>,
+    /// Settled failures, which never satisfy a dependency.
+    pub failed: BTreeSet<TaskId>,
 }
 
 impl EventStore {
@@ -25,6 +27,7 @@ impl EventStore {
     /// Returns [`StoreError`] if the log cannot be read or names an invalid task.
     pub fn task_progress(&self) -> Result<TaskProgress, StoreError> {
         let mut progress = TaskProgress::default();
+        let mut tasks = BTreeMap::new();
         for chained in self.read_from(Sequence::FIRST)? {
             let recorded = chained.recorded;
             let kind: EventKind = recorded.event.kind;
@@ -36,11 +39,40 @@ impl EventStore {
                     stored_sequence: super::rows::stored_sequence(recorded.sequence),
                 }
             })?;
-            if kind == EventKind::TaskStarted {
-                progress.running.insert(task);
+            let detail: serde_json::Value =
+                serde_json::from_str(&recorded.event.payload).map_err(|_| {
+                    StoreError::CorruptPayload {
+                        stored_sequence: super::rows::stored_sequence(recorded.sequence),
+                    }
+                })?;
+            let mission = detail
+                .get("mission_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let state = if kind == EventKind::TaskStarted {
+                None
             } else {
-                progress.running.remove(&task);
-                progress.finished.insert(task);
+                Some(match detail.get("succeeded") {
+                    None => true, // Legacy task.finished meant success.
+                    Some(value) => value.as_bool().ok_or(StoreError::CorruptPayload {
+                        stored_sequence: super::rows::stored_sequence(recorded.sequence),
+                    })?,
+                })
+            };
+            tasks.insert((mission, task), state);
+        }
+        for ((_, task), state) in tasks {
+            match state {
+                None => {
+                    progress.running.insert(task);
+                }
+                Some(true) => {
+                    progress.finished.insert(task);
+                }
+                Some(false) => {
+                    progress.failed.insert(task);
+                }
             }
         }
         Ok(progress)
@@ -119,6 +151,58 @@ mod tests {
             next_after_developing,
             vec![task("task_review")],
             "the recorded finish alone lets the review start"
+        );
+    }
+    #[test]
+    fn a_failed_task_settles_without_satisfying_its_dependencies() {
+        let scratch = a_ledger_path_that_does_not_exist_yet();
+        let mut store = EventStore::open(&scratch.path()).expect("new ledger");
+        record(&mut store, EventKind::TaskStarted, "task_develop");
+        store
+            .append(Event {
+                kind: EventKind::TaskFinished,
+                subject: "task_develop".into(),
+                payload_version: PAYLOAD_VERSION,
+                payload: serde_json::json!({"succeeded":false}).to_string(),
+            })
+            .expect("failure recorded");
+        let progress = store.task_progress().expect("readable progress");
+        assert!(progress.running.is_empty(), "a failed task has settled");
+        assert!(
+            progress.finished.is_empty(),
+            "failure is not success for dependency admission"
+        );
+        assert!(
+            progress.failed.contains(&task("task_develop")),
+            "the failed identity remains visible"
+        );
+    }
+
+    #[test]
+    fn one_missions_finish_does_not_hide_another_missions_running_task() {
+        let scratch = a_ledger_path_that_does_not_exist_yet();
+        let mut store = EventStore::open(&scratch.path()).expect("new ledger");
+        for (mission, kind) in [
+            ("mis_first", EventKind::TaskStarted),
+            ("mis_second", EventKind::TaskStarted),
+            ("mis_first", EventKind::TaskFinished),
+        ] {
+            store
+                .append(Event {
+                    kind,
+                    subject: "task_shared".into(),
+                    payload_version: PAYLOAD_VERSION,
+                    payload: serde_json::json!({"mission_id":mission,"succeeded":true}).to_string(),
+                })
+                .expect("scoped event");
+        }
+        assert!(
+            store
+                .task_progress()
+                .expect("progress")
+                .running
+                .contains(&task("task_shared")),
+            "mission-scoped folding retains the still-running owner"
         );
     }
 }

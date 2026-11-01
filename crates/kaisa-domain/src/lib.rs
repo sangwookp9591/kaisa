@@ -41,7 +41,7 @@ pub use grader::{
 pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
 pub use knowledge::{ContentDigest, DIGEST_HEX_LEN, DigestError, KnowledgeKind};
 pub use plan::{Plan, PlanError, PlannedTask};
-pub use policy::{Policy, PolicyError, PolicySnapshot};
+pub use policy::{OnFailure, Policy, PolicyError, PolicySnapshot, default_max_parallel};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use sandbox::{Network, Role, SandboxProfile, sandbox_profile};
 pub use verdict::{Finding, ReviewVerdict, Severity};

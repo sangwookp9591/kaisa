@@ -45,6 +45,9 @@ pub(crate) const BUILD_OUTPUT: [&str; 3] = ["target", "node_modules", ".venv"];
 /// Builds the agent's command from the path of its MCP config.
 pub type AgentLauncher<'launcher> = &'launcher dyn Fn(&Path) -> ProcessSpec;
 
+/// A launcher that can safely be shared by concurrent mission or candidate workers.
+pub type ParallelAgentLauncher<'launcher> = &'launcher (dyn Fn(&Path) -> ProcessSpec + Sync);
+
 /// What to run.
 #[derive(Clone, Copy)]
 pub struct GoalRequest<'request> {

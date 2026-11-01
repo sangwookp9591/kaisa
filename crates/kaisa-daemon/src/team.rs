@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::gate::{Delivery, decide_delivery};
 use crate::goal::{
-    AgentLauncher, AttemptContext, GoalError, GoalOutcome, GoalRequest, at, record,
+    AttemptContext, GoalError, GoalOutcome, GoalRequest, ParallelAgentLauncher, at, record,
     run_goal_with_context,
 };
 use crate::ids::fresh_suffix;
@@ -35,9 +35,9 @@ pub struct VerifiedRequest<'request> {
     /// The paths the developer may change.
     pub write_set: &'request WriteSet,
     /// How to start the developer agent.
-    pub developer: AgentLauncher<'request>,
+    pub developer: ParallelAgentLauncher<'request>,
     /// How to start the reviewer agent.
-    pub reviewer: AgentLauncher<'request>,
+    pub reviewer: ParallelAgentLauncher<'request>,
     /// The `kaisa` executable agents' bridges run.
     pub kaisa_executable: &'request Path,
     /// Whether these agents can run confined; they do only when the policy also asks it.
@@ -65,7 +65,7 @@ pub struct VerifiedRequest<'request> {
 #[derive(Clone, Copy)]
 pub struct FirstPass<'request> {
     /// How to start it.
-    pub launch: AgentLauncher<'request>,
+    pub launch: ParallelAgentLauncher<'request>,
     /// The model server's loopback port, which its sandbox must allow.
     pub model_port: Option<u16>,
 }
@@ -236,8 +236,33 @@ fn candidate_settings_risks(
 ///
 /// Returns [`GoalError`] if a step cannot run; a failing agent or check is an outcome.
 pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcome, GoalError> {
+    run_verified_with_delivery(request, "HEAD", Role::Developer, false)
+}
+
+/// Runs the verified pipeline from a dependency integration commit.
+pub(crate) fn run_verified_goal_from(
+    request: &VerifiedRequest<'_>,
+    base: &str,
+) -> Result<VerifiedOutcome, GoalError> {
+    run_verified_task(request, base, Role::Developer)
+}
+
+pub(crate) fn run_verified_task(
+    request: &VerifiedRequest<'_>,
+    base: &str,
+    role: Role,
+) -> Result<VerifiedOutcome, GoalError> {
+    run_verified_with_delivery(request, base, role, true)
+}
+
+fn run_verified_with_delivery(
+    request: &VerifiedRequest<'_>,
+    base: &str,
+    role: Role,
+    defer_delivery: bool,
+) -> Result<VerifiedOutcome, GoalError> {
     let mut attempts = Vec::new();
-    run_verified_goal_inner(request, &mut attempts)
+    run_verified_goal_inner(request, base, role, defer_delivery, &mut attempts)
         .map_err(|error| preservation_error(error, &attempts))
 }
 
@@ -271,10 +296,14 @@ struct VerificationContext<'a, 'request> {
     run_id: String,
     mission_id: String,
     repository: Option<String>,
+    defer_delivery: bool,
 }
 
 fn run_verified_goal_inner(
     request: &VerifiedRequest<'_>,
+    base: &str,
+    role: Role,
+    defer_delivery: bool,
     attempts: &mut Vec<GoalOutcome>,
 ) -> Result<VerifiedOutcome, GoalError> {
     std::fs::create_dir_all(request.state_directory)
@@ -287,6 +316,7 @@ fn run_verified_goal_inner(
         run_id: format!("run_{}", fresh_suffix()),
         mission_id: format!("mis_{}", fresh_suffix()),
         repository: crate::learn::repository_identity(request.repository),
+        defer_delivery,
     };
     record_verification(
         &context,
@@ -316,7 +346,7 @@ fn run_verified_goal_inner(
         });
     }
     let original_base: Candidate =
-        freeze_candidate(request.repository, "HEAD").map_err(at("resolving the base"))?;
+        freeze_candidate(request.repository, base).map_err(at("resolving the base"))?;
     let mut budget = RevisionBudget::new(request.policy.policy().revision_limit);
     let mut base: String = original_base.commit.clone();
     let mut findings: Vec<String> = Vec::new();
@@ -331,7 +361,7 @@ fn run_verified_goal_inner(
                     base: &base,
                     state_directory: request.state_directory,
                     write_set: request.write_set,
-                    role: Role::Developer,
+                    role,
                     launch: request.developer,
                     kaisa_executable: request.kaisa_executable,
                     confine_agent: request.confine_agent && request.policy.policy().confine_agents,
@@ -601,6 +631,7 @@ fn finish(
     record_gate(context, &delivery, candidate.as_ref(), attempts.last())?;
     if let Some(candidate) = &candidate
         && matches!(delivery, Delivery::Deliver { .. })
+        && !context.defer_delivery
     {
         let scope =
             kaisa_workspace::changed_paths(request.repository, &original_base.commit, candidate)
@@ -717,6 +748,10 @@ fn record_gate(
     attempt: Option<&GoalOutcome>,
 ) -> Result<(), GoalError> {
     let (decision, reason) = match delivery {
+        Delivery::Deliver { .. } if context.defer_delivery => (
+            "Eligible",
+            "verified task or alternative; parent mission owns final delivery".to_owned(),
+        ),
         Delivery::Deliver { .. } => (
             "Deliver",
             "fresh passing checks and an approving review".to_owned(),
@@ -776,6 +811,121 @@ fn record_review(
             "approve": verdict.as_ref().filter(|_| usable).map(|verdict| verdict.approves(&candidate.tree)),
             "blocking": verdict.as_ref().map(|verdict| !verdict.blocking().is_empty()),
             "finding_count": verdict.as_ref().map(|verdict| verdict.findings.len())}),
+    )
+}
+
+/// Checks and independently reviews a host-created integration without another developer.
+/// The same evidence gate and read-only reviewer used by each task decide delivery.
+pub(crate) fn verify_integration(
+    request: &VerifiedRequest<'_>,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<VerifiedOutcome, GoalError> {
+    let context = VerificationContext {
+        request,
+        run_id: format!("run_{}", fresh_suffix()),
+        mission_id: format!("mis_{}", fresh_suffix()),
+        repository: crate::learn::repository_identity(request.repository),
+        defer_delivery: false,
+    };
+    record_verification(
+        &context,
+        EventKind::MissionCreated,
+        &context.mission_id,
+        json!({"goal": request.goal, "integration": true}),
+    )?;
+    record_verification(
+        &context,
+        EventKind::RunStarted,
+        &context.run_id,
+        json!({"mission": context.mission_id, "integration": true}),
+    )?;
+    record_verification(
+        &context,
+        EventKind::CandidateFrozen,
+        &candidate.tree,
+        json!({"candidate_tree":candidate.tree,"commit":candidate.commit,"integration":true}),
+    )?;
+    let attempt_directory = request
+        .state_directory
+        .join("integration")
+        .join(fresh_suffix());
+    std::fs::create_dir_all(&attempt_directory).map_err(at("preparing integrated verification"))?;
+    let risks = candidate_settings_risks(request, candidate)?;
+    if !risks.is_empty() {
+        let delivery = settings_widen_authority("the integrated candidate's", &risks);
+        record_gate(&context, &delivery, Some(candidate), None)?;
+        return Ok(VerifiedOutcome {
+            delivery,
+            candidate: Some(candidate.clone()),
+            attempts: vec![],
+            revisions: 0,
+            advisories: vec![],
+            weakened_tests: vec![],
+        });
+    }
+    let evidence = run_trusted_checks(
+        request.repository,
+        request.state_directory,
+        &attempt_directory,
+        base,
+        candidate,
+        request.checks,
+    )?;
+    for piece in &evidence {
+        record_verification(
+            &context,
+            EventKind::CheckEvidence,
+            &candidate.tree,
+            json!({"candidate_tree": piece.candidate_tree, "integration": true,
+                "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
+                "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
+                "exit": match piece.exit { Some(ProcessExit::Code(code)) => json!({"code":code}), Some(ProcessExit::Terminated) => json!({"terminated":true}), None => json!({"deadline_exceeded":true}) },
+                "passed": piece.passed(), "output_digest": piece.output_digest,
+                "confined": piece.confined, "definitions_changed":piece.definitions_changed, "weakened_tests":piece.weakened_tests}),
+        )?;
+    }
+    let diff = kaisa_workspace::candidate_diff(request.repository, base, candidate)
+        .map_err(at("reading integrated diff"))?;
+    let checks = review_check_receipts(candidate, &evidence);
+    let no_paths = WriteSet::default();
+    let reviewed = run_goal_with_context(
+        &GoalRequest {
+            repository: request.repository,
+            goal: &review_instruction(request.goal, candidate),
+            base: &candidate.commit,
+            state_directory: request.state_directory,
+            write_set: &no_paths,
+            role: Role::Reviewer,
+            launch: request.reviewer,
+            kaisa_executable: request.kaisa_executable,
+            confine_agent: request.confine_agent && request.policy.policy().confine_agents,
+            egress_hosts: request.egress_hosts,
+            agent_writable: request.agent_writable,
+            local_model_port: None,
+            observed: false,
+            reduced_mode: request.reduced_mode,
+        },
+        &AttemptContext {
+            findings: &[],
+            diff: &diff,
+            diff_remainder: "Integrated diff truncated; read it from the frozen commits.",
+            checks: &checks,
+        },
+    )?;
+    record_review(&context, candidate, &reviewed, false)?;
+    let verdict = verdict_from(request.state_directory, &reviewed, &candidate.tree);
+    let delivery = reviewer_failure(&reviewed)
+        .unwrap_or_else(|| decide_delivery(candidate, &evidence, verdict.as_ref()));
+    let original_base =
+        freeze_candidate(request.repository, base).map_err(at("resolving integration base"))?;
+    finish(
+        &context,
+        &original_base,
+        0,
+        delivery,
+        Some(candidate.clone()),
+        &mut vec![reviewed],
     )
 }
 
@@ -903,6 +1053,7 @@ mod tests {
             run_id: "run_test".to_owned(),
             mission_id: "mis_test".to_owned(),
             repository: None,
+            defer_delivery: false,
         };
         let candidate = Candidate {
             commit: "commit".to_owned(),

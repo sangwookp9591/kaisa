@@ -85,6 +85,11 @@ pub fn report_verified_outcome(outcome: &kaisa_daemon::VerifiedOutcome) -> (Stri
                     "\nIf untracked files block the merge, run git status, move the conflicting files, and retry.\nResult: {branch} at {}; retrieve with git merge --ff-only {branch}",
                     candidate.commit
                 ));
+            } else {
+                text.push_str(&format!(
+                    "\nResult: {}; retrieve with git merge --ff-only {}",
+                    candidate.commit, candidate.commit
+                ));
             }
         }
     }

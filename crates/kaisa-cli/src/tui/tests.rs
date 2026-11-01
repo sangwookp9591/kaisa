@@ -737,6 +737,7 @@ fn more_than_three_waiting_goals_show_the_hidden_count_and_the_filter_lists_ever
     use super::model::RunCard;
     const WAITING_GOALS: usize = 5;
     let snapshot = Snapshot {
+        running_tasks: Vec::new(),
         runs: (0..WAITING_GOALS)
             .map(|index| RunCard {
                 goal: format!("Waiting goal {index}"),

@@ -18,6 +18,7 @@ const VERDICT_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Default)]
 pub(super) struct Snapshot {
     pub runs: Vec<RunCard>,
+    pub running_tasks: Vec<String>,
 }
 
 #[derive(Default)]
@@ -233,7 +234,15 @@ pub(super) fn load(state: &Path) -> Result<Snapshot, Box<dyn std::error::Error>>
             },
         )
     });
-    Ok(Snapshot { runs })
+    Ok(Snapshot {
+        runs,
+        running_tasks: ledger
+            .task_progress()?
+            .running
+            .into_iter()
+            .map(|task| task.to_string())
+            .collect(),
+    })
 }
 
 /// Only interpret the two documented leading fields of the context-pack v1 encoding.

@@ -26,15 +26,27 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
             .iter()
             .map(|row| ledger.usage_for(&row.attempt))
             .collect::<Result<_, _>>()?;
-        Ok((rows, usage))
+        Ok((rows, usage, ledger.task_progress()?))
     });
-    let (rows, usage) = match read {
+    let (rows, usage, progress) = match read {
         Ok(read) => read,
         Err(error) => {
             writeln!(err, "kaisa: the ledger cannot be read: {error}")?;
             return Ok(crate::EXIT_FAILURE);
         }
     };
+    if !progress.running.is_empty() {
+        writeln!(
+            out,
+            "Running mission tasks: {}",
+            progress
+                .running
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
     let attempt_width = rows
         .iter()
         .map(|row| row.attempt.as_str().len())

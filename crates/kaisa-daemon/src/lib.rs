@@ -3,9 +3,11 @@
 //! Design: `docs/architecture.md`. In M0 a goal runs in one process (`run_goal`); the long-lived
 //! daemon, its control endpoint and keeper reconnection wrap the same steps later.
 
+mod candidates;
 mod gate;
 mod goal;
 mod ids;
+pub mod integrate;
 mod learn;
 mod mission;
 mod recall;
@@ -14,14 +16,16 @@ mod review;
 mod revision;
 mod route;
 mod sandbox;
+pub mod scheduler;
 mod team;
 mod test_review;
 mod verify;
 
+pub use candidates::{CandidatesOutcome, run_candidates};
 pub use gate::{Delivery, RevisionReason, decide_delivery};
 pub use goal::{
-    AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
-    whole_repository,
+    AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, ParallelAgentLauncher,
+    run_goal, whole_repository,
 };
 pub use learn::learn_from_delivery;
 pub use mission::{MissionOutcome, MissionRequest, run_mission};
