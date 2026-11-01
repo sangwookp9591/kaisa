@@ -6,6 +6,7 @@ mod candidate;
 mod git;
 mod inventory;
 mod preserve;
+mod qa_store;
 mod receipt;
 mod secrets;
 mod settings_risk;
@@ -22,6 +23,7 @@ pub use candidate::{
 pub use git::{GitError, git_cli_path};
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
+pub use qa_store::{QaKind, QaManifestEntry, QaSuite, QaTestFile, record_qa_suite};
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 pub use secrets::{SecretKind, scan as scan_for_secrets, scan_bytes};
 pub use settings_risk::{

@@ -292,7 +292,7 @@ fn add_argv_paths(
 }
 
 /// Scan the complete capture before taking a tail: truncation must not hide a secret.
-fn review_output_tail(run: &CapturedRun) -> String {
+pub(crate) fn review_output_tail(run: &CapturedRun) -> String {
     if !kaisa_workspace::scan_bytes(&run.output).is_empty() {
         return "[omitted: secret detected]".to_owned();
     }
@@ -310,12 +310,12 @@ fn review_output_tail(run: &CapturedRun) -> String {
 }
 
 /// The clean checkout's original Git metadata, pinned before executing untrusted checks.
-struct CheckedSources {
+pub(crate) struct CheckedSources {
     git_directory: PathBuf,
 }
 
 impl CheckedSources {
-    fn record(checkout: &Path) -> std::io::Result<Self> {
+    pub(crate) fn record(checkout: &Path) -> std::io::Result<Self> {
         let pointer = std::fs::read_to_string(checkout.join(".git"))?;
         let git_directory = pointer
             .trim_end()
@@ -326,7 +326,7 @@ impl CheckedSources {
         })
     }
 
-    fn matches(&self, checkout: &Path, tree: &str) -> std::io::Result<bool> {
+    pub(crate) fn matches(&self, checkout: &Path, tree: &str) -> std::io::Result<bool> {
         // The recorded directory is canonical, which on Windows means a `\\?\` path that Git
         // cannot follow to the worktree's `commondir`; Git gets the ordinary spelling.
         let git_directory = format!(
@@ -398,7 +398,7 @@ impl Drop for CheckTemporary {
 }
 
 /// The sandbox a check runs in: writes only its disposable checkout and private temp, no network.
-enum CheckSandbox {
+pub(crate) enum CheckSandbox {
     // macOS always confines checks; Linux falls back here on kernels without Landlock.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Unconfined,
@@ -409,7 +409,7 @@ enum CheckSandbox {
 }
 
 impl CheckSandbox {
-    fn confinement(&self) -> Confinement<'_> {
+    pub(crate) fn confinement(&self) -> Confinement<'_> {
         match self {
             Self::Unconfined => Confinement::Unconfined,
             #[cfg(target_os = "macos")]
@@ -419,12 +419,26 @@ impl CheckSandbox {
         }
     }
 
-    fn is_confined(&self) -> bool {
+    pub(crate) fn is_confined(&self) -> bool {
         !matches!(self, Self::Unconfined)
     }
 }
 
-fn check_sandbox(state: &Path, checkout: &Path, temporary: &Path) -> std::io::Result<CheckSandbox> {
+pub(crate) fn check_sandbox(
+    state: &Path,
+    checkout: &Path,
+    temporary: &Path,
+) -> std::io::Result<CheckSandbox> {
+    check_sandbox_readonly(state, checkout, temporary, &[])
+}
+
+/// Checks with immutable harness inputs excluded from every writable grant.
+pub(crate) fn check_sandbox_readonly(
+    state: &Path,
+    checkout: &Path,
+    temporary: &Path,
+    readonly: &[PathBuf],
+) -> std::io::Result<CheckSandbox> {
     #[cfg(not(target_os = "macos"))]
     let _ = state;
     #[cfg(not(target_os = "linux"))]
@@ -434,6 +448,7 @@ fn check_sandbox(state: &Path, checkout: &Path, temporary: &Path) -> std::io::Re
         let mut policy = kaisa_sys::SeatbeltPolicy {
             readable: writable.clone(),
             writable,
+            unwritable: readonly.to_vec(),
             git_control_root: Some(checkout.canonicalize()?),
             ..kaisa_sys::SeatbeltPolicy::default()
         };
@@ -442,7 +457,14 @@ fn check_sandbox(state: &Path, checkout: &Path, temporary: &Path) -> std::io::Re
     }
     #[cfg(target_os = "linux")]
     {
-        let writable = linux_check_writable(checkout, temporary)?;
+        let writable = linux_check_writable(checkout, temporary)?
+            .into_iter()
+            .filter(|path| {
+                !readonly
+                    .iter()
+                    .any(|protected| path == protected || protected.starts_with(path))
+            })
+            .collect::<Vec<_>>();
         Ok(match kaisa_sys::write_ruleset(&writable, None)? {
             Some(ruleset) => CheckSandbox::Landlock(ruleset),
             None => CheckSandbox::Unconfined,
@@ -450,7 +472,7 @@ fn check_sandbox(state: &Path, checkout: &Path, temporary: &Path) -> std::io::Re
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = writable;
+        let _ = (writable, readonly);
         Ok(CheckSandbox::Unconfined)
     }
 }

@@ -49,17 +49,67 @@ requirements ─► Specification agent ─► spec draft (v1, provisional)
 
 ## 3. Isolation — enforced by mechanisms, labelled where it cannot be
 
+Runtime isolation was exercised only on macOS: native Linux and Windows guarantees for
+private-QA write denial and author isolation remain **unverified** (NFR-04/NFR-08).
+The Linux/Windows cross-clippy checks in `scripts/check.sh` are compile-only evidence;
+this macOS host's Windows cross-check excludes the SQLite-dependent daemon.
+
 | Boundary | Mechanism | Where it is weaker (always labelled, never silent) |
 |---|---|---|
 | Developer cannot change the approved spec | Spec lives only in the state directory; the developer writes only through the broker write set (Claude) or its own workspace sandbox (Codex). The gate re-hashes the spec and compares with the `spec.approved` digest; any mismatch is FAIL. | — (the digest check holds even if a write slipped through) |
-| Developer cannot read private QA tests | **Temporal**: QA tests are authored after the developer session has ended. **Spatial**: they live in the state directory, which confined agents cannot read (macOS Seatbelt state-read deny). | Revision rounds run while QA tests exist: an unconfined developer (Claude reduced mode, Codex observed, Linux state-read gap) could read them. The run is then labelled `qa-isolation: reduced` and the gate returns at best INCONCLUSIVE unless the policy key `allow_reduced_qa_isolation` is set (still labelled). Revision feedback carries observable failures (criterion id, input, expected vs actual), never test source. |
-| QA does not see developer reasoning | QA prompts are built from the frozen spec and the public interface only (the candidate's public files listed by an interface extractor, with development tests and transcripts excluded). QA runs in a fresh checkout, not the developer worktree. | QA could still read source of the candidate it executes; "black-box" means no developer reasoning, history or developer test results — documented. |
+| Developer cannot read private QA tests | **Temporal**: QA tests are authored after the developer session has ended. **Spatial**: they live in the state directory, which confined agents cannot read (macOS Seatbelt state-read deny). | Revision rounds run while QA tests exist: an unconfined developer (Claude reduced mode, Codex observed, Linux state-read gap) could read them. The run is then labelled `qa-isolation: reduced` and the gate returns at best INCONCLUSIVE unless the policy key `allow_reduced_qa_isolation` is set (still labelled). Revision feedback carries Kaisa-computed criterion/scenario ids and pass/fail, plus a bounded assertion-message excerpt scanned against the entire private suite; self-declared runtime observations are discarded. Each revision supplies its own attempt receipt for `qa_isolation`. |
+| QA does not see developer reasoning | QA prompts are built from the frozen spec and the public interface only (the candidate's public files listed by an interface extractor, with development tests and transcripts excluded). QA authors run in a freshly initialized repository containing only the context pack and its own initial commit. macOS denies reads of the developer repository and common Git directory; Linux authors use a read allow-list, and Windows grants only the context repository/runtime. Candidate execution is a separate phase. | Candidate code executes in the private harness process and can read the private source that the compiler/runtime needs. README/docs, exported Node JSDoc and CLI help are developer-controlled contract data and remain a prompt-injection risk; authors must treat them as untrusted. Rust doc comments are currently omitted, unlike Node JSDoc. |
 | Developer cannot approve its own work | The developer role has no tool or command that records a verdict or approval; the gate is computed by the orchestrator from recorded evidence. | — |
 | Human spec approval | The binding control against agents is the confinement sandbox: state-directory write isolation plus PTY denial. `kaisa spec approve` displays the selected version and criteria, requires terminal stdin/stdout and a digest prefix, and records the OS user. It refuses while any recorded attempt is live in that state directory. Marker and ancestor checks are best effort. | Unconfined agents can detach/reparent, allocate PTYs, or rewrite user-owned state. Receipts record `attempts_unconfined_since_draft`; affected approval is shown as `human-approved (reduced assurance)`. A same-user process outside an attempt can also impersonate terminal input. This is shell-level trust, not cryptographic human identity. Windows human approval is unsupported and refused; provisional approval remains explicitly labelled and policy controlled. |
 
+Private QA evidence always carries `qa_evidence: candidate-influenceable-in-process` (NFR-04).
+Private tests execute in the same process as candidate code. Named libtest/TAP results and a
+matching zero-failure summary reject premature `exit(0)` (including Node's successful file
+wrapper), but a candidate that anticipates the harness can still forge in-process output.
+Neither a successful test report nor OS confinement proves that a hostile candidate could not
+influence the verdict. The gate must preserve this label. Message overlap filtering removes
+complete normalized fields that occur in source, embedded source fragments (at least
+16 characters), and 8-token shingles; it does not prove
+confidentiality against arbitrary encoding of source by hostile in-process code.
+
+Tests are installed outside the checkout and writable scratch. Seatbelt explicitly denies
+`file-write*` to inputs, generated manifests and compiled artifacts; Linux excludes them from
+Landlock grants. Every scenario verifies all private input digests before and after execution,
+and compiled executables are pinned and read-only during execution. A platform without the
+write-deny records `private_test_integrity: reduced(write-deny unavailable; digests only)` and
+`private_test_unchanged: false`; matching bytes alone are never presented as integrity evidence.
+The `write-denied` label reports an available OS mechanism, not native platform validation.
+
+Cargo compiles all private targets once per suite using a Kaisa-owned `CARGO_HOME`, outside
+candidate Cargo/toolchain configuration discovery, with explicit wrapper/environment overrides.
+Cargo has no null runner value: exact-host and cfg runners are overridden with a fail-closed
+sentinel, compilation uses `--no-run`, and Kaisa executes each artifact directly with no Cargo
+runner. Node uses the trusted `node --test --test-reporter=tap` with empty `NODE_OPTIONS` and
+statically named tests. Dynamic, ignored or nested test names cannot satisfy the expected-name
+set. Added/changed `.cargo/config*`, `build.rs`, `rust-toolchain*`, package scripts/test configuration
+and Node options produce blocking **QA-influencing configuration** findings; newly added
+termination calls in library sources also block and require reviewer justification with evidence.
+The findings do not have an automatic approval escape hatch.
+
+The former per-scenario checkout and cold build multiplied compilation cost by the scenario
+count. The runner now uses one cold build per suite and per-scenario input/artifact integrity
+checks, without a shared writable dependency cache. Acceptance and adversarial suites still
+build separately. On Unix, existing trusted offline registry/git sources are linked read-only
+into the fresh Cargo home; config, credentials and executables are not inherited. On Windows,
+dependency provisioning for the fresh offline home remains the trusted launcher's responsibility.
+This does not estimate production-project timing; fixture measurements belong in the review
+report, with the measured command and scope.
+
+Public context includes root README files, allow-listed text in `docs/**`, lexical Rust public
+signatures/types/modules and sanitized crate metadata, Node entry metadata/export names/JSDoc,
+and bounded sandboxed CLI `--help` output. It excludes implementation bodies, Rust doc comments,
+`#[cfg(test)]` items, `tests/`, test/spec filename patterns, dotfiles, transcripts, final answers,
+developer test results and commit-message/history data. An executable author is confined as
+well as instructed; its filesystem view must not be equated with prompt-pack cleanliness.
+
 ## 4. Deterministic checks (no model involved)
 
-- **Traceability**: every requirement → ≥1 criterion; every criterion → ≥1 private acceptance test that ran on the final candidate tree; reported as a matrix.
+- **Traceability**: every requirement → ≥1 criterion; every criterion → ≥1 private acceptance test that ran on the final candidate tree; reported as a matrix. Missing acceptance mappings are reported in `QaOutcome.uncovered_criteria` and `qa.suite_recorded.uncovered_criteria` with `coverage_blocked: true`. A nonempty list is a blocking traceability failure, even when every recorded test passed; adversarial mappings cannot fill an acceptance gap.
 - **Domain test lint** (per test, language-aware for Rust `#[test]`, Node `node:test`/`test()`/`it()`): name states condition + outcome (rejects `test_case_1`, `should_work`, `it works`, names under N words); setup uses named fixtures/constants (flags bare numeric/string literals in assertions); assertions present and not trivially true (`assert!(true)`, self-compare, `assert.ok(x)` on the value under test only); error behaviour asserted for `Error` criteria.
 - **Protected assets**: approved spec digest unchanged; existing tests not weakened (current `candidate.rs` signals plus deletions/skip/todo/should_panic/cfg-gating); private QA tests unchanged between authoring and run (digest).
 - **Legacy characterization**: when the change touches files with no covering tests, a characterization suite must exist and pass on the base tree before the developer starts; it is re-run on the candidate and every changed outcome must be explained by a criterion marked `correction`.

@@ -238,6 +238,29 @@ fn test_reviewer(args: &[String], config_path: &str, answer_file: &str) -> Resul
     Ok(())
 }
 
+/// QA has no tools: it consumes the isolated pack and returns only a proposed suite.
+fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
+    let mut pack = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut pack)
+        .map_err(|error| error.to_string())?;
+    if !pack.contains("public_interface") || !pack.contains("frozen_spec") {
+        return Err("QA did not receive its isolated context".to_owned());
+    }
+    if let Some(probe) = flag(args, "--try-direct-write")
+        && std::fs::write(&probe, "QA bypassed read-only confinement").is_ok()
+    {
+        return Err("QA wrote outside its scratch".to_owned());
+    }
+    let response = if path == "-" {
+        std::env::var("KAISA_FAKE_QA_JSON").map_err(|error| error.to_string())?
+    } else {
+        std::fs::read_to_string(path).map_err(|error| error.to_string())?
+    };
+    let suite: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
+    println!("```kaisa-qa\n{suite}\n```");
+    Ok(())
+}
+
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
 }
@@ -257,6 +280,9 @@ fn run() -> Result<(), String> {
         let answer = format!("```kaisa-spec\n{proposal}\n```");
         print_as_claude(&answer);
         return Ok(());
+    }
+    if let Some(path) = flag(&args, "--fake-qa") {
+        return fake_qa(&path, &args);
     }
     // A read-only hostile holder: models an orphaned agent taking an advisory lock.
     if let Some(path) = flag(&args, "--fake-hold-lock") {

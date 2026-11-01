@@ -446,6 +446,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
+ "toml",
 ]
 
 [[package]]
@@ -528,6 +529,10 @@ dependencies = [
 [[package]]
 name = "kaisa-workspace"
 version = "0.0.0"
+dependencies = [
+ "blake3",
+ "serde_json",
+]
 
 [[package]]
 name = "kasuari"

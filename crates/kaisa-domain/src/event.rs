@@ -77,6 +77,10 @@ pub enum EventKind {
     CandidateFrozen,
     /// A trusted check produced evidence on a frozen tree.
     CheckEvidence,
+    /// Private acceptance or adversarial tests were sealed outside worktrees.
+    QaSuiteRecorded,
+    /// One private QA scenario ran on a frozen candidate.
+    QaResult,
     /// A reviewer returned a verdict (or no valid verdict) on a frozen tree.
     ReviewVerdict,
     /// The delivery gate decided what happens next.
@@ -109,7 +113,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::SpecDrafted,
         Self::SpecApproved,
         Self::SpecFrozen,
@@ -120,6 +124,8 @@ impl EventKind {
         Self::ContextPackRecorded,
         Self::CandidateFrozen,
         Self::CheckEvidence,
+        Self::QaSuiteRecorded,
+        Self::QaResult,
         Self::ReviewVerdict,
         Self::GateDecided,
         Self::RevisionStarted,
@@ -150,6 +156,8 @@ impl EventKind {
             Self::ContextPackRecorded => "context_pack.recorded",
             Self::CandidateFrozen => "candidate.frozen",
             Self::CheckEvidence => "check.evidence",
+            Self::QaSuiteRecorded => "qa.suite_recorded",
+            Self::QaResult => "qa.result",
             Self::ReviewVerdict => "review.verdict",
             Self::GateDecided => "gate.decided",
             Self::RevisionStarted => "revision.started",
