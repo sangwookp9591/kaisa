@@ -8,6 +8,8 @@ mod goal;
 mod ids;
 mod learn;
 mod mission;
+pub mod qa;
+pub mod qa_interface;
 mod recall;
 mod recover;
 mod review;

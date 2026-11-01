@@ -166,12 +166,38 @@ fn review(required: &str, format: ReviewFormat) -> Result<(), String> {
     Ok(())
 }
 
+/// QA has no tools: it consumes the isolated pack and returns only a proposed suite.
+fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
+    let mut pack = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut pack)
+        .map_err(|error| error.to_string())?;
+    if !pack.contains("public_interface") || !pack.contains("frozen_spec") {
+        return Err("QA did not receive its isolated context".to_owned());
+    }
+    if let Some(probe) = flag(args, "--try-direct-write")
+        && std::fs::write(&probe, "QA bypassed read-only confinement").is_ok()
+    {
+        return Err("QA wrote outside its scratch".to_owned());
+    }
+    let response = if path == "-" {
+        std::env::var("KAISA_FAKE_QA_JSON").map_err(|error| error.to_string())?
+    } else {
+        std::fs::read_to_string(path).map_err(|error| error.to_string())?
+    };
+    let suite: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
+    println!("```kaisa-qa\n{suite}\n```");
+    Ok(())
+}
+
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
 }
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(path) = flag(&args, "--fake-qa") {
+        return fake_qa(&path, &args);
+    }
     // A read-only hostile holder: models an orphaned agent taking an advisory lock.
     if let Some(path) = flag(&args, "--fake-hold-lock") {
         let lock = std::fs::File::open(path).map_err(|error| error.to_string())?;

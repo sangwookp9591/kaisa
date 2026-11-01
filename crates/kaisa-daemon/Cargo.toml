@@ -22,6 +22,7 @@ kaisa-supervisor.workspace = true
 kaisa-sys.workspace = true
 kaisa-workspace.workspace = true
 serde_json.workspace = true
+toml = "0.8.23"
 
 [lints]
 workspace = true
