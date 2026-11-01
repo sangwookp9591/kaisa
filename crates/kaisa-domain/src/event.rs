@@ -55,6 +55,8 @@ impl fmt::Display for Sequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EventKind {
+    /// Current observable behaviour was checked on the frozen base before development.
+    CharacterizationBaseline,
     /// A provisional specification version was drafted.
     SpecDrafted,
     /// A specification version received approval.
@@ -113,7 +115,8 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
+        Self::CharacterizationBaseline,
         Self::SpecDrafted,
         Self::SpecApproved,
         Self::SpecFrozen,
@@ -146,6 +149,7 @@ impl EventKind {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::CharacterizationBaseline => "characterization.baseline",
             Self::SpecDrafted => "spec.drafted",
             Self::SpecApproved => "spec.approved",
             Self::SpecFrozen => "spec.frozen",
