@@ -988,3 +988,370 @@ fn an_explicitly_disabled_per_task_gate_still_requires_integrated_checks_and_rev
         "no hidden per-task reviewer runs when the policy explicitly disables it"
     );
 }
+
+#[test]
+fn a_finished_task_leaves_status_and_tui_before_its_slow_sibling() {
+    use std::time::{Duration, Instant};
+    let repository = MissionRepository::new();
+    // Slow first also catches a completion receiver that waits in admission order.
+    let plan = Plan::new(vec![
+        a_task("task_slow", "src/slow.md", &[]),
+        a_task("task_fast", "src/fast.md", &[]),
+    ])
+    .expect("independent tasks");
+    let policy = parallel_policy(kaisa_domain::OnFailure::Stop);
+    let checks = [trusted_check("pass")];
+    let writer = |config: &Path| {
+        let target = declared_target(config);
+        fake_spec(
+            config,
+            &[
+                "--fake-write",
+                &target,
+                "--fake-content",
+                "output",
+                "--fake-delay-ms",
+                if target.contains("slow") { "5000" } else { "0" },
+            ],
+        )
+    };
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| repository.run(&plan, &policy, &writer, &checks));
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            let eligible =
+                kaisa_ledger::EventStore::open_read_only(&repository.state.join("kaisa.db"))
+                    .and_then(|ledger| ledger.read_from(kaisa_domain::Sequence::FIRST))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|event| {
+                        event.recorded.event.kind == kaisa_domain::EventKind::GateDecided
+                            && serde_json::from_str::<serde_json::Value>(
+                                &event.recorded.event.payload,
+                            )
+                            .expect("gate JSON")["decision"]
+                                == "Eligible"
+                    });
+            if eligible {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "fast task must complete verification"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Allow the small gap between gate append and worker settlement, but never the wave.
+        let until = Instant::now() + Duration::from_secs(1);
+        let progress = loop {
+            let progress =
+                kaisa_ledger::EventStore::open_read_only(&repository.state.join("kaisa.db"))
+                    .expect("ledger")
+                    .task_progress()
+                    .expect("progress");
+            if !progress.running.contains(&task("task_fast")) || Instant::now() >= until {
+                break progress;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            !progress.running.contains(&task("task_fast")),
+            "finished verified task must leave running state before slow sibling: {progress:?}"
+        );
+        assert!(
+            progress.running.contains(&task("task_slow")),
+            "slow sibling is still running"
+        );
+        let finished = repository.events(kaisa_domain::EventKind::TaskFinished);
+        assert_eq!(finished.len(), 1, "only fast task has settled");
+        assert_eq!(finished[0].subject, "task_fast");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&finished[0].payload).expect("finish JSON")["succeeded"],
+            true
+        );
+        for args in [vec!["status"], vec!["tui", "--plain"]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_kaisa"))
+                .args(args)
+                .current_dir(&repository.repository)
+                .env("KAISA_STATE_DIR", &repository.state)
+                .output()
+                .expect("live status");
+            let text = String::from_utf8_lossy(&output.stdout);
+            let running = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Running mission tasks: "));
+            assert!(
+                output.status.success() && running == Some("task_slow"),
+                "only the unsettled task is reported running: {text}"
+            );
+        }
+        assert!(delivered(&worker.join().expect("mission drains")));
+    });
+}
+
+#[cfg(unix)]
+mod cancellation {
+    use std::collections::BTreeSet;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct ProcessRow {
+        pid: u32,
+        parent: u32,
+        state: String,
+        command: String,
+    }
+
+    fn process_table() -> Vec<ProcessRow> {
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,stat=,command="])
+            .output()
+            .expect("process table");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                ProcessRow {
+                    pid: fields.next().expect("pid").parse().expect("numeric pid"),
+                    parent: fields
+                        .next()
+                        .expect("parent")
+                        .parse()
+                        .expect("numeric parent"),
+                    state: fields.next().expect("state").into(),
+                    command: fields.collect::<Vec<_>>().join(" "),
+                }
+            })
+            .collect()
+    }
+
+    // A failing regression must clean up its fixtures too, including after owner death.
+    struct Fixture {
+        owner: Child,
+        owned: BTreeSet<u32>,
+        identities: BTreeMap<u32, kaisa_sys::ProcessIdentity>,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for identity in self.identities.values() {
+                if identity.is_running().unwrap_or(false) {
+                    let _ = Command::new("kill")
+                        .args(["-KILL", &identity.pid.to_string()])
+                        .status();
+                }
+            }
+            let _ = self.owner.kill();
+            let _ = self.owner.wait();
+        }
+    }
+
+    fn cancel(mode: &str, signal: &str) {
+        let repository = MissionRepository::new();
+        let plan = repository.root.join("plan.json");
+        std::fs::write(
+            &plan,
+            serde_json::json!({"tasks":[
+                {"id":"task_a","instruction":"A","write_set":["src/a.md"]},
+                {"id":"task_b","instruction":"B","write_set":["src/b.md"]},
+                {"id":"task_pending","instruction":"Never admitted","write_set":["src/pending.md"]}
+            ]})
+            .to_string(),
+        )
+        .expect("plan");
+        let binary = env!("CARGO_BIN_EXE_kaisa");
+        let mut command = Command::new(binary);
+        command
+            .current_dir(&repository.repository)
+            .env("KAISA_STATE_DIR", &repository.state)
+            .arg("Cancel all parallel work");
+        if mode == "mission" {
+            command.arg("--plan").arg(&plan);
+        } else {
+            command.args(["--candidates", "3"]);
+        }
+        command
+            .args(["--max-parallel", "2", "--agent-program"])
+            .arg(PathBuf::from(binary).with_file_name("kaisa-fake-agent"))
+            .args([
+                "--agent-arg",
+                "--fake-spawn-child",
+                "--agent-arg",
+                "--fake-delay-ms",
+                "--agent-arg",
+                "30000",
+                "--agent-arg",
+                "--fake-write-next",
+                "--agent-arg",
+                "src/step",
+                "--reviewer-arg",
+                "--fake-review-require",
+                "--reviewer-arg",
+                "src/lib.rs",
+            ]);
+        let checks = trusted_check("pass").argv;
+        command.arg("--check-program").arg(&checks[0]);
+        for argument in &checks[1..] {
+            command.arg("--check-arg").arg(argument);
+        }
+        let log = std::fs::File::create(repository.root.join("cli.log")).expect("CLI log");
+        command
+            .stdout(Stdio::from(log.try_clone().expect("clone log")))
+            .stderr(Stdio::from(log));
+        let mut fixture = Fixture {
+            owner: command.spawn().expect("CLI"),
+            owned: BTreeSet::new(),
+            identities: BTreeMap::new(),
+        };
+        let until = Instant::now() + Duration::from_secs(20);
+        let roots = loop {
+            let table = process_table();
+            let mut descendants = BTreeSet::from([fixture.owner.id()]);
+            loop {
+                let before = descendants.len();
+                for row in &table {
+                    if descendants.contains(&row.parent) {
+                        descendants.insert(row.pid);
+                    }
+                }
+                if descendants.len() == before {
+                    break;
+                }
+            }
+            descendants.remove(&fixture.owner.id());
+            for pid in &descendants {
+                if let Ok(Some(identity)) = kaisa_sys::ProcessIdentity::of(*pid) {
+                    fixture.identities.entry(*pid).or_insert(identity);
+                }
+            }
+            fixture.owned.extend(descendants);
+            let roots: Vec<_> = table
+                .iter()
+                .filter(|row| {
+                    fixture.owned.contains(&row.pid)
+                        && row.command.contains("kaisa-fake-agent")
+                        && !row.command.contains("--fake-child-sleep")
+                })
+                .map(|row| row.pid)
+                .collect();
+            let children = table
+                .iter()
+                .filter(|row| {
+                    fixture.owned.contains(&row.pid) && row.command.contains("--fake-child-sleep")
+                })
+                .count();
+            if roots.len() == 2 && children == 2 {
+                break roots;
+            }
+            assert!(
+                fixture.owner.try_wait().expect("owner state").is_none(),
+                "owner must launch workers: {}",
+                std::fs::read_to_string(repository.root.join("cli.log")).expect("log")
+            );
+            assert!(
+                Instant::now() < until,
+                "both agents and descendants must appear: {table:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            Command::new("kill")
+                .args([signal, &fixture.owner.id().to_string()])
+                .status()
+                .expect("send signal")
+                .success()
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let exit = loop {
+            if let Some(exit) = fixture.owner.try_wait().expect("owner exit") {
+                break exit;
+            }
+            assert!(Instant::now() < until, "cancellation must drain promptly");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!exit.success(), "cancelled work cannot deliver");
+        let until = Instant::now() + Duration::from_secs(1);
+        let survivors = loop {
+            let survivors: Vec<_> = process_table()
+                .into_iter()
+                .filter(|row| fixture.owned.contains(&row.pid) && !row.state.starts_with('Z'))
+                .collect();
+            if survivors.is_empty() || Instant::now() >= until {
+                break survivors;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            survivors.is_empty(),
+            "{mode} {signal} left orphan agents/descendants in process table: {survivors:?}"
+        );
+        let attempts = std::fs::read_dir(repository.state.join("attempts"))
+            .expect("attempts")
+            .map(|entry| entry.expect("attempt").path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts.len(),
+            roots.len(),
+            "no pending candidate, reviewer or task is admitted after cancellation"
+        );
+        let events = repository.events(kaisa_domain::EventKind::AttemptStateChanged);
+        for attempt in attempts {
+            let subject = attempt
+                .file_name()
+                .expect("attempt id")
+                .to_str()
+                .expect("UTF-8");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.subject == subject && event.payload.contains("terminated")),
+                "every running agent has a stopped ledger outcome: {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.subject == subject && event.payload.contains("reclaimed")),
+                "every stopped attempt finishes cleanup"
+            );
+        }
+        assert!(
+            repository
+                .events(kaisa_domain::EventKind::MissionVerified)
+                .is_empty(),
+            "cancelled missions never deliver"
+        );
+        if mode == "mission" {
+            assert!(
+                kaisa_ledger::EventStore::open_read_only(&repository.state.join("kaisa.db"))
+                    .expect("ledger")
+                    .task_progress()
+                    .expect("progress")
+                    .running
+                    .is_empty(),
+                "cancelled tasks settle in status"
+            );
+        }
+        fixture.owned.clear();
+        fixture.identities.clear();
+    }
+
+    #[test]
+    fn sigint_stops_parallel_mission_trees() {
+        cancel("mission", "-INT");
+    }
+    #[test]
+    fn sigterm_stops_parallel_mission_trees() {
+        cancel("mission", "-TERM");
+    }
+    #[test]
+    fn sigint_stops_candidate_trees() {
+        cancel("candidates", "-INT");
+    }
+    #[test]
+    fn sigterm_stops_candidate_trees() {
+        cancel("candidates", "-TERM");
+    }
+}

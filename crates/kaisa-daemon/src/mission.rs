@@ -13,7 +13,9 @@ use kaisa_workspace::{Candidate, freeze_candidate};
 use serde_json::json;
 
 use crate::gate::Delivery;
-use crate::goal::{GoalError, GoalOutcome, GoalRequest, ParallelAgentLauncher, at, run_goal};
+use crate::goal::{
+    GoalError, GoalOutcome, GoalRequest, ParallelAgentLauncher, at, check_cancellation, run_goal,
+};
 use crate::ids::{fresh_suffix, now_ms};
 use crate::integrate::{IntegrationError, check_write_set, merge_commits};
 use crate::scheduler::Scheduler;
@@ -170,6 +172,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
         verification: None,
     };
     loop {
+        check_cancellation()?;
         let wave = scheduler.next_wave().map_err(at("scheduling"))?;
         if wave.is_empty() {
             break;
@@ -178,6 +181,9 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
         // race may reorder admission. All parents come from successful, preserved task gates.
         let mut prepared = Vec::new();
         for task in wave {
+            if check_cancellation().is_err() {
+                break;
+            }
             let parents: Vec<_> = task
                 .depends_on
                 .iter()
@@ -218,17 +224,20 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
             )?;
             prepared.push((task, base));
         }
+        let cancellation = kaisa_sys::Cancellation::current().unwrap_or_default();
         let results = std::thread::scope(|scope| {
             let handles: Vec<_> = prepared
                 .iter()
                 .map(|(task, base)| {
-                    scope.spawn(move || {
+                    let cancellation = &cancellation;
+                    let mission = &mission;
+                    scope.spawn(move || cancellation.scope(|| {
                         let start = Instant::now();
                         let goal = request
                             .instructions
                             .get(&task.id)
                             .map_or("", String::as_str);
-                        let result = (|| {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let (attempt, candidate, passed) = if policy.verify_each_task {
                                 let result = run_verified_task(
                                     &verified_request(request, goal, &task.write_set),
@@ -288,9 +297,19 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                                 succeeded: passed && conflict.is_none(),
                                 conflict,
                             })
-                        })();
-                        (result, start.elapsed().as_millis())
-                    })
+                        })).unwrap_or_else(|_| Err(GoalError {
+                            step: "task worker",
+                            detail: "worker panicked; admitted siblings drained".into(),
+                        }));
+                        let succeeded = result.as_ref().is_ok_and(|result| result.succeeded);
+                        record_progress(
+                            request.state_directory,
+                            EventKind::TaskFinished,
+                            task.id.as_str(),
+                            json!({"mission_id":mission,"succeeded":succeeded,"elapsed_ms":start.elapsed().as_millis(),"base":base,"error":result.as_ref().err().map(ToString::to_string)}),
+                        )?;
+                        result
+                    }))
                 })
                 .collect();
             // Never return while a sibling owns a process, even when another worker errors.
@@ -298,26 +317,17 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                 .into_iter()
                 .map(|handle| {
                     handle.join().unwrap_or_else(|_| {
-                        (
-                            Err(GoalError {
-                                step: "task worker",
-                                detail: "worker panicked; admitted siblings drained".into(),
-                            }),
-                            0,
-                        )
+                        Err(GoalError {
+                            step: "task worker",
+                            detail: "worker panicked; admitted siblings drained".into(),
+                        })
                     })
                 })
                 .collect::<Vec<_>>()
         });
         let mut infrastructure_error = None;
-        for ((task, base), (result, elapsed)) in prepared.into_iter().zip(results) {
+        for ((task, base), result) in prepared.into_iter().zip(results) {
             let succeeded = result.as_ref().is_ok_and(|result| result.succeeded);
-            record_progress(
-                request.state_directory,
-                EventKind::TaskFinished,
-                task.id.as_str(),
-                json!({"mission_id":mission,"succeeded":succeeded,"elapsed_ms":elapsed,"base":base,"error":result.as_ref().err().map(ToString::to_string)}),
-            )?;
             scheduler.finish(task.id.clone(), succeeded);
             settled.insert(task.id.clone());
             if !succeeded {
@@ -350,6 +360,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
                 }
             }
         }
+        check_cancellation()?;
         if let Some(error) = infrastructure_error {
             return Err(error);
         }
@@ -434,6 +445,7 @@ pub fn run_mission(request: &MissionRequest<'_>) -> Result<MissionOutcome, GoalE
         error.detail = format!("integrated verification: {}", error.detail);
         error
     })?;
+    check_cancellation()?;
     if matches!(verified.delivery, Delivery::Deliver { .. }) {
         record_progress(
             request.state_directory,

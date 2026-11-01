@@ -6,7 +6,7 @@ use kaisa_workspace::{Candidate, candidate_diff, freeze_candidate};
 use serde_json::json;
 
 use crate::gate::Delivery;
-use crate::goal::{GoalError, at};
+use crate::goal::{GoalError, at, check_cancellation};
 use crate::ids::fresh_suffix;
 use crate::mission::record_progress;
 use crate::team::{VerifiedOutcome, VerifiedRequest, run_verified_goal_from, verify_integration};
@@ -44,11 +44,17 @@ pub fn run_candidates(
         freeze_candidate(request.repository, "HEAD").map_err(at("resolving candidate base"))?;
     let mission = format!("mis_{}", fresh_suffix());
     let mut outcomes = Vec::new();
+    let cancellation = kaisa_sys::Cancellation::current().unwrap_or_default();
     for first in (0..count).step_by(request.policy.policy().max_parallel) {
+        check_cancellation()?;
         let end = (first + request.policy.policy().max_parallel).min(count);
         let wave = std::thread::scope(|scope| {
             let handles: Vec<_> = (first..end)
-                .map(|_| scope.spawn(|| run_verified_goal_from(request, &base.commit)))
+                .map(|_| {
+                    scope.spawn(|| {
+                        cancellation.scope(|| run_verified_goal_from(request, &base.commit))
+                    })
+                })
                 .collect();
             handles
                 .into_iter()
@@ -61,6 +67,7 @@ pub fn run_candidates(
                 .collect::<Vec<_>>()
         });
         outcomes.extend(wave);
+        check_cancellation()?;
     }
     let passing: Vec<(usize, Candidate)> = outcomes
         .iter()
@@ -113,6 +120,7 @@ pub fn run_candidates(
         }
     }
     for (index, candidate) in passing {
+        check_cancellation()?;
         let goal = format!(
             "{}\n\n{}\nCurrent alternative index: {index}",
             request.goal, comparison
@@ -122,6 +130,7 @@ pub fn run_candidates(
             ..*request
         };
         let verified = verify_integration(&compared_request, &base.commit, &candidate)?;
+        check_cancellation()?;
         if matches!(verified.delivery, Delivery::Deliver { .. }) {
             record_progress(
                 request.state_directory,

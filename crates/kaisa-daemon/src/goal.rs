@@ -276,6 +276,13 @@ pub(crate) fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError
     }
 }
 
+pub(crate) fn check_cancellation() -> Result<(), GoalError> {
+    if let Some(token) = kaisa_sys::Cancellation::current() {
+        token.check().map_err(at("mission cancellation"))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn record(
     ledger: &mut EventStore,
     kind: EventKind,
@@ -401,6 +408,7 @@ fn run_goal_inner(
     context: &AttemptContext<'_>,
     reduced_notice: &mut Option<String>,
 ) -> Result<GoalOutcome, GoalError> {
+    check_cancellation()?;
     // An observed agent writes directly, which Kaisa's confinement would forbid.
     let confine_agent: bool = request.confine_agent && !request.observed;
     kaisa_sys::ensure_private_directory(request.state_directory)
@@ -557,7 +565,14 @@ fn run_goal_inner(
         let endpoint = kaisa_mcp::BrokerEndpoint::bind(&attempt_directory)
             .map_err(at("binding the attempt's broker"))?;
         let socket: PathBuf = endpoint.socket().to_owned();
-        (std::thread::spawn(move || endpoint.serve_one()), socket)
+        let cancellation = kaisa_sys::Cancellation::current();
+        (
+            std::thread::spawn(move || match cancellation {
+                Some(token) => token.scope(|| endpoint.serve_one()),
+                None => endpoint.serve_one(),
+            }),
+            socket,
+        )
     };
     let scratch: PathBuf = attempt_directory.join("scratch");
     std::fs::create_dir_all(&scratch).map_err(at("preparing the agent's scratch"))?;
@@ -725,6 +740,14 @@ fn run_goal_inner(
             });
         }
     };
+    if kaisa_sys::Cancellation::current().is_some_and(|token| token.is_cancelled()) {
+        record(
+            &mut ledger,
+            EventKind::AttemptStateChanged,
+            attempt.as_str(),
+            json!({"reason": "mission cancelled"}),
+        )?;
+    }
     if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {
         record(
             &mut ledger,

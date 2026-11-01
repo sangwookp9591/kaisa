@@ -43,6 +43,8 @@ pub struct CapturedRun {
 /// Runs `spec` under `confinement` with `input` on its standard input (then closed), waiting at
 /// most `deadline` and keeping at most `cap` bytes of output. Output beyond the cap is read and dropped, so a chatty process cannot stall on a full
 /// pipe. A run past its deadline is ended with its whole process tree.
+/// Inside a [`crate::Cancellation::scope`], cancellation also ends the tree and reports
+/// [`ProcessExit::Terminated`]; a stop requested before spawn returns `Interrupted`.
 ///
 /// # Errors
 ///
@@ -84,6 +86,10 @@ pub fn run_captured_reporting(
     started: &mut dyn FnMut(Option<crate::ProcessIdentity>) -> io::Result<()>,
 ) -> io::Result<CapturedRun> {
     *created = false;
+    let cancellation = crate::Cancellation::current();
+    if let Some(token) = &cancellation {
+        token.check()?;
+    }
     let (reader, writer) = io::pipe()?;
     let (mut process, stdin): (OwnedProcess, Option<Box<dyn io::Write + Send>>) =
         spawn_captured(spec, confinement, !input.is_empty(), writer, created)?;
@@ -102,7 +108,26 @@ pub fn run_captured_reporting(
             let _ = std::io::Write::write_all(&mut stdin, &input);
         });
     }
-    let exit: Option<ProcessExit> = process.wait_timeout(deadline)?;
+    let exit: Option<ProcessExit> = if let Some(token) = cancellation {
+        let until = std::time::Instant::now() + deadline;
+        loop {
+            if token.is_cancelled() {
+                // Use the same descendant discovery/process-group or Job Object cleanup as
+                // deadline expiry, then return a real terminated exit for the ledger.
+                process.kill_tree()?;
+                break Some(process.wait()?);
+            }
+            let remaining = until.saturating_duration_since(std::time::Instant::now());
+            if let Some(exit) = process.wait_timeout(remaining.min(Duration::from_millis(20)))? {
+                break Some(exit);
+            }
+            if remaining.is_zero() {
+                break None;
+            }
+        }
+    } else {
+        process.wait_timeout(deadline)?
+    };
     // Ends the tree on timeout, and any leftovers that would keep the pipe open otherwise.
     process.kill_tree()?;
     if exit.is_none() {

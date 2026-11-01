@@ -18,6 +18,48 @@ use kaisa_sys::{ProcessExit, ProcessSpec};
 const DEFAULT_MODEL: &str = "sonnet";
 const DEFAULT_EFFORT: &str = "medium";
 
+// Installed only for planned missions and best-of-N, so plain goals keep their existing
+// signal behaviour. Handlers only request cancellation; owning workers stop and reap trees.
+fn with_mission_signals<T>(operation: impl FnOnce() -> T) -> io::Result<T> {
+    let signals = MissionSignals::install()?;
+    Ok(signals.cancellation.scope(operation))
+}
+
+struct MissionSignals {
+    cancellation: kaisa_sys::Cancellation,
+    #[cfg(unix)]
+    registrations: Vec<signal_hook::SigId>,
+}
+
+impl MissionSignals {
+    fn install() -> io::Result<Self> {
+        let flag = std::sync::Arc::default();
+        let signals = Self {
+            cancellation: kaisa_sys::Cancellation::from_flag(std::sync::Arc::clone(&flag)),
+            #[cfg(unix)]
+            registrations: Vec::new(),
+        };
+        #[cfg(unix)]
+        let mut signals = signals;
+        #[cfg(unix)]
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signals
+                .registrations
+                .push(signal_hook::flag::register(signal, flag.clone())?);
+        }
+        Ok(signals)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MissionSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
+}
+
 /// The agent to start: Claude Code in brokered mode, or another program given on the command
 /// line (used by tests with a scripted agent).
 struct AgentChoice {
@@ -486,22 +528,24 @@ impl GoalCommand {
                     return Ok(crate::EXIT_USAGE);
                 }
             };
-            return match kaisa_daemon::run_mission(&kaisa_daemon::MissionRequest {
-                repository,
-                state_directory: state,
-                plan: &plan,
-                instructions: &instructions,
-                launch: &developer,
-                reviewer: &reviewer,
-                checks: &checks,
-                policy: &policy,
-                kaisa_executable: &kaisa,
-                confine_agent: request.confine_agent,
-                observed: request.observed,
-                egress_hosts: request.egress_hosts,
-                agent_writable: request.agent_writable,
-                reduced_mode,
-            }) {
+            return match with_mission_signals(|| {
+                kaisa_daemon::run_mission(&kaisa_daemon::MissionRequest {
+                    repository,
+                    state_directory: state,
+                    plan: &plan,
+                    instructions: &instructions,
+                    launch: &developer,
+                    reviewer: &reviewer,
+                    checks: &checks,
+                    policy: &policy,
+                    kaisa_executable: &kaisa,
+                    confine_agent: request.confine_agent,
+                    observed: request.observed,
+                    egress_hosts: request.egress_hosts,
+                    agent_writable: request.agent_writable,
+                    reduced_mode,
+                })
+            })? {
                 Ok(outcome) => {
                     for (task, attempt) in &outcome.ran {
                         writeln!(out, "{task}: {}", attempt.summary())?;
@@ -528,7 +572,9 @@ impl GoalCommand {
             };
         }
         if self.candidates > 1 {
-            return match kaisa_daemon::run_candidates(&request, self.candidates) {
+            return match with_mission_signals(|| {
+                kaisa_daemon::run_candidates(&request, self.candidates)
+            })? {
                 Ok(outcome) => {
                     if let (Some(index), Some(verified)) = (outcome.selected, outcome.verification)
                     {

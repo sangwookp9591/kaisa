@@ -5,6 +5,7 @@
 
 #[cfg(windows)]
 mod appcontainer;
+mod cancellation;
 mod capture;
 #[cfg(windows)]
 mod conpty;
@@ -38,6 +39,7 @@ mod windows_command_line;
 
 #[cfg(windows)]
 pub use appcontainer::{AppContainerProfile, CapabilitySid, ContainerAccess};
+pub use cancellation::Cancellation;
 pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
