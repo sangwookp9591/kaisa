@@ -117,8 +117,10 @@ fn is_check_definition(path: &str) -> bool {
     }
     let parts: Vec<&str> = path.split('/').collect();
     let directories = &parts[..parts.len() - 1];
+    // Cargo's legacy extension-less config (`.cargo/config`) is read next to `config.toml`.
     // `config.yml` only names a pipeline inside `.circleci/`; elsewhere it is ordinary data.
-    CI_CONFIG_FILES.contains(&file)
+    (file == "config" && directories.last() == Some(&".cargo"))
+        || CI_CONFIG_FILES.contains(&file)
         || (file == "config.yml" && directories.last() == Some(&".circleci"))
         || directories
             .windows(2)
@@ -314,7 +316,7 @@ fn is_test_file(path: &str) -> bool {
 fn supported_source(path: &str) -> bool {
     matches!(
         path.rsplit('.').next(),
-        Some("rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go")
+        Some("rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "go")
     )
 }
 
@@ -509,7 +511,9 @@ fn declarations(t: &[String], extension: &str) -> usize {
         "rs" => &["#[test]", "#[tokio::test"],
         "py" => &["def test_"],
         "go" => &["func Test"],
-        "js" | "jsx" | "ts" | "tsx" => &["it(", "test(", "describe("],
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" => {
+            &["it(", "test(", "describe("]
+        }
         _ => &[],
     };
     markers.iter().map(|m| construct_count(t, m)).sum()
@@ -520,7 +524,25 @@ fn assertions(t: &[String], extension: &str) -> usize {
         "rs" => &["assert!", "assert_eq!", "assert_ne!"],
         "py" => &["assert", "self.assertEqual(", "self.assertTrue("],
         "go" => &["assert."],
-        _ => &["expect(", "assert("],
+        // `node:assert` checks count as assertions, so deleting tests that use them is seen.
+        _ => &[
+            "expect(",
+            "assert(",
+            "assert.ok(",
+            ".equal(",
+            ".notEqual(",
+            ".strictEqual(",
+            ".notStrictEqual(",
+            ".deepEqual(",
+            ".notDeepEqual(",
+            ".deepStrictEqual(",
+            ".notDeepStrictEqual(",
+            ".throws(",
+            ".doesNotThrow(",
+            ".rejects(",
+            ".doesNotReject(",
+            ".ifError(",
+        ],
     };
     markers.iter().map(|m| construct_count(t, m)).sum()
 }
@@ -603,15 +625,28 @@ fn test_scope(source: &str, t: &[String], extension: &str, test_file: bool) -> V
             continue;
         }
         let start = i;
-        while i < t.len() && t[i] != "{" {
-            i += 1;
+        if extension == "go" {
+            while i < t.len() && t[i] != "{" {
+                i += 1;
+            }
+        } else {
+            // `test("name", { skip: true }, () => { … })`: the call's own parentheses delimit
+            // the test, not the first brace, which may be an options object.
+            while i < t.len() && t[i] != "(" {
+                i += 1;
+            }
         }
+        let (open, close) = if extension == "go" {
+            ("{", "}")
+        } else {
+            ("(", ")")
+        };
         let mut depth = 0;
         while i < t.len() {
-            if t[i] == "{" {
+            if t[i] == open {
                 depth += 1;
             }
-            if t[i] == "}" {
+            if t[i] == close {
                 depth -= 1;
                 if depth == 0 {
                     i += 1;
@@ -646,8 +681,10 @@ fn tautologies(t: &[String]) -> usize {
         if t[i] == "assert" && t.get(i + 1).is_some_and(|s| s == "True") {
             count += 1;
         }
-        if !matches!(t[i].as_str(), "assert" | "assert_eq")
-            || t.get(i + 1).is_none_or(|s| s != "!")
+        if !matches!(
+            t[i].as_str(),
+            "assert" | "assert_eq" | "debug_assert" | "debug_assert_eq"
+        ) || t.get(i + 1).is_none_or(|s| s != "!")
             || t.get(i + 2).is_none_or(|s| s != "(")
         {
             continue;
@@ -676,7 +713,7 @@ fn tautologies(t: &[String]) -> usize {
             count += 1;
             continue;
         }
-        if t[i] == "assert_eq" {
+        if matches!(t[i].as_str(), "assert_eq" | "debug_assert_eq") {
             if let Some(comma) = args.iter().position(|s| s == ",") {
                 let rhs = &args[comma + 1..];
                 let end = rhs.iter().position(|s| s == ",").unwrap_or(rhs.len());
@@ -688,6 +725,171 @@ fn tautologies(t: &[String]) -> usize {
             let rhs = &args[eq + 2..];
             let end = rhs.iter().position(|s| s == ",").unwrap_or(rhs.len());
             if eq > 0 && args[..eq] == rhs[..end] {
+                count += 1;
+            }
+        }
+    }
+    count + node_tautologies(t)
+}
+
+/// Whether the attribute tokens (between `#[` and `]`) mark a test: `test`, `tokio::test(…)`.
+fn is_test_attribute(attribute: &[String]) -> bool {
+    let head: Vec<&String> = attribute.iter().take_while(|token| *token != "(").collect();
+    head.last().is_some_and(|token| *token == "test")
+}
+
+/// `#[cfg(…)]` other than exactly `#[cfg(test)]`.
+fn is_foreign_cfg(attribute: &[String]) -> bool {
+    attribute.first().is_some_and(|token| token == "cfg") && attribute != tokens("cfg(test)")
+}
+
+/// Tests, or modules holding tests, that a `#[cfg(…)]` other than `cfg(test)` can compile away.
+fn cfg_gated_tests(t: &[String]) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i + 1 < t.len() {
+        if t[i] != "#" || t[i + 1] != "[" {
+            i += 1;
+            continue;
+        }
+        // One run of consecutive attributes belongs to the item that follows it.
+        let (mut test, mut foreign) = (false, false);
+        while i + 1 < t.len() && t[i] == "#" && t[i + 1] == "[" {
+            let mut depth = 0;
+            let mut end = i + 1;
+            while end < t.len() {
+                if t[end] == "[" {
+                    depth += 1;
+                }
+                if t[end] == "]" {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                end += 1;
+            }
+            let attribute = &t[(i + 2).min(end)..end.min(t.len())];
+            test |= is_test_attribute(attribute);
+            foreign |= is_foreign_cfg(attribute);
+            i = end + 1;
+        }
+        if !foreign {
+            continue;
+        }
+        let mut item = i;
+        while t
+            .get(item)
+            .is_some_and(|token| matches!(token.as_str(), "pub" | "async" | "unsafe"))
+        {
+            item += 1;
+        }
+        match t.get(item).map(String::as_str) {
+            Some("fn") if test => count += 1,
+            Some("mod") => {
+                let Some(open) = t[item..].iter().position(|token| token == "{") else {
+                    continue;
+                };
+                let mut depth = 0;
+                let body_end = t[item + open..]
+                    .iter()
+                    .position(|token| {
+                        if token == "{" {
+                            depth += 1;
+                        }
+                        if token == "}" {
+                            depth -= 1;
+                        }
+                        depth == 0
+                    })
+                    .map_or(t.len(), |end| item + open + end);
+                let body = &t[item + open..body_end];
+                let holds_tests = body
+                    .windows(3)
+                    .any(|window| window[0] == "[" && window[2] == "]" && window[1] == "test")
+                    || construct_count(body, "tokio::test") > 0;
+                if holds_tests {
+                    count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Arguments of the call whose `(` is at `open`: comma-separated token slices, and the index of
+/// the closing `)`.
+fn call_arguments(t: &[String], open: usize) -> Option<(Vec<&[String]>, usize)> {
+    let mut depth = 0;
+    let mut arguments = Vec::new();
+    let mut start = open + 1;
+    for (index, token) in t.iter().enumerate().skip(open) {
+        match token.as_str() {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    arguments.push(&t[start..index]);
+                    return Some((arguments, index));
+                }
+            }
+            "," if depth == 1 => {
+                arguments.push(&t[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Node assertions that cannot fail: `assert(true)`, `assert.ok(true)`, `assert.equal(a, a)`
+/// and `expect(a).toBe(a)`. Arguments with calls are not compared; a call may differ per run.
+fn node_tautologies(t: &[String]) -> usize {
+    let mut count = 0;
+    for i in 0..t.len() {
+        let comparison = ["equal", "strictEqual", "deepEqual", "deepStrictEqual"];
+        if t[i] == "assert" {
+            let mut at = i + 1;
+            let mut method = "";
+            while t.get(at).is_some_and(|token| token == ".") && t.get(at + 1).is_some() {
+                method = t[at + 1].as_str();
+                at += 2;
+            }
+            if t.get(at).is_none_or(|token| token != "(") {
+                continue;
+            }
+            let Some((arguments, _)) = call_arguments(t, at) else {
+                continue;
+            };
+            let plain = |argument: &[String]| argument.iter().all(|token| token != "(");
+            if matches!(method, "" | "ok" | "strict") {
+                if arguments.first().is_some_and(|a| *a == ["true"]) {
+                    count += 1;
+                }
+            } else if comparison.contains(&method)
+                && arguments.len() >= 2
+                && !arguments[0].is_empty()
+                && plain(arguments[0])
+                && arguments[0] == arguments[1]
+            {
+                count += 1;
+            }
+        } else if t[i] == "expect" && t.get(i + 1).is_some_and(|token| token == "(") {
+            let Some((arguments, close)) = call_arguments(t, i + 1) else {
+                continue;
+            };
+            let matcher = t.get(close + 2).map(String::as_str);
+            if t.get(close + 1).is_some_and(|token| token == ".")
+                && matches!(matcher, Some("toBe" | "toEqual" | "toStrictEqual"))
+                && t.get(close + 3).is_some_and(|token| token == "(")
+                && let Some((expected, _)) = call_arguments(t, close + 3)
+                && let (Some(actual), Some(expected)) = (arguments.first(), expected.first())
+                && !actual.is_empty()
+                && actual.iter().all(|token| token != "(")
+                && actual == expected
+            {
                 count += 1;
             }
         }
@@ -806,6 +1008,26 @@ fn compare_test_source(path: &str, before: &str, after: &str, findings: &mut Vec
                 signal(marker, a, b);
             }
         }
+        let (a, b) = (cfg_gated_tests(&old), cfg_gated_tests(&new));
+        if b > a {
+            signal("tests gated by #[cfg(..)] added", a, b);
+        }
+        // Adding `#[should_panic]` to a test that was not new turns a failing assertion into an
+        // expected panic. More attributes than new tests means an existing test was changed.
+        let (a, b) = (
+            construct_count(&old, "#[should_panic"),
+            construct_count(&new, "#[should_panic"),
+        );
+        if b > a && b - a > new_tests.saturating_sub(old_tests) {
+            signal("#[should_panic added", a, b);
+        }
+        let (a, b) = (
+            construct_count(&old_scope, "catch_unwind"),
+            construct_count(&new_scope, "catch_unwind"),
+        );
+        if b > a && test_context {
+            signal("catch_unwind added to tests", a, b);
+        }
         let cfg_ignore = |t: &[String]| {
             t.split(|s| s == "]")
                 .filter(|attr| {
@@ -827,8 +1049,26 @@ fn compare_test_source(path: &str, before: &str, after: &str, findings: &mut Vec
             signal("disabled doctest added", disabled_a, disabled_b);
         }
     }
+    // `test("x", { skip: true }, …)` / `{ todo: "later" }`: a skip or todo option on a test.
+    let js_option = |t: &[String]| {
+        t.windows(4)
+            .filter(|w| {
+                matches!(w[0].as_str(), "{" | ",")
+                    && matches!(w[1].as_str(), "skip" | "todo")
+                    && w[2] == ":"
+                    && w[3] != "false"
+            })
+            .count()
+    };
+    if !matches!(extension, "rs" | "py" | "go") {
+        let (a, b) = (js_option(&old), js_option(&new));
+        if b > a {
+            signal("skip/todo option added", a, b);
+        }
+    }
     for marker in [
         "#[ignore",
+        ".todo",
         ".skip",
         ".skipif",
         ".only",
@@ -1492,6 +1732,195 @@ mod tests {
                 "{info} changes doctest execution: {signals:?}"
             );
         }
+    }
+
+    /// A Node test file using `node:assert`, with two tests.
+    const NODE_TESTS_WITH_ASSERT: &str = "test('a total is returned', () => { assert.equal(total(), expectedTotal()); });\ntest('an empty cart is rejected', async () => { await assert.rejects(checkout(emptyCart())); });\n";
+
+    fn weakening_mentions(signals: &[String], label: &str) -> bool {
+        signals.iter().any(|signal| signal.contains(label))
+    }
+
+    #[test]
+    fn deleting_node_tests_that_assert_with_node_assert_is_reported() {
+        let kept =
+            "test('a total is returned', () => { assert.equal(total(), expectedTotal()); });\n";
+        for deleted_assertion in [
+            "assert.equal(total(), expectedTotal())",
+            "assert.strictEqual(total(), expectedTotal())",
+            "assert.deepEqual(total(), expectedTotal())",
+            "assert.deepStrictEqual(total(), expectedTotal())",
+            "assert.throws(() => checkout(emptyCart()))",
+            "await assert.rejects(checkout(emptyCart()))",
+        ] {
+            let before = format!(
+                "{kept}test('an empty cart is rejected', async () => {{ {deleted_assertion}; }});\n"
+            );
+            let signals = weakening_for("test/cart.test.mjs", &before, Some(kept));
+            assert!(
+                weakening_mentions(&signals, "tests and assertions decreased"),
+                "deleting a test built on `{deleted_assertion}` is weakening: {signals:?}"
+            );
+        }
+        assert!(
+            weakening_for(
+                "test/cart.test.mjs",
+                NODE_TESTS_WITH_ASSERT,
+                Some(&format!("{NODE_TESTS_WITH_ASSERT}// reviewed\n"))
+            )
+            .is_empty(),
+            "a Node test file changed only by a comment is not weakened"
+        );
+    }
+
+    #[test]
+    fn skip_and_todo_options_and_variants_on_node_tests_are_reported() {
+        let before =
+            "test('a total is returned', () => { assert.equal(total(), expectedTotal()); });\n";
+        for after in [
+            "test('a total is returned', { skip: true }, () => { assert.equal(total(), expectedTotal()); });\n",
+            "test('a total is returned', { todo: true }, () => { assert.equal(total(), expectedTotal()); });\n",
+            "test('a total is returned', { skip: 'flaky' }, () => { assert.equal(total(), expectedTotal()); });\n",
+            "test('a total is returned', { todo: 'later' }, () => { assert.equal(total(), expectedTotal()); });\n",
+            "test.skip('a total is returned', () => { assert.equal(total(), expectedTotal()); });\n",
+            "test.todo('a total is returned', () => { assert.equal(total(), expectedTotal()); });\n",
+            "it.skip('a total is returned', () => { assert.equal(total(), expectedTotal()); });\n",
+            "it.todo('a total is returned');\n",
+            "describe.skip('cart', () => { it('a total is returned', () => { assert.equal(total(), expectedTotal()); }); });\n",
+        ] {
+            let signals = weakening_for("test/cart.test.mjs", before, Some(after));
+            assert!(
+                !signals.is_empty(),
+                "disabling a Node test must be visible: {after}"
+            );
+        }
+        for after in [
+            "test('a total is returned', { skip: false }, () => { assert.equal(total(), expectedTotal()); });\n",
+            "test('a total is returned', { concurrency: true }, () => { assert.equal(total(), expectedTotal()); });\n",
+        ] {
+            let signals = weakening_for("test/cart.test.mjs", before, Some(after));
+            assert!(
+                signals.is_empty(),
+                "options that keep the test running are not weakening: {after}: {signals:?}"
+            );
+        }
+    }
+
+    const RUST_TEST_FILE: &str =
+        "#[test]\nfn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n";
+
+    #[test]
+    fn adding_should_panic_to_an_existing_rust_test_is_reported_but_a_new_panic_test_is_not() {
+        let weakened = "#[test]\n#[should_panic]\nfn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n";
+        let signals = weakening_for("tests/cart.rs", RUST_TEST_FILE, Some(weakened));
+        assert!(
+            weakening_mentions(&signals, "#[should_panic added"),
+            "{signals:?}"
+        );
+        let with_a_new_panic_test = format!(
+            "{RUST_TEST_FILE}#[test]\n#[should_panic(expected = \"empty cart\")]\nfn an_empty_cart_panics_when_priced() {{ price(&empty_cart()); }}\n"
+        );
+        let signals = weakening_for(
+            "tests/cart.rs",
+            RUST_TEST_FILE,
+            Some(&with_a_new_panic_test),
+        );
+        assert!(
+            !weakening_mentions(&signals, "should_panic"),
+            "a new test expecting a panic is new coverage: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn gating_rust_tests_or_test_modules_behind_a_cfg_is_reported() {
+        let gated_fn = "#[test]\n#[cfg(feature = \"slow\")]\nfn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n";
+        let gated_fn_cfg_first = "#[cfg(target_os = \"freebsd\")]\n#[test]\nfn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n";
+        let gated_mod = "#[cfg(all(test, windows))]\nmod tests {\n    #[test]\n    fn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n}\n";
+        let ungated_mod = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn the_total_is_returned() { assert_eq!(total(), expected_total()); }\n}\n";
+        for after in [gated_fn, gated_fn_cfg_first] {
+            let signals = weakening_for("tests/cart.rs", RUST_TEST_FILE, Some(after));
+            assert!(
+                weakening_mentions(&signals, "gated by #[cfg"),
+                "{after}: {signals:?}"
+            );
+        }
+        let signals = weakening_for("src/cart.rs", ungated_mod, Some(gated_mod));
+        assert!(
+            weakening_mentions(&signals, "gated by #[cfg"),
+            "{signals:?}"
+        );
+        let signals = weakening_for(
+            "src/cart.rs",
+            ungated_mod,
+            Some(&format!("{ungated_mod}// reviewed\n")),
+        );
+        assert!(
+            signals.is_empty(),
+            "plain cfg(test) is how unit tests are written: {signals:?}"
+        );
+        let platform_helper = format!("{ungated_mod}#[cfg(unix)]\nfn unix_only_helper() {{}}\n");
+        let signals = weakening_for("src/cart.rs", ungated_mod, Some(&platform_helper));
+        assert!(
+            !weakening_mentions(&signals, "gated by #[cfg"),
+            "a cfg on non-test code is not test gating: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn wrapping_rust_test_assertions_in_catch_unwind_is_reported() {
+        let wrapped = "#[test]\nfn the_total_is_returned() { let _ = std::panic::catch_unwind(|| { assert_eq!(total(), expected_total()); }); }\n";
+        let signals = weakening_for("tests/cart.rs", RUST_TEST_FILE, Some(wrapped));
+        assert!(weakening_mentions(&signals, "catch_unwind"), "{signals:?}");
+    }
+
+    #[test]
+    fn self_comparing_assertions_are_reported_in_rust_and_node() {
+        for (path, before, after) in [
+            (
+                "tests/cart.rs",
+                RUST_TEST_FILE,
+                "#[test]\nfn the_total_is_returned() { let t = total(); debug_assert_eq!(t, t); }\n",
+            ),
+            (
+                "tests/cart.rs",
+                RUST_TEST_FILE,
+                "#[test]\nfn the_total_is_returned() { let t = total(); assert!(t == t); }\n",
+            ),
+            (
+                "test/cart.test.mjs",
+                NODE_TESTS_WITH_ASSERT,
+                "test('a total is returned', () => { assert.equal(t, t); });\ntest('an empty cart is rejected', async () => { assert.ok(true); });\n",
+            ),
+            (
+                "test/cart.test.mjs",
+                NODE_TESTS_WITH_ASSERT,
+                "test('a total is returned', () => { assert.strictEqual(t, t); });\ntest('an empty cart is rejected', async () => { assert(true); });\n",
+            ),
+            (
+                "test/cart.test.mjs",
+                NODE_TESTS_WITH_ASSERT,
+                "test('a total is returned', () => { expect(t).toBe(t); });\ntest('an empty cart is rejected', async () => { assert.ok(true); });\n",
+            ),
+        ] {
+            let signals = weakening_for(path, before, Some(after));
+            assert!(
+                weakening_mentions(&signals, "tautological assertions added"),
+                "{after}: {signals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_legacy_cargo_config_without_extension_is_a_check_definition() {
+        assert_eq!(
+            check_definitions_changed_by(".cargo/config"),
+            vec![".cargo/config".to_owned()],
+            "Cargo still reads .cargo/config next to config.toml; it can redefine the test runner"
+        );
+        assert!(
+            check_definitions_changed_by("docs/config").is_empty(),
+            "an extension-less file named config elsewhere is ordinary data"
+        );
     }
 
     #[test]
