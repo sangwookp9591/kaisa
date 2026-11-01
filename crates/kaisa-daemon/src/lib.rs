@@ -18,6 +18,8 @@ mod route;
 mod sandbox;
 /// Read-only specification agent and strict final-answer parser.
 pub mod spec_agent;
+/// Context-aware review for specification-bound goals.
+pub mod staged_review;
 mod team;
 mod test_review;
 mod verify;

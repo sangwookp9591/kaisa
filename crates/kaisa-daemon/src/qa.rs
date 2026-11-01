@@ -1815,6 +1815,47 @@ mod tests {
     };
     use crate::goal::{GoalOutcome, record, record_execution};
 
+    #[test]
+    fn a_staged_review_bundle_in_private_state_never_enters_blind_qa_context() {
+        let root =
+            std::env::temp_dir().join(format!("kaisa-review-qa-boundary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repository = root.join("candidate");
+        let state = root.join("state");
+        std::fs::create_dir_all(repository.join("src")).expect("candidate fixture");
+        std::fs::create_dir_all(&state).expect("separate private state");
+        std::fs::write(repository.join("src/lib.rs"), "pub fn rotate() {}\n")
+            .expect("public signature");
+        let input = crate::staged_review::StagedReviewInput {
+            developer_final_answer: DEVELOPER_MARKER.into(),
+            revision_history: DEVELOPER_MARKER.into(),
+            human_interventions: DEVELOPER_MARKER.into(),
+            ..Default::default()
+        };
+        let bundle = crate::staged_review::context_bundle(&input).to_string();
+        std::fs::write(state.join("review-only.json"), &bundle)
+            .expect("review-only persistence outside candidate");
+        let interface = crate::qa_interface::extract_public_interface(&repository)
+            .expect("candidate public interface");
+        let pack = super::qa_context(
+            &json!({"criteria":[{"id":CRITERION}]}),
+            &interface,
+            QaKind::Adversarial,
+            &QaToolchain::Rust {
+                cargo: PathBuf::from("cargo"),
+            },
+        );
+        assert!(
+            bundle.contains(DEVELOPER_MARKER),
+            "the review fixture really contains developer reasoning"
+        );
+        assert!(
+            !pack.contains(DEVELOPER_MARKER) && !pack.contains("stage3_decisions_and_history"),
+            "Blind QA cannot discover review bundles outside its public-interface checkout"
+        );
+        std::fs::remove_dir_all(root).expect("remove boundary fixture");
+    }
+
     const CRITERION: &str = "AC-1";
     const PRIVATE_MARKER: &str = "PRIVATE_TEST_SOURCE_SHOULD_NOT_REACH_DEVELOPER";
     const DEVELOPER_MARKER: &str = "DEVELOPER_REASONING_AND_TEST_RESULTS_MUST_NOT_REACH_QA";
