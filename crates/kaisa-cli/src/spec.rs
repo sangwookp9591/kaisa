@@ -1,144 +1,25 @@
 //! `kaisa spec`: draft, inspect and approve immutable specification versions.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use kaisa_domain::spec::approval::{ApprovalTerminal, confirm};
+use kaisa_domain::spec::approval::confirm_on_process_terminal;
 use kaisa_domain::{ReducedModeBasis, Role, SpecApproval, SpecId, WriteSet};
 use kaisa_ledger::spec::{SpecStore, StoredSpec};
 
-const USAGE: &str = "usage: kaisa spec draft \"<requirements>\"|--file <path> [--id <spec_id>] [--agent-program <path> --agent-arg <arg> ...]\n       kaisa spec show <id> [--version <n>]\n       kaisa spec list\n       kaisa spec approve <id> [--provisional]";
+const USAGE: &str = "usage: kaisa spec draft \"<requirements>\"|--file <path> [--id <spec_id>] [--agent-program <path> --agent-arg <arg> ...]\n       kaisa spec show <id> [--version <n>]\n       kaisa spec list\n       kaisa spec approve <id> [--version <n>] [--provisional]";
 
-struct Terminal;
-fn command_text(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(format!(
-            "{program} could not verify approval identity or ancestry"
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|e| e.to_string())
-}
-#[cfg(unix)]
-fn attempt_ancestor() -> Result<bool, String> {
-    let processes = command_text("/bin/ps", &["-axo", "pid=,ppid=,comm="])?;
-    let mut rows = std::collections::BTreeMap::new();
-    for line in processes.lines() {
-        let mut fields = line.split_whitespace();
-        let Some(pid) = fields.next().and_then(|n| n.parse::<u32>().ok()) else {
-            continue;
-        };
-        let parent = fields
-            .next()
-            .and_then(|n| n.parse::<u32>().ok())
-            .ok_or("invalid process ancestry")?;
-        let program = line
-            .trim_start()
-            .split_once(char::is_whitespace)
-            .and_then(|(_, rest)| rest.trim_start().split_once(char::is_whitespace))
-            .map(|(_, program)| program.trim())
-            .unwrap_or_default();
-        rows.insert(pid, (parent, program));
-    }
-    kaisa_ancestor(&rows, std::process::id())
-}
-#[cfg(windows)]
-fn attempt_ancestor() -> Result<bool, String> {
-    let text = command_text(
-        "powershell.exe",
-        &[
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress",
-        ],
-    )?;
-    let processes: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let rows = processes
-        .as_array()
-        .ok_or("cannot verify process ancestry")?;
-    let mut snapshot = std::collections::BTreeMap::new();
-    for row in rows {
-        let pid = row["ProcessId"]
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .ok_or("invalid process id")?;
-        let parent = row["ParentProcessId"]
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .ok_or("invalid parent process id")?;
-        let name = row["Name"].as_str().ok_or("invalid process name")?;
-        snapshot.insert(pid, (parent, name));
-    }
-    kaisa_ancestor(&snapshot, std::process::id())
-}
-#[cfg(not(any(unix, windows)))]
-fn attempt_ancestor() -> Result<bool, String> {
-    Err("process ancestry verification is unsupported on this platform".into())
-}
-/// Every ancestor must be accounted for; absence is not evidence of a human shell.
-fn kaisa_ancestor(
-    rows: &std::collections::BTreeMap<u32, (u32, &str)>,
-    pid: u32,
-) -> Result<bool, String> {
-    let mut current = pid;
-    let mut visited = std::collections::BTreeSet::new();
-    while current != 0 {
-        if !visited.insert(current) {
-            return Err("cycle in process ancestry".into());
-        }
-        let (parent, program) = rows.get(&current).ok_or("cannot verify process ancestry")?;
-        let name = Path::new(program)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if current != pid && (name == "kaisa" || name.eq_ignore_ascii_case("kaisa.exe")) {
-            return Ok(true);
-        }
-        current = *parent;
-    }
-    Ok(false)
-}
-impl ApprovalTerminal for Terminal {
-    fn both_terminals(&self) -> bool {
-        io::stdin().is_terminal() && io::stdout().is_terminal()
-    }
-    fn inside_attempt(&self) -> Result<bool, String> {
-        if std::env::var_os("KAISA_ATTEMPT").is_some() {
-            return Ok(true);
-        }
-        attempt_ancestor()
-    }
-    fn os_user(&self) -> Result<String, String> {
-        #[cfg(unix)]
-        let name = command_text("/usr/bin/id", &["-un"])?;
-        #[cfg(windows)]
-        let name = command_text("whoami.exe", &[])?;
-        #[cfg(not(any(unix, windows)))]
-        let name = return Err("OS user lookup unsupported".into());
-        Ok(name.trim().into())
-    }
-    fn read_confirmation(&mut self, digest: &str) -> Result<String, String> {
-        print!("Specification digest: {digest}\nType its first 8 hex characters to approve: ");
-        io::stdout().flush().map_err(|e| e.to_string())?;
-        let mut answer = String::new();
-        io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| e.to_string())?;
-        Ok(answer)
-    }
-}
 fn print_spec(spec: &StoredSpec, out: &mut dyn Write) -> io::Result<()> {
     let approval = spec
         .approval
         .as_ref()
         .map_or("provisional draft (NOT human-approved)", |a| {
             if a.kind == "human-approved" {
-                "human-approved"
+                if a.receipt["attempts_unconfined_since_draft"] == true {
+                    "human-approved (reduced assurance)"
+                } else {
+                    "human-approved"
+                }
             } else {
                 "provisional (NOT human-approved)"
             }
@@ -323,20 +204,61 @@ pub(crate) fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> 
                 print_spec(&spec, out).map_err(|e| e.to_string())
             }
             [verb, id, rest @ ..] if verb == "approve" => {
-                let provisional = match rest {
-                    [] => false,
-                    [flag] if flag == "--provisional" => true,
-                    _ => return Err(USAGE.into()),
-                };
+                let mut provisional = false;
+                let mut version = None;
+                let mut index = 0;
+                while index < rest.len() {
+                    match rest[index].as_str() {
+                        "--provisional" if !provisional => provisional = true,
+                        "--version" if version.is_none() => {
+                            index += 1;
+                            version = Some(
+                                rest.get(index)
+                                    .ok_or(USAGE)?
+                                    .parse::<u32>()
+                                    .map_err(|_| "version must be a positive integer")?,
+                            );
+                        }
+                        _ => return Err(USAGE.into()),
+                    }
+                    index += 1;
+                }
                 let id = SpecId::try_new(id)?;
-                let current = store.read(&id, None).map_err(|e| e.to_string())?;
+                let current = store
+                    .for_approval(&id, version)
+                    .map_err(|e| e.to_string())?;
+                print_spec(&current, out).map_err(|e| e.to_string())?;
+                writeln!(
+                    out,
+                    "Review: {} v{}; {} requirements; {} criteria; {} open ambiguities",
+                    current.specification.title,
+                    current.specification.version,
+                    current.specification.requirements.len(),
+                    current.specification.criteria.len(),
+                    current.specification.ambiguities.len()
+                )
+                .map_err(|e| e.to_string())?;
+                for criterion in &current.specification.criteria {
+                    writeln!(out, "{} then: {}", criterion.id, criterion.then)
+                        .map_err(|e| e.to_string())?;
+                }
+                if !current.specification.validate().is_empty() {
+                    return Err("specification has unresolved validation findings".into());
+                }
+                out.flush().map_err(|e| e.to_string())?;
                 let policy = crate::policy::load(&state).map_err(|e| e.to_string())?;
                 let approval = if provisional {
                     SpecApproval::Provisional {
                         policy: "allow_provisional_spec".into(),
                     }
                 } else {
-                    confirm(&mut Terminal, &current.digest)?
+                    store
+                        .check_human_approval_available()
+                        .map_err(|e| e.to_string())?;
+                    writeln!(out, "Approval assurance: the binding control is the confinement sandbox (state-directory write isolation and PTY denial); marker and ancestry checks are best effort. Unconfined attempts can impersonate terminal users; receipts record reduced assurance.")
+                        .map_err(|e| e.to_string())?;
+                    out.flush().map_err(|e| e.to_string())?;
+                    confirm_on_process_terminal(&current.digest)?
                 };
                 let frozen = store
                     .approve(&id, current.specification.version, &approval, &policy)
@@ -447,35 +369,6 @@ mod tests {
         assert!(output.status.success(), "command failed: {output:?}");
     }
     #[test]
-    fn a_kaisa_ancestor_is_refused_even_after_descendants_scrub_the_attempt_marker() {
-        const ROOT: u32 = 1;
-        const KAISA: u32 = 20;
-        const AGENT: u32 = 21;
-        const APPROVER: u32 = 22;
-        let mut rows = std::collections::BTreeMap::from([
-            (ROOT, (0, "init")),
-            (KAISA, (ROOT, "/Applications/Kaisa Tools/kaisa")),
-            (AGENT, (KAISA, "kaisa-fake-agent")),
-            (APPROVER, (AGENT, "kaisa")),
-        ]);
-        assert_eq!(
-            super::kaisa_ancestor(&rows, APPROVER),
-            Ok(true),
-            "a scrubbed environment cannot hide Kaisa in the ancestor chain"
-        );
-        rows.insert(KAISA, (ROOT, "user-shell"));
-        assert_eq!(
-            super::kaisa_ancestor(&rows, APPROVER),
-            Ok(false),
-            "the current approval process itself is excluded from ancestor checks"
-        );
-        rows.remove(&KAISA);
-        assert!(
-            super::kaisa_ancestor(&rows, APPROVER).is_err(),
-            "incomplete ancestry is refused rather than assumed human"
-        );
-    }
-    #[test]
     fn nonterminal_cli_approval_fails_without_creating_an_approval_receipt() {
         let scenario = Scenario::new();
         scenario.seed();
@@ -485,7 +378,11 @@ mod tests {
             "piped automation cannot claim human approval"
         );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("terminal stdin AND stdout"),
+            String::from_utf8_lossy(&output.stderr).contains(if cfg!(unix) {
+                "terminal stdin AND stdout"
+            } else {
+                "unsupported on Windows"
+            }),
             "diagnostic states terminal requirement"
         );
         assert!(
@@ -627,9 +524,17 @@ mod tests {
     }
     #[cfg(unix)]
     fn pty_approve(scenario: &Scenario, answer: &str, marker: bool) -> Output {
+        pty_approve_mode(scenario, answer, marker, false)
+    }
+    #[cfg(unix)]
+    fn pty_approve_mode(scenario: &Scenario, answer: &str, marker: bool, detached: bool) -> Output {
         const SCRIPT: &str = r#"
 import errno, os, pty, select, sys, time
-exe, state, identity, answer, marker = sys.argv[1:]
+exe, state, identity, answer, marker, detached = sys.argv[1:]
+if detached == 'true':
+    if os.fork(): os._exit(0)
+    os.setsid()
+    if os.fork(): os._exit(0)
 pid, fd = pty.fork()
 if pid == 0:
     os.environ['KAISA_STATE_DIR'] = state
@@ -671,6 +576,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
             .arg(SPEC_ID)
             .arg(answer)
             .arg(marker.to_string())
+            .arg(detached.to_string())
             .output()
             .expect("Unix PTY test harness")
     }
@@ -685,10 +591,28 @@ sys.exit(os.waitstatus_to_exitcode(status))
             false,
         );
         assert_success(&output);
+        let shown = String::from_utf8_lossy(&output.stdout);
+        let review = shown
+            .find("Review: Sessions v1; 1 requirements; 1 criteria; 0 open ambiguities")
+            .expect("title, version, counts and ambiguities shown");
+        let criterion = shown
+            .find("AC-1 then: preserved")
+            .expect("criterion then-clause shown");
+        let prompt = shown
+            .find("Type its first 8 hex characters")
+            .expect("confirmation prompt");
+        assert!(
+            review < prompt && criterion < prompt,
+            "reviewable content precedes digest confirmation"
+        );
         let approval = confirmed.read().approval.expect("human receipt");
         assert_eq!(
             approval.kind, "human-approved",
             "actual terminal confirmation records human provenance"
+        );
+        assert_eq!(
+            approval.receipt["attempts_unconfined_since_draft"], false,
+            "no unconfined activity retains full assurance"
         );
         assert!(
             approval.user.is_some(),
@@ -723,6 +647,106 @@ sys.exit(os.waitstatus_to_exitcode(status))
         assert!(
             agent.read().approval.is_none(),
             "an agent-owned PTY never mints a human receipt"
+        );
+    }
+    #[test]
+    fn multiple_unapproved_versions_require_an_explicit_selection() {
+        let scenario = Scenario::new();
+        scenario.seed();
+        scenario.seed();
+        let output = scenario.command(&["spec", "approve", SPEC_ID]);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--version"),
+            "ambiguous selection must fail before the terminal prompt: {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn record_attempt(scenario: &Scenario, live: bool) {
+        use kaisa_domain::{Event, EventKind};
+        let mut ledger = kaisa_ledger::EventStore::open(&scenario.state().join("kaisa.db"))
+            .expect("ledger opens");
+        let directory = scenario.state().join("attempts/att_approvaltest");
+        std::fs::create_dir_all(&directory).expect("owner directory");
+        std::fs::write(
+            directory.join("owner.identity"),
+            kaisa_sys::ProcessIdentity::of(std::process::id())
+                .expect("identity lookup")
+                .expect("test process alive")
+                .to_line(),
+        )
+        .expect("live owner recorded");
+        for (kind, payload) in [
+            (
+                EventKind::AttemptAdmitted,
+                serde_json::json!({"task":"task_approvaltest",
+                "containment":{"admission":"reduced", "missing":["filesystem"]}}),
+            ),
+            (
+                EventKind::AttemptStateChanged,
+                serde_json::json!({"execution":"starting"}),
+            ),
+        ] {
+            ledger
+                .append(Event {
+                    kind,
+                    subject: "att_approvaltest".into(),
+                    payload_version: 1,
+                    payload: payload.to_string(),
+                })
+                .expect("attempt event");
+        }
+        if !live {
+            ledger
+                .append(Event {
+                    kind: EventKind::AttemptStateChanged,
+                    subject: "att_approvaltest".into(),
+                    payload_version: 1,
+                    payload: serde_json::json!({"execution":"exited:0"}).to_string(),
+                })
+                .expect("exit event");
+            ledger
+                .append(Event {
+                    kind: EventKind::AttemptStateChanged,
+                    subject: "att_approvaltest".into(),
+                    payload_version: 1,
+                    payload: serde_json::json!({"cleanup":"reclaimed"}).to_string(),
+                })
+                .expect("cleanup event");
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn live_attempts_block_even_a_double_forked_approver_without_an_attempt_marker() {
+        let scenario = Scenario::new();
+        let draft = scenario.seed();
+        record_attempt(&scenario, true);
+        let output = pty_approve_mode(&scenario, &draft.digest[..8], false, true);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("live Kaisa attempt"),
+            "state-directory owner evidence survives double fork and setsid: {output:?}"
+        );
+        assert!(
+            scenario.read().approval.is_none(),
+            "no detached approval receipt"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unconfined_attempt_after_drafting_reduces_later_human_approval_assurance() {
+        let scenario = Scenario::new();
+        let draft = scenario.seed();
+        record_attempt(&scenario, false);
+        let output = pty_approve(&scenario, &draft.digest[..8], false);
+        assert_success(&output);
+        let approval = scenario.read().approval.expect("human receipt");
+        assert_eq!(
+            approval.receipt["attempts_unconfined_since_draft"], true,
+            "unconfined history is bound into the receipt"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("human-approved (reduced assurance)"),
+            "the human label exposes reduced assurance"
         );
     }
 }

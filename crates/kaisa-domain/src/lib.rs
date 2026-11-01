@@ -1,4 +1,6 @@
-//! Pure domain types for Kaisa: identifiers, events and errors. No I/O.
+//! Domain types for Kaisa: identifiers, events and errors.
+//! The guarded spec-approval module owns the process terminal I/O boundary so callers
+//! cannot substitute an adapter that fabricates human presence.
 //!
 //! Design: `docs/architecture.md` §5.2, §5.4 and §7.
 

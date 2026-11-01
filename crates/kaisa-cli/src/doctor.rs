@@ -336,6 +336,15 @@ pub(crate) fn diagnose(out: &mut dyn Write) -> io::Result<bool> {
         out,
         "! Claude Code default: reduced; Codex: observed, checked afterwards. Use --confine-claude for the confinement trial."
     )?;
+    writeln!(
+        out,
+        "! Spec approval: confinement sandbox state-directory write isolation and PTY denial are the binding controls; marker and ancestry checks are best effort. Unconfined attempts can impersonate terminal users; approval after unconfined activity is reduced assurance."
+    )?;
+    #[cfg(windows)]
+    writeln!(
+        out,
+        "! Human spec approval is unsupported on Windows (unverified terminal identity); policy-controlled provisional approval remains available."
+    )?;
     if matches!(admission, kaisa_domain::Admission::Refused { .. }) {
         writeln!(
             out,

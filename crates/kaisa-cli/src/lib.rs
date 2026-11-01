@@ -97,7 +97,8 @@ More commands:
   kaisa doctor             read-only setup diagnosis
   kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
-  kaisa spec draft|show|list|approve  draft and approve versioned requirements\n  kaisa policy show|set    view or change your personal policy
+  kaisa spec <command>     draft, show, list or approve versioned requirements
+  kaisa policy show|set    view or change your personal policy
 
 Goal options:
   --agent codex            Codex develops (observed); Claude Code reviews

@@ -204,9 +204,9 @@ pub fn split_requirements(text: &str) -> Vec<Requirement> {
         .collect()
 }
 
-/// Approval provenance; human receipts can only be minted through [`approval::confirm`].
+/// Approval provenance; human receipts can only be minted through [`approval::confirm_on_process_terminal`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SpecApproval {
     /// Policy-based permission, never human approval.
     Provisional {
@@ -239,12 +239,122 @@ impl SpecApproval {
         }
     }
 }
-/// The sole constructor for human approval, with an injectable terminal boundary.
+/// Guarded human approval; only the built-in terminal adapter is public.
 pub mod approval {
+    #[cfg(unix)]
+    use std::io::{self, IsTerminal, Write};
+    #[cfg(any(unix, test))]
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::process::Command;
+
     use serde::Serialize;
 
     use super::SpecApproval;
 
+    #[cfg(unix)]
+    struct Terminal;
+    #[cfg(unix)]
+    fn command_text(program: &str, args: &[&str]) -> Result<String, String> {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "{program} could not verify approval identity or ancestry"
+            ));
+        }
+        String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    }
+    #[cfg(unix)]
+    fn attempt_ancestor() -> Result<bool, String> {
+        let processes = command_text("/bin/ps", &["-axo", "pid=,ppid=,comm="])?;
+        let mut rows = std::collections::BTreeMap::new();
+        for line in processes.lines() {
+            let mut fields = line.split_whitespace();
+            let Some(pid) = fields.next().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let parent = fields
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .ok_or("invalid process ancestry")?;
+            let program = line
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .and_then(|(_, rest)| rest.trim_start().split_once(char::is_whitespace))
+                .map(|(_, program)| program.trim())
+                .unwrap_or_default();
+            rows.insert(pid, (parent, program));
+        }
+        kaisa_ancestor(&rows, std::process::id())
+    }
+    /// Every ancestor must be accounted for; absence is not evidence of a human shell.
+    #[cfg(any(unix, test))]
+    pub(crate) fn kaisa_ancestor(
+        rows: &std::collections::BTreeMap<u32, (u32, &str)>,
+        pid: u32,
+    ) -> Result<bool, String> {
+        let mut current = pid;
+        let mut visited = std::collections::BTreeSet::new();
+        while current != 0 {
+            if !visited.insert(current) {
+                return Err("cycle in process ancestry".into());
+            }
+            let (parent, program) = rows.get(&current).ok_or("cannot verify process ancestry")?;
+            let name = Path::new(program)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if current != pid
+                && (name.eq_ignore_ascii_case("kaisa") || name.eq_ignore_ascii_case("kaisa.exe"))
+            {
+                return Ok(true);
+            }
+            current = *parent;
+        }
+        Ok(false)
+    }
+    #[cfg(unix)]
+    impl ApprovalTerminal for Terminal {
+        fn both_terminals(&self) -> bool {
+            io::stdin().is_terminal() && io::stdout().is_terminal()
+        }
+        fn inside_attempt(&self) -> Result<bool, String> {
+            if std::env::var_os("KAISA_ATTEMPT").is_some() {
+                return Ok(true);
+            }
+            attempt_ancestor()
+        }
+        fn os_user(&self) -> Result<String, String> {
+            Ok(command_text("/usr/bin/id", &["-un"])?.trim().into())
+        }
+        fn read_confirmation(&mut self, digest: &str) -> Result<String, String> {
+            print!("Specification digest: {digest}\nType its first 8 hex characters to approve: ");
+            io::stdout().flush().map_err(|e| e.to_string())?;
+            let mut answer = String::new();
+            io::stdin()
+                .read_line(&mut answer)
+                .map_err(|e| e.to_string())?;
+            Ok(answer)
+        }
+    }
+
+    /// Confirms using only the built-in process terminal adapter. Windows is unverified
+    /// and refuses human approval; policy-controlled provisional approval remains available.
+    ///
+    /// ```compile_fail
+    /// use kaisa_domain::spec::approval::ApprovalTerminal;
+    /// struct Forged;
+    /// impl ApprovalTerminal for Forged {}
+    /// ```
+    pub fn confirm_on_process_terminal(_digest: &str) -> Result<SpecApproval, String> {
+        #[cfg(not(unix))]
+        return Err("human approval is unsupported on Windows and other unverified platforms; use policy-controlled --provisional".into());
+        #[cfg(unix)]
+        confirm(&mut Terminal, _digest)
+    }
     /// Number of digest characters the person must enter.
     pub const CONFIRMATION_PREFIX_LEN: usize = 8;
     /// A receipt whose fields cannot be created or deserialized outside this module.
@@ -274,7 +384,14 @@ pub mod approval {
         }
     }
     /// Trusted adapter for terminal presence, attempt ancestry and OS identity.
-    pub trait ApprovalTerminal {
+    /// External crates cannot implement the terminal boundary.
+    /// ```compile_fail
+    /// use kaisa_domain::spec::approval::ApprovalTerminal;
+    /// struct Forged;
+    /// impl ApprovalTerminal for Forged {}
+    /// ```
+    #[cfg(any(unix, test))]
+    pub(crate) trait ApprovalTerminal {
         /// Both stdin and stdout must be actual terminals.
         fn both_terminals(&self) -> bool;
         /// Checks the attempt marker and ancestor process identities, failing closed on errors.
@@ -285,7 +402,8 @@ pub mod approval {
         fn read_confirmation(&mut self, digest: &str) -> Result<String, String>;
     }
     /// Mints human approval only after terminal, ancestry and exact digest confirmation checks.
-    pub fn confirm(
+    #[cfg(any(unix, test))]
+    pub(crate) fn confirm(
         terminal: &mut dyn ApprovalTerminal,
         digest: &str,
     ) -> Result<SpecApproval, String> {
@@ -302,7 +420,11 @@ pub mod approval {
         {
             return Err("invalid specification digest".into());
         }
-        if terminal.read_confirmation(digest)?.trim() != &digest[..CONFIRMATION_PREFIX_LEN] {
+        if !terminal
+            .read_confirmation(digest)?
+            .trim()
+            .eq_ignore_ascii_case(&digest[..CONFIRMATION_PREFIX_LEN])
+        {
             return Err("digest confirmation did not match".into());
         }
         let user = terminal.os_user()?;
@@ -548,6 +670,45 @@ mod tests {
             (approval.user(), approval.approved_digest()),
             (None, None),
             "provisional permission cannot impersonate a human receipt"
+        );
+    }
+    #[test]
+    fn a_kaisa_ancestor_is_refused_even_after_descendants_scrub_the_attempt_marker() {
+        const ROOT: u32 = 1;
+        const KAISA: u32 = 20;
+        const AGENT: u32 = 21;
+        const APPROVER: u32 = 22;
+        let mut rows = std::collections::BTreeMap::from([
+            (ROOT, (0, "init")),
+            (KAISA, (ROOT, "/Applications/Kaisa Tools/kaisa")),
+            (AGENT, (KAISA, "kaisa-fake-agent")),
+            (APPROVER, (AGENT, "kaisa")),
+        ]);
+        assert_eq!(
+            super::approval::kaisa_ancestor(&rows, APPROVER),
+            Ok(true),
+            "a scrubbed environment cannot hide Kaisa in the ancestor chain"
+        );
+        rows.insert(KAISA, (ROOT, "user-shell"));
+        assert_eq!(
+            super::approval::kaisa_ancestor(&rows, APPROVER),
+            Ok(false),
+            "the current approval process itself is excluded from ancestor checks"
+        );
+        rows.remove(&KAISA);
+        assert!(
+            super::approval::kaisa_ancestor(&rows, APPROVER).is_err(),
+            "incomplete ancestry is refused rather than assumed human"
+        );
+    }
+    #[cfg(not(unix))]
+    #[test]
+    fn unverified_platforms_refuse_human_approval_without_running_path_tools() {
+        let error = super::approval::confirm_on_process_terminal(&session_spec().digest())
+            .expect_err("unverified platform cannot mint human approval");
+        assert!(
+            error.contains("unsupported") && error.contains("--provisional"),
+            "diagnostic names the platform limit and provisional alternative"
         );
     }
 }

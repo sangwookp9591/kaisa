@@ -239,6 +239,23 @@ Commands remain detected until actually run. Agent integration has a preview/app
 this flow does not yet add agent files. Integration replacements back up originals and JSON merges
 preserve unrelated keys. No automatic settings fixes, command execution, monorepo picker or editor.
 
+### Versioned specifications (current CLI)
+
+Use `kaisa spec draft --file requirements.txt`, `kaisa spec show <id> [--version <n>]`,
+and `kaisa spec list` to draft and inspect specifications. Each nonempty source line becomes a
+requirement; wrapped continuation lines become separate requirement IDs. `kaisa spec approve <id>
+[--version <n>]` displays the title, requirements, criteria and open ambiguities before terminal
+confirmation. Multiple pending versions, or an older version than one already approved, require
+explicit `--version`. Incomplete coverage cannot be approved.
+
+Human approval is refused while any attempt is live for the state directory. The confinement
+sandbox's state-directory write isolation and PTY denial are the binding agent controls; marker
+and ancestor checks are best effort. An unconfined attempt can impersonate terminal users; activity
+since drafting is recorded as `attempts_unconfined_since_draft` and displayed as
+`human-approved (reduced assurance)`. Windows human approval is unsupported and refused.
+`kaisa policy set allow_provisional_spec true` enables `kaisa spec approve <id> --provisional`;
+this remains labelled `NOT human-approved`. The policy defaults to false.
+
 ### B. Doing work
 
 #### F04 Quick task from the terminal (the core flow)

@@ -464,6 +464,9 @@ fn run_goal_inner(
         run.as_str(),
         json!({"mission": mission.as_str()}),
     )?;
+    let approval_guard = kaisa_ledger::spec::SpecStore::new(request.state_directory)
+        .attempt_admission_guard()
+        .map_err(at("serializing attempt admission with spec approval"))?;
     record(
         &mut ledger,
         EventKind::AttemptAdmitted,
@@ -478,6 +481,8 @@ fn run_goal_inner(
             },
         }),
     )?;
+
+    drop(approval_guard);
 
     let profile: ProjectProfile =
         derive_profile(request.repository).map_err(at("deriving the project profile"))?;
