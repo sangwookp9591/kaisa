@@ -344,10 +344,19 @@ pub mod approval {
     /// Confirms using only the built-in process terminal adapter. Windows is unverified
     /// and refuses human approval; policy-controlled provisional approval remains available.
     ///
-    /// ```compile_fail
-    /// use kaisa_domain::spec::approval::ApprovalTerminal;
+    /// ```compile_fail,E0603
+    /// use kaisa_domain::spec::{approval::{ApprovalTerminal, confirm}, SpecApproval};
     /// struct Forged;
-    /// impl ApprovalTerminal for Forged {}
+    /// impl ApprovalTerminal for Forged {
+    ///     fn both_terminals(&self) -> bool { true }
+    ///     fn inside_attempt(&self) -> Result<bool, String> { Ok(false) }
+    ///     fn os_user(&self) -> Result<String, String> { Ok("agent".into()) }
+    ///     fn read_confirmation(&mut self, digest: &str) -> Result<String, String> {
+    ///         Ok(digest[..8].into())
+    ///     }
+    /// }
+    /// let approval = confirm(&mut Forged, &"a".repeat(64)).unwrap();
+    /// assert!(matches!(approval, SpecApproval::HumanApproved(_)));
     /// ```
     pub fn confirm_on_process_terminal(_digest: &str) -> Result<SpecApproval, String> {
         #[cfg(not(unix))]
@@ -385,11 +394,7 @@ pub mod approval {
     }
     /// Trusted adapter for terminal presence, attempt ancestry and OS identity.
     /// External crates cannot implement the terminal boundary.
-    /// ```compile_fail
-    /// use kaisa_domain::spec::approval::ApprovalTerminal;
-    /// struct Forged;
-    /// impl ApprovalTerminal for Forged {}
-    /// ```
+    /// See [`confirm_on_process_terminal`] for the external forgery regression.
     #[cfg(any(unix, test))]
     pub(crate) trait ApprovalTerminal {
         /// Both stdin and stdout must be actual terminals.
