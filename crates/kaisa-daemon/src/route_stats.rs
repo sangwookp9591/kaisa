@@ -216,6 +216,71 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn last_completed_episode_controls_window_when_attempts_finish_out_of_order() {
+        use kaisa_domain::{Event, EventKind};
+        let directory =
+            std::env::temp_dir().join(format!("kaisa-routing-completion-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let database = directory.join("ledger.db");
+        let _ = std::fs::remove_file(&database);
+        let mut ledger = kaisa_ledger::EventStore::open(&database).expect("ledger");
+        for (kind, subject, payload) in [
+            (
+                EventKind::RouteDecided,
+                "task_slow",
+                json!({"agent":"claude","model":"haiku","effort":"medium","task_class":"T1:Developer"}),
+            ),
+            (
+                EventKind::AttemptAdmitted,
+                "att_slow",
+                json!({"task":"task_slow"}),
+            ),
+            (
+                EventKind::RouteDecided,
+                "task_fast",
+                json!({"agent":"claude","model":"haiku","effort":"medium","task_class":"T1:Developer"}),
+            ),
+            (
+                EventKind::AttemptAdmitted,
+                "att_fast",
+                json!({"task":"task_fast"}),
+            ),
+            (
+                EventKind::GateDecided,
+                "att_fast",
+                json!({"attempt":"att_fast","decision":"Refuse"}),
+            ),
+            (
+                EventKind::GateDecided,
+                "att_slow",
+                json!({"attempt":"att_slow","decision":"Deliver"}),
+            ),
+        ] {
+            ledger
+                .append(Event {
+                    kind,
+                    subject: subject.to_owned(),
+                    payload_version: 1,
+                    payload: payload.to_string(),
+                })
+                .expect("receipt");
+        }
+        let rows = ledger.routing_observations().expect("observations");
+        assert_eq!(
+            routing_cells(&rows, 1)[0].delivered_rate,
+            ALL_EPISODES_DELIVERED,
+            "the latest completion controls the window, regardless of admission order"
+        );
+        ledger.rebuild_attempts().expect("rebuild");
+        assert_eq!(ledger.routing_observations().expect("replay"), rows);
+        drop(ledger);
+        let reopened = kaisa_ledger::EventStore::open_read_only(&database).expect("reopen");
+        assert_eq!(reopened.routing_observations().expect("replay"), rows);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
     fn revisions_increase_expected_delivered_cost_and_unknown_usage_never_becomes_zero() {
         let mut first = outcome("revision", "haiku", false, Some(CHEAP_USD));
         let mut revision = outcome("revision", "haiku", true, Some(STRONG_USD));

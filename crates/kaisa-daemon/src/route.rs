@@ -224,7 +224,10 @@ pub fn decide_measured_route(
     let measured = choices.iter().any(|c| {
         c.2 == ROUTE_EFFORT && c.4.is_some() && c.3.is_some_and(|s| s.samples >= policy.min_samples)
     });
-    let security = request.security_sensitive
+    // Security roles are protected here even when a caller omitted sensitivity signals.
+    let security = request.kind.eq_ignore_ascii_case("Security")
+        || request.kind.eq_ignore_ascii_case("security-review")
+        || request.security_sensitive
         || request
             .decision
             .reasons
@@ -608,6 +611,39 @@ mod measured_tests {
             history,
         )
         .expect("eligible routes")
+    }
+
+    #[test]
+    fn security_role_never_explores_even_without_caller_signals() {
+        let decision = kaisa_domain::GradeDecision {
+            grade: kaisa_domain::Grade::T1,
+            floor: None,
+            reasons: Vec::new(),
+        };
+        let mut history = reliable_history();
+        for row in &mut history {
+            row.route["task_class"] = serde_json::json!("T1:Security");
+        }
+        let route = decide_measured_route(
+            &a_catalog_of_three_strengths(),
+            &RoutingRequest {
+                task: "task_security_review",
+                decision: &decision,
+                kind: "Security",
+                security_sensitive: false,
+                pinned: None,
+            },
+            &RoutingPolicy {
+                exploration_bps: 10000,
+                ..RoutingPolicy::default()
+            },
+            &history,
+        )
+        .expect("eligible security route");
+        assert_ne!(
+            route.strategy, "explore",
+            "the decision boundary protects security roles independently of caller signals"
+        );
     }
 
     #[test]

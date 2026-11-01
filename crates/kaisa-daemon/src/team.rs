@@ -480,7 +480,8 @@ fn run_verified_goal_inner(
             &request.policy.policy().routing,
             &review_task,
             Role::Reviewer,
-            &no_paths,
+            // Routing impact is distinct from the reviewer's empty write authority.
+            request.write_set,
             0,
         )?;
         let review_context = AttemptContext {

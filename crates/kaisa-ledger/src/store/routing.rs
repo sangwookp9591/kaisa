@@ -29,11 +29,14 @@ pub struct RoutingObservation {
 impl EventStore {
     /// Joins existing receipts deterministically, without writing a projection.
     /// Legacy attempts without route identity cannot be attributed to a model.
+    /// Completed attempts are returned in terminal-receipt sequence order.
     ///
     /// # Errors
     /// Returns an error for unreadable events or invalid JSON in relevant receipts.
     pub fn routing_observations(&self) -> Result<Vec<RoutingObservation>, StoreError> {
         let mut routes = BTreeMap::new();
+        let mut current: BTreeMap<String, usize> = BTreeMap::new();
+        let mut completed = BTreeMap::new();
         let mut attempts: Vec<RoutingObservation> = Vec::new();
         let mut trees: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for chained in self.read_from(Sequence::FIRST)? {
@@ -58,19 +61,26 @@ impl EventStore {
                 })?;
             match event.kind {
                 EventKind::RouteDecided => {
-                    routes.insert(event.subject.clone(), payload.clone());
-                    // The spawn path records its route after admission, before process start.
-                    for attempt in attempts.iter_mut().filter(|a| a.task == event.subject) {
+                    // A post-admission route belongs only to the current, not-yet-routed
+                    // attempt. Pre-admission routes are consumed exactly once on admission.
+                    if let Some(attempt) = current.get(&event.subject).map(|&i| &mut attempts[i])
+                        && attempt.route.is_null()
+                        && attempt.delivered.is_none()
+                        && !completed.contains_key(&attempt.attempt)
+                    {
                         attempt.route = payload.clone();
                         attempt.task = payload["routing_task"]
                             .as_str()
                             .unwrap_or(&event.subject)
                             .to_owned();
+                    } else {
+                        routes.insert(event.subject, payload);
                     }
                 }
                 EventKind::AttemptAdmitted => {
                     if let Some(task) = payload["task"].as_str() {
-                        let route = routes.get(task).cloned().unwrap_or(Value::Null);
+                        let route = routes.remove(task).unwrap_or(Value::Null);
+                        current.insert(task.to_owned(), attempts.len());
                         attempts.push(RoutingObservation {
                             attempt: event.subject,
                             task: route["routing_task"].as_str().unwrap_or(task).to_owned(),
@@ -117,6 +127,7 @@ impl EventStore {
                         ids.push(id.to_owned());
                     }
                     for attempt in attempts.iter_mut().filter(|a| ids.contains(&a.attempt)) {
+                        completed.insert(attempt.attempt.clone(), recorded.sequence);
                         attempt.delivered = Some(delivered);
                         attempt.failed |= !delivered;
                     }
@@ -145,6 +156,7 @@ impl EventStore {
                             {
                                 attempt.failed = true;
                                 attempt.delivered = Some(false);
+                                completed.insert(attempt.attempt.clone(), recorded.sequence);
                             }
                         }
                     }
@@ -152,6 +164,10 @@ impl EventStore {
                 _ => {}
             }
         }
+        // Consumers select the last N completed episodes. Admission order is unrelated
+        // to completion order when attempts execute concurrently; stable ties retain
+        // admission order for attempts completed by the same gate.
+        attempts.sort_by_key(|a| completed.get(&a.attempt).copied());
         Ok(attempts
             .into_iter()
             .filter(|a| !a.route.is_null())
@@ -250,6 +266,84 @@ mod tests {
             "tree",
             json!({"run_id":"run_route","candidate_tree":"tree","developer_attempt":ATTEMPT}),
         );
+    }
+
+    fn regression_ledger(name: &str) -> (EventStore, std::path::PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("kaisa-routing-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let database = directory.join("ledger.db");
+        let _ = std::fs::remove_file(&database);
+        (EventStore::open(&database).expect("ledger"), directory)
+    }
+
+    fn admit(ledger: &mut EventStore, attempt: &str) {
+        append(
+            ledger,
+            EventKind::AttemptAdmitted,
+            attempt,
+            json!({"task": TASK}),
+        );
+    }
+
+    fn route(ledger: &mut EventStore, model: &str) {
+        append(
+            ledger,
+            EventKind::RouteDecided,
+            TASK,
+            json!({"agent":"claude", "model":model, "effort":"medium", "task_class":"T1:Developer", "routing_task": TASK}),
+        );
+    }
+
+    fn gate(ledger: &mut EventStore, attempt: &str, delivered: bool) {
+        append(
+            ledger,
+            EventKind::GateDecided,
+            attempt,
+            json!({"attempt":attempt, "decision":if delivered {"Deliver"} else {"Refuse"}}),
+        );
+    }
+
+    #[test]
+    fn later_route_for_same_task_preserves_each_attempts_original_cell() {
+        let (mut ledger, directory) = regression_ledger("reattribution");
+        admit(&mut ledger, "att_first");
+        route(&mut ledger, "haiku");
+        gate(&mut ledger, "att_first", false);
+        admit(&mut ledger, "att_second");
+        route(&mut ledger, "sonnet");
+        gate(&mut ledger, "att_second", true);
+        let rows = ledger.routing_observations().expect("observations");
+        assert_eq!(
+            rows[0].route["model"], "haiku",
+            "later routes cannot rewrite earlier failures"
+        );
+        assert_eq!(
+            rows[1].route["model"], "sonnet",
+            "the new route belongs to the new attempt"
+        );
+        ledger.rebuild_attempts().expect("rebuild");
+        assert_eq!(ledger.routing_observations().expect("replay"), rows);
+        drop(ledger);
+        let reopened = EventStore::open_read_only(&directory.join("ledger.db")).expect("reopen");
+        assert_eq!(reopened.routing_observations().expect("replay"), rows);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn later_route_does_not_invent_identity_for_completed_legacy_attempt() {
+        let (mut ledger, directory) = regression_ledger("legacy-later");
+        admit(&mut ledger, "att_legacy");
+        gate(&mut ledger, "att_legacy", true);
+        admit(&mut ledger, "att_new");
+        route(&mut ledger, "sonnet");
+        gate(&mut ledger, "att_new", true);
+        let rows = ledger.routing_observations().expect("observations");
+        assert_eq!(rows.len(), 1, "completed legacy receipts stay unattributed");
+        assert_eq!(rows[0].attempt, "att_new");
+        drop(ledger);
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]

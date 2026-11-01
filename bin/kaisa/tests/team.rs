@@ -1282,3 +1282,143 @@ fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalat
         "cell aggregates are identical on ledger replay"
     );
 }
+
+#[test]
+fn a_reviewer_of_a_security_sensitive_change_never_explores() {
+    use kaisa_domain::{AgentEntry, AgentKind, Catalog, CatalogModel, Event, EventKind, Grade};
+    use serde_json::json;
+
+    const MEASURED_EPISODES: usize = 5;
+    const SEED_COST_USD: f64 = 1.0;
+    let bench = Workbench::new("review-security-exploration");
+    let state = bench.base.join("state");
+    std::fs::create_dir_all(&state).expect("isolated state");
+    let mut ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("ledger");
+    for index in 0..MEASURED_EPISODES {
+        let task = format!("task_seed{index}");
+        let attempt = format!("att_seed{index}");
+        for (kind, subject, payload) in [
+            (
+                EventKind::RouteDecided,
+                task.clone(),
+                json!({"agent":"claude","model":"sonnet","effort":"medium","task_class":"T2:Reviewer","routing_task":task,"strategy":"cold_start"}),
+            ),
+            (
+                EventKind::AttemptAdmitted,
+                attempt.clone(),
+                json!({"task":task}),
+            ),
+            (
+                EventKind::UsageRecorded,
+                attempt.clone(),
+                json!({"input_tokens":100,"output_tokens":50,"cost_usd":SEED_COST_USD}),
+            ),
+            (
+                EventKind::GateDecided,
+                attempt.clone(),
+                json!({"attempt":attempt,"decision":"Deliver"}),
+            ),
+        ] {
+            ledger
+                .append(Event {
+                    kind,
+                    subject,
+                    payload_version: 1,
+                    payload: payload.to_string(),
+                })
+                .expect("seed outcome");
+        }
+    }
+    drop(ledger);
+    let mut catalog = Catalog::new();
+    catalog
+        .add(AgentEntry {
+            name: "claude".to_owned(),
+            kind: AgentKind::CliAgent {
+                program: the_fake_agent().to_string_lossy().into_owned(),
+            },
+            models: vec![
+                CatalogModel {
+                    id: "haiku".to_owned(),
+                    grade: Grade::T1,
+                },
+                CatalogModel {
+                    id: "sonnet".to_owned(),
+                    grade: Grade::T2,
+                },
+                CatalogModel {
+                    id: "opus".to_owned(),
+                    grade: Grade::T3,
+                },
+            ],
+            personal: false,
+        })
+        .expect("test catalog");
+    let developer = |mcp: &Path| {
+        let mut spec = scripted(mcp, &["--fake-write-next", "src/auth/step"]);
+        spec.args
+            .extend(["--model", "haiku", "--effort", "medium"].map(str::to_owned));
+        spec
+    };
+    let reviewer = |mcp: &Path| {
+        let mut spec = scripted(mcp, &["--fake-review-require", "src/auth/step-1.md"]);
+        spec.args
+            .extend(["--model", "sonnet", "--effort", "medium"].map(str::to_owned));
+        spec
+    };
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src/auth").expect("valid")]);
+    let mut configured = a_policy(true).policy().clone();
+    configured.routing.exploration_bps = 10000;
+    let policy = configured.snapshot().expect("valid policy");
+    let check = DetectedCommand {
+        language: Language::Rust,
+        purpose: Purpose::Test,
+        argv: vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "test -f src/auth/step-1.md".to_owned(),
+        ],
+        directory: None,
+        confirmation: Confirmation::Confirmed,
+    };
+    let request = VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &state,
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[check],
+        policy: &policy,
+        observed: false,
+        first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    };
+    let result = kaisa_daemon::run_verified_goal_with_routing(&request, &catalog)
+        .expect("verified fake loop");
+    assert!(
+        matches!(result.delivery, Delivery::Deliver { .. }),
+        "the revision still passes the existing delivery gate"
+    );
+    let ledger =
+        kaisa_ledger::EventStore::open_read_only(&state.join("kaisa.db")).expect("read ledger");
+    let observations = ledger.routing_observations().expect("derive outcomes");
+    let reviewer = observations
+        .iter()
+        .find(|o| {
+            o.route["task_class"]
+                .as_str()
+                .is_some_and(|c| c.ends_with(":Reviewer"))
+                && !o.task.starts_with("task_seed")
+        })
+        .expect("actual reviewer");
+    assert_ne!(
+        reviewer.route["strategy"], "explore",
+        "reviewing an auth change is security-sensitive work and must not explore: {:?}",
+        reviewer.route
+    );
+}
