@@ -87,7 +87,7 @@ pub struct VerifiedOutcome {
     pub weakened_tests: Vec<String>,
 }
 
-fn review_instruction(goal: &str, candidate: &Candidate) -> String {
+pub(crate) fn review_instruction(goal: &str, candidate: &Candidate) -> String {
     format!(
         "Review the candidate below for the goal it was made for. Report blocking problems only \
          when the goal is not met or the change is unsafe. End your answer with exactly one \

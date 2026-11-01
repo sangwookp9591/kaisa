@@ -102,6 +102,11 @@ fn now_ms() -> u64 {
 /// [--check-program <path> [--check-arg <arg>]…] "<goal>"`.
 pub(crate) struct GoalCommand {
     goal: String,
+    spec: Option<(kaisa_domain::SpecId, Option<u32>)>,
+    accepted_qa_isolation: Option<String>,
+    qa_author_args: Vec<String>,
+    qa_blind_args: Vec<String>,
+    test_reviewer_args: Vec<String>,
     agent: AgentChoice,
     /// Arguments that make the scripted agent act as the reviewer; with them, or with Claude
     /// Code, the goal runs verified (T31).
@@ -143,6 +148,12 @@ impl GoalCommand {
     /// word that looks like a flag is not one Kaisa knows: it must not silently become goal text
     /// that a paid agent then acts on. `--` ends the flags, so a goal can still begin with one.
     pub(crate) fn parse(args: &[String]) -> Result<Self, GoalParseError> {
+        let mut spec_id = None;
+        let mut spec_version = None;
+        let mut accepted_qa_isolation = None;
+        let mut qa_author_args = Vec::new();
+        let mut qa_blind_args = Vec::new();
+        let mut test_reviewer_args = Vec::new();
         let mut agent = AgentChoice {
             program: None,
             args: Vec::new(),
@@ -190,6 +201,48 @@ impl GoalCommand {
                             })?,
                     );
                 }
+                "--spec" => {
+                    let value = words.next().ok_or_else(|| {
+                        GoalParseError::UnknownFlag("--spec requires an id".into())
+                    })?;
+                    spec_id = Some(
+                        kaisa_domain::SpecId::try_new(value)
+                            .map_err(GoalParseError::UnknownFlag)?,
+                    );
+                }
+                "--version" => {
+                    spec_version = Some(
+                        words
+                            .next()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .filter(|version| *version > 0)
+                            .ok_or_else(|| {
+                                GoalParseError::UnknownFlag(
+                                    "--version requires a positive integer".into(),
+                                )
+                            })?,
+                    );
+                }
+                "--accept-qa-isolation" => {
+                    accepted_qa_isolation = Some(words.next().cloned().ok_or_else(|| {
+                        GoalParseError::UnknownFlag(
+                            "--accept-qa-isolation requires the exact reduced(...) label".into(),
+                        )
+                    })?)
+                }
+                "--qa-author-arg" => {
+                    qa_author_args.push(words.next().cloned().ok_or_else(|| {
+                        GoalParseError::UnknownFlag("--qa-author-arg requires a value".into())
+                    })?)
+                }
+                "--qa-blind-arg" => qa_blind_args.push(words.next().cloned().ok_or_else(|| {
+                    GoalParseError::UnknownFlag("--qa-blind-arg requires a value".into())
+                })?),
+                "--test-reviewer-arg" => {
+                    test_reviewer_args.push(words.next().cloned().ok_or_else(|| {
+                        GoalParseError::UnknownFlag("--test-reviewer-arg requires a value".into())
+                    })?)
+                }
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
@@ -210,11 +263,25 @@ impl GoalCommand {
                 other => goal.push(other),
             }
         }
+        if spec_version.is_some() && spec_id.is_none() {
+            return Err(GoalParseError::UnknownFlag(
+                "--version requires --spec".into(),
+            ));
+        }
         if goal.is_empty() {
-            return Err(GoalParseError::NoGoal);
+            if let Some(spec) = &spec_id {
+                goal.push(spec.as_str());
+            } else {
+                return Err(GoalParseError::NoGoal);
+            }
         }
         Ok(Self {
             goal: goal.join(" "),
+            spec: spec_id.map(|id| (id, spec_version)),
+            accepted_qa_isolation,
+            qa_author_args,
+            qa_blind_args,
+            test_reviewer_args,
             agent,
             reviewer_args,
             check,
@@ -441,6 +508,9 @@ impl GoalCommand {
                 .map_or(&[][..], |trial| trial.writable.as_slice()),
             reduced_mode,
         };
+        if let Some((spec_id, version)) = &self.spec {
+            return self.run_spec(&request, spec_id, *version, out, err);
+        }
         let result =
             if self.agent.pinned || self.agent.model.is_some() || self.agent.program.is_some() {
                 run_verified_goal(&request)
@@ -460,6 +530,116 @@ impl GoalCommand {
                 Ok(status)
             }
             Err(error) => report_error(&error, out, err),
+        }
+    }
+
+    fn run_spec(
+        &self,
+        workflow: &VerifiedRequest<'_>,
+        spec_id: &kaisa_domain::SpecId,
+        version: Option<u32>,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> io::Result<u8> {
+        use kaisa_daemon::spec_flow::{
+            ExistingReviewer, NoCharacterization, SpecRequest, run_spec_goal,
+        };
+        let qa_process = |args: &[String]| ProcessSpec {
+            program: self
+                .agent
+                .program
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("claude")),
+            args: if self.agent.program.is_some() {
+                args.to_vec()
+            } else {
+                vec![
+                    "-p".into(),
+                    "--tools".into(),
+                    "".into(),
+                    "--output-format".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
+                ]
+            },
+            working_directory: std::env::temp_dir(),
+            env: if self.agent.program.is_some() {
+                Vec::new()
+            } else {
+                kaisa_agents::claude_environment()
+            },
+        };
+        let author = qa_process(&self.qa_author_args);
+        let blind = qa_process(&self.qa_blind_args);
+        let domain = |config: &Path| {
+            if self.agent.program.is_some() && !self.test_reviewer_args.is_empty() {
+                let mut process = self.role_spec(Role::Reviewer, workflow.write_set, config);
+                process.args.truncate(2);
+                process.args.extend(self.test_reviewer_args.iter().cloned());
+                process
+            } else {
+                self.role_spec(Role::Reviewer, workflow.write_set, config)
+            }
+        };
+        let toolchain = if workflow.repository.join("Cargo.toml").is_file() {
+            kaisa_daemon::qa::QaToolchain::Rust {
+                cargo: trusted_program("cargo")?,
+            }
+        } else {
+            kaisa_daemon::qa::QaToolchain::Node {
+                node: trusted_program("node")?,
+            }
+        };
+        match run_spec_goal(&SpecRequest {
+            workflow,
+            spec_id,
+            version,
+            qa_author: &author,
+            qa_blind: &blind,
+            qa_toolchain: &toolchain,
+            test_reviewer: &domain,
+            characterize: &NoCharacterization,
+            staged_review: &ExistingReviewer,
+            accepted_qa_isolation: self.accepted_qa_isolation.as_deref(),
+            development_mappings: &[],
+        }) {
+            Ok(result) => {
+                writeln!(out, "{}\nRun: {}", result.acceptance.label(), result.run_id)?;
+                for line in result.acceptance.lines.iter().filter(|line| {
+                    line.check.status != kaisa_daemon::acceptance::AcceptanceStatus::Pass
+                }) {
+                    writeln!(
+                        out,
+                        "{:?}: {}: {}",
+                        line.check.status, line.requirement, line.check.detail
+                    )?;
+                }
+                writeln!(
+                    out,
+                    "Traceability report: kaisa spec report {}",
+                    result.run_id
+                )?;
+                if let Some(branch) = result.result_branch {
+                    writeln!(
+                        out,
+                        "Result: {branch}; retrieve with git merge --ff-only {branch}"
+                    )?;
+                } else if result.acceptance.status
+                    == kaisa_daemon::acceptance::AcceptanceStatus::Inconclusive
+                {
+                    writeln!(
+                        out,
+                        "waiting for you: required evidence or policy acceptance is missing"
+                    )?;
+                } else {
+                    writeln!(out, "not delivered")?;
+                }
+                Ok(result.acceptance.status.exit_code())
+            }
+            Err(error) => {
+                writeln!(err, "kaisa: specification build incomplete: {error}")?;
+                Ok(crate::EXIT_WAITING_FOR_HUMAN)
+            }
         }
     }
 
@@ -519,7 +699,7 @@ impl GoalCommand {
             Err(error) => writeln!(err, "kaisa: recovery of earlier attempts failed: {error}")?,
         }
         writeln!(out, "▶ {}", self.goal)?;
-        if self.verified() {
+        if self.verified() || self.spec.is_some() {
             return self.run_verified(&repository, &state, &write_set, &reduced_mode, out, err);
         }
         match run_goal(&GoalRequest {
@@ -552,6 +732,38 @@ impl GoalCommand {
             }
         }
     }
+}
+
+fn trusted_program(name: &str) -> io::Result<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        });
+        if candidate.is_file() {
+            return std::path::absolute(candidate);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("trusted {name} executable unavailable"),
+    ))
+}
+
+pub(crate) fn build(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
+    match GoalCommand::parse(args) {
+        Ok(command) if command.spec.is_some() => return command.run(out, err),
+        Err(GoalParseError::UnknownFlag(error)) => writeln!(err, "kaisa build: {error}")?,
+        Err(GoalParseError::NoGoal) => writeln!(err, "kaisa build: --spec requires an id")?,
+        Ok(_) => {}
+    }
+    writeln!(
+        err,
+        "usage: kaisa build --spec <id> [--version n] [goal options]"
+    )?;
+    Ok(crate::EXIT_USAGE)
 }
 
 /// Early waits have no attempt: persist a goal and gate without inventing an agent run.
@@ -641,6 +853,30 @@ mod tests {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
 
+    #[test]
+    fn build_reports_the_specific_parse_error_before_usage() {
+        for (args, expected) in [
+            (
+                vec!["--spec", "spec_good", "--version", "0"],
+                "--version requires a positive integer",
+            ),
+            (vec!["--spec", "../bad"], "expected spec_ identifier"),
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let code = super::build(&words(&args), &mut out, &mut err).expect("parse diagnostic");
+            let diagnostic = String::from_utf8(err).expect("UTF-8");
+            assert_eq!(code, crate::EXIT_USAGE);
+            assert!(
+                diagnostic
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.contains(expected)),
+                "specific error precedes usage: {diagnostic}"
+            );
+            assert!(diagnostic.contains("usage: kaisa build"));
+        }
+    }
     #[test]
     fn a_goal_of_several_unquoted_words_and_a_quoted_sentence_both_parse() {
         let unquoted = super::GoalCommand::parse(&words(&["fix", "the", "login", "bug"]));

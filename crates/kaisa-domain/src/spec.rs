@@ -717,3 +717,27 @@ mod tests {
         );
     }
 }
+
+/// Criterion mapping shared by deterministic lint, review and traceability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestMapping {
+    /// Declared test name, optionally qualified with its file path.
+    pub test_id: String,
+    /// Frozen criterion identifiers covered by this test.
+    pub criterion_ids: Vec<String>,
+}
+
+/// Content-addressed private test receipt, shared by QA and reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QaManifestEntry {
+    /// Stable private scenario identifier.
+    pub test_id: String,
+    /// Frozen criterion identifiers exercised by the scenario.
+    pub criterion_ids: Vec<String>,
+    /// File relative to the private suite directory.
+    pub file: String,
+    /// BLAKE3 digest of the private source.
+    pub digest: String,
+}

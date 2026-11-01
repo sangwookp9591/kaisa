@@ -531,6 +531,7 @@ name = "kaisa-workspace"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "kaisa-domain",
  "serde_json",
 ]
 

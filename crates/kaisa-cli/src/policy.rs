@@ -16,7 +16,7 @@ static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 /// The command surface and accepted values.
 const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
-keys: allow_provisional_spec (true|false), revision_limit (0..10), confine_agents (true|false),
+keys: accept_reduced_assurance_approval (true|false), allow_provisional_spec (true|false), revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true only; always enforced),
       require_person_when_tests_weaken (true only; always enforced),
@@ -37,6 +37,10 @@ fn grade_from(code: &str) -> Option<Grade> {
 
 fn policy_from_json(value: &Value) -> Option<Policy> {
     Some(Policy {
+        accept_reduced_assurance_approval: match value.get("accept_reduced_assurance_approval") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
         allow_provisional_spec: match value.get("allow_provisional_spec") {
             None => false,
             Some(value) => value.as_bool()?,
@@ -114,6 +118,7 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     kaisa_sys::ensure_private_directory(state)?;
     let value = json!({
+        "accept_reduced_assurance_approval": policy.accept_reduced_assurance_approval,
         "revision_limit": policy.revision_limit,
         "allow_provisional_spec": policy.allow_provisional_spec,
         "routing_window": policy.routing.window,
@@ -181,6 +186,10 @@ fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
                 .ok_or(format!(
                     "revision_limit must be between 0 and {MAX_REVISION_LIMIT}"
                 ))?;
+        }
+        "accept_reduced_assurance_approval" => {
+            policy.accept_reduced_assurance_approval =
+                value.parse().map_err(|_| "use true or false")?;
         }
         "allow_provisional_spec" => {
             policy.allow_provisional_spec = value.parse().map_err(|_| "use true or false")?;
@@ -326,6 +335,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reduced_approval_acceptance_defaults_off_and_can_be_explicitly_saved() {
+        let state = PersonalState::new();
+        assert!(
+            !load(&state.0)
+                .expect("default")
+                .accept_reduced_assurance_approval
+        );
+        let (code, _, diagnostic) =
+            state.command(&["set", "accept_reduced_assurance_approval", "true"]);
+        assert_eq!(code, crate::EXIT_SUCCESS, "{diagnostic}");
+        assert!(
+            load(&state.0)
+                .expect("saved")
+                .accept_reduced_assurance_approval
+        );
+        let (code, output, _) = state.command(&["show"]);
+        assert_eq!(code, crate::EXIT_SUCCESS);
+        assert!(output.contains("accept_reduced_assurance_approval=true"));
+    }
     #[test]
     fn a_policy_change_is_kept_for_the_next_run() {
         let state = PersonalState::new();

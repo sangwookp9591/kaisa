@@ -118,6 +118,7 @@ fn the_projects_test_command() -> DetectedCommand {
 /// The policy a test run adopts.
 fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
     kaisa_domain::Policy {
+        accept_reduced_assurance_approval: false,
         allow_provisional_spec: false,
         routing: kaisa_domain::RoutingPolicy::default(),
         revision_limit: DEFAULT_REVISION_LIMIT,

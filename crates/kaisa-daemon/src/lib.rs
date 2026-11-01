@@ -3,6 +3,7 @@
 //! Design: `docs/architecture.md`. In M0 a goal runs in one process (`run_goal`); the long-lived
 //! daemon, its control endpoint and keeper reconnection wrap the same steps later.
 
+pub mod acceptance;
 pub mod characterize;
 mod gate;
 mod goal;
@@ -20,10 +21,12 @@ mod route_stats;
 mod sandbox;
 /// Read-only specification agent and strict final-answer parser.
 pub mod spec_agent;
+pub mod spec_flow;
 /// Context-aware review for specification-bound goals.
 pub mod staged_review;
 mod team;
 mod test_review;
+pub mod traceability;
 mod verify;
 
 pub use gate::{Delivery, RevisionReason, decide_delivery};
@@ -43,6 +46,8 @@ pub use route::{
 pub use route_stats::{RoutingCell, routing_cells};
 /// Read-only prediction of missing sandbox capabilities before admission.
 pub use sandbox::expected_missing as expected_sandbox_missing;
+/// Specification workflow entry point and its immutable outcome.
+pub use spec_flow::{SpecOutcome, SpecRequest, run_spec_goal};
 pub use team::{
     CANDIDATE_TREE_LABEL, FirstPass, VerifiedOutcome, VerifiedRequest, run_verified_goal,
     run_verified_goal_with_routing,

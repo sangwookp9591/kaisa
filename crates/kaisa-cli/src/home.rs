@@ -111,6 +111,13 @@ pub(crate) fn run(out: &mut dyn Write, err: &mut dyn Write) -> io::Result<u8> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown")
                     .to_owned();
+                if goal.2 == "Deliver"
+                    && let Some(branch) = payload["result_branch"].as_str()
+                {
+                    goal.2.push_str(&format!(
+                        "; Result: {branch}; retrieve with git merge --ff-only {branch}"
+                    ));
+                }
                 goal.3 = payload
                     .get("reason")
                     .and_then(serde_json::Value::as_str)

@@ -252,7 +252,14 @@ Human approval is refused while any attempt is live for the state directory. The
 sandbox's state-directory write isolation and PTY denial are the binding agent controls; marker
 and ancestor checks are best effort. An unconfined attempt can impersonate terminal users; activity
 since drafting is recorded as `attempts_unconfined_since_draft` and displayed as
-`human-approved (reduced assurance)`. Windows human approval is unsupported and refused.
+`human-approved (reduced assurance)`. Specification builds keep this label in the gate,
+receipt, report and CLI output, and wait with INCONCLUSIVE by default. A person may explicitly
+accept that assurance level for future runs with
+`kaisa policy set accept_reduced_assurance_approval true` (default false); acceptance keeps
+the reduced label. Windows human approval is unsupported and refused.
+
+After a specification build passes, `kaisa status`, `kaisa spec report <run>` and the TUI
+details name the published `kaisa/result/<run>` branch and its merge command.
 `kaisa policy set allow_provisional_spec true` enables `kaisa spec approve <id> --provisional`;
 this remains labelled `NOT human-approved`. The policy defaults to false.
 
