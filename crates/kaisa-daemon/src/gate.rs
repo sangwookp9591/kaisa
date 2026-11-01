@@ -28,6 +28,8 @@ pub enum Delivery {
 pub enum RevisionReason {
     /// A trusted check failed.
     FailingCheck(Vec<String>),
+    /// An exit-zero test run supplied no positive completion evidence.
+    MissingTestEvidence(String),
     /// A reviewer found something blocking.
     Finding(Finding),
 }
@@ -92,7 +94,12 @@ pub fn decide_delivery(
     let mut reasons: Vec<RevisionReason> = evidence
         .iter()
         .filter(|piece| !piece.passed())
-        .map(|piece| RevisionReason::FailingCheck(piece.check.clone()))
+        .map(|piece| {
+            piece.missing_test_evidence_reason().map_or_else(
+                || RevisionReason::FailingCheck(piece.check.clone()),
+                RevisionReason::MissingTestEvidence,
+            )
+        })
         .collect();
     reasons.extend(
         verdict
@@ -117,11 +124,19 @@ fn needs_person_with_context(
     verdict: Option<&ReviewVerdict>,
 ) -> Delivery {
     for piece in evidence.iter().filter(|piece| !piece.passed()) {
-        reason.push_str(&format!(
-            "\nfailing check: {} ({:?})",
-            piece.check.join(" "),
-            piece.exit
-        ));
+        if let Some(missing) = piece.missing_test_evidence_reason() {
+            reason.push_str(&format!("\n{missing}"));
+        } else {
+            let exit = match piece.exit {
+                Some(kaisa_sys::ProcessExit::Code(code)) => format!("exited {code}"),
+                Some(kaisa_sys::ProcessExit::Terminated) => "terminated".into(),
+                None => "deadline exceeded".into(),
+            };
+            reason.push_str(&format!(
+                "\nfailing check: {}: {exit}",
+                piece.check.join(" ")
+            ));
+        }
     }
     if let Some(verdict) = verdict.filter(|verdict| verdict.candidate_tree == candidate.tree) {
         for finding in verdict.blocking() {
@@ -162,6 +177,7 @@ mod tests {
     fn evidence_on(tree: &str, exit: ProcessExit) -> Evidence {
         Evidence {
             failure_reason: None,
+            test_evidence: None,
             candidate_tree: tree.to_owned(),
             check: vec!["cargo".to_owned(), "test".to_owned()],
             exit: Some(exit),
@@ -170,6 +186,7 @@ mod tests {
             confined: true,
             definitions_changed: Vec::new(),
             weakened_tests: Vec::new(),
+            advisories: Vec::new(),
         }
     }
 

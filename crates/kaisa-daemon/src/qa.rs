@@ -1459,7 +1459,7 @@ fn git_output(repository: &Path, args: &[&str]) -> io::Result<String> {
     String::from_utf8(output.stdout).map_err(io::Error::other)
 }
 
-fn qa_influencing_findings(
+pub(crate) fn qa_influencing_findings(
     repository: &Path,
     base: &str,
     candidate: &Candidate,
@@ -1504,6 +1504,18 @@ fn qa_influencing_findings(
             .iter()
             .any(|key| {
                 before.as_ref().and_then(|v| v.get(key)) != after.as_ref().and_then(|v| v.get(key))
+            }) || [
+                "/config/node-options",
+                "/config/nodeOptions",
+                "/config/NODE_OPTIONS",
+                "/engines/node-options",
+                "/engines/nodeOptions",
+                "/devEngines/node-options",
+            ]
+            .iter()
+            .any(|pointer| {
+                before.as_ref().and_then(|v| v.pointer(pointer))
+                    != after.as_ref().and_then(|v| v.pointer(pointer))
             })
         } else {
             false
@@ -1513,7 +1525,7 @@ fn qa_influencing_findings(
         }
         if !matches!(
             Path::new(&path).extension().and_then(|s| s.to_str()),
-            Some("rs" | "js" | "mjs" | "cjs" | "ts")
+            Some("rs" | "js" | "mjs" | "cjs" | "ts" | "mts" | "cts")
         ) || path.split('/').any(|part| part == "tests")
             || file.contains(".test.")
             || file.contains(".spec.")
@@ -1525,26 +1537,173 @@ fn qa_influencing_findings(
         };
         let before = source(base);
         let after = source(&candidate.commit);
-        let javascript = !path.ends_with(".rs");
-        let before_code = crate::qa_interface::code_tokens(&before, javascript).join("");
-        let after_code = crate::qa_interface::code_tokens(&after, javascript).join("");
-        if [
-            "std::process::exit(",
-            "process::abort(",
-            "process.exit(",
-            "process.kill(process.pid",
-        ]
-        .iter()
-        .any(|call| after_code.matches(call).count() > before_code.matches(call).count())
-        {
-            findings.insert(format!("Added process-termination call in {path}; reviewer justification with evidence required"));
-        }
-        let added = after;
-        if added.contains("NODE_OPTIONS") {
-            findings.insert(format!("QA-influencing configuration: {path} changes node options; reviewer justification with evidence required"));
+        let before_calls = termination_lines(&before, !path.ends_with(".rs"));
+        let after_calls = termination_lines(&after, !path.ends_with(".rs"));
+        if after_calls.len() > before_calls.len() {
+            for line in after_calls {
+                findings.insert(format!("Added process-termination call at {path}:{line}; reviewer justification with evidence required"));
+            }
         }
     }
     Ok(findings.into_iter().collect())
+}
+
+/// Plain goals expose termination findings to reviewers without a person gate.
+pub(crate) fn plain_qa_findings(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<(Vec<String>, Vec<String>), GoalError> {
+    let mut blocking = Vec::new();
+    let mut advisory = Vec::new();
+    for finding in qa_influencing_findings(repository, base, candidate)? {
+        if let Some(location) = finding.strip_prefix("Added process-termination call at ") {
+            let location = location.split(';').next().unwrap_or(location);
+            advisory.push(format!("advisory: added process termination at {location}"));
+        } else {
+            blocking.push(finding);
+        }
+    }
+    Ok((blocking, advisory))
+}
+
+fn termination_tokens(source: &str, javascript: bool) -> Vec<String> {
+    if javascript {
+        return node_tokens(source);
+    }
+    let tokens = crate::qa_interface::code_tokens(source, false);
+    let mut result = Vec::new();
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(token) = iter.next() {
+        if token == ":" && iter.peek().is_some_and(|t| t == ":") {
+            iter.next();
+            result.push("::".into());
+        } else {
+            result.push(token);
+        }
+    }
+    result
+}
+
+/// Bounded lexical detection, including common imported process/function aliases.
+fn termination_lines(source: &str, javascript: bool) -> Vec<usize> {
+    let tokens = termination_tokens(source, javascript);
+    let mut calls: BTreeSet<Vec<String>> = BTreeSet::new();
+    let mut add = |name: &str, separator: &str| {
+        for function in ["exit", "abort"] {
+            calls.insert(vec![
+                name.into(),
+                separator.into(),
+                function.into(),
+                "(".into(),
+            ]);
+        }
+    };
+    if javascript {
+        add("process", ".");
+    } else {
+        calls.insert(
+            ["std", "::", "process", "::", "exit", "("]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        calls.insert(
+            ["std", "::", "process", "::", "abort", "("]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        for (index, token) in tokens.iter().enumerate() {
+            if token != "use" {
+                continue;
+            }
+            let end = tokens[index..]
+                .iter()
+                .position(|t| t == ";")
+                .map_or(tokens.len(), |n| index + n);
+            let import = &tokens[index + 1..end];
+            if import.starts_with(&["std".into(), "::".into(), "process".into()]) {
+                let alias = import
+                    .iter()
+                    .position(|t| t == "as")
+                    .and_then(|n| import.get(n + 1));
+                if import.get(3).is_none() || import.get(3).is_some_and(|t| t == "as") {
+                    let name = alias.map_or("process", String::as_str);
+                    for function in ["exit", "abort"] {
+                        calls.insert(vec![name.into(), "::".into(), function.into(), "(".into()]);
+                    }
+                } else if import.get(4).is_some_and(|t| t == "exit" || t == "abort") {
+                    calls.insert(vec![alias.unwrap_or(&import[4]).clone(), "(".into()]);
+                }
+            }
+        }
+    }
+    if javascript {
+        for (index, token) in tokens.iter().enumerate() {
+            if !matches!(token.as_str(), "const" | "let" | "var" | "import") {
+                continue;
+            }
+            let end = tokens[index..]
+                .iter()
+                .position(|t| t == ";")
+                .map_or(tokens.len(), |n| index + n);
+            let declaration = &tokens[index + 1..end];
+            let process_module = declaration
+                .iter()
+                .any(|t| t == "string:process" || t == "string:node:process")
+                || declaration.windows(2).any(|w| w == ["=", "process"]);
+            if !process_module {
+                continue;
+            }
+            if declaration.first().is_some_and(|t| t != "{") {
+                for function in ["exit", "abort"] {
+                    calls.insert(vec![
+                        declaration[0].clone(),
+                        ".".into(),
+                        function.into(),
+                        "(".into(),
+                    ]);
+                }
+            }
+            for (n, name) in declaration
+                .iter()
+                .enumerate()
+                .take_while(|(_, t)| t.as_str() != "}")
+            {
+                if matches!(name.as_str(), "exit" | "abort") {
+                    let alias = if declaration
+                        .get(n + 1)
+                        .is_some_and(|t| t == "as" || t == ":")
+                    {
+                        declaration.get(n + 2).unwrap_or(name)
+                    } else {
+                        name
+                    };
+                    calls.insert(vec![alias.clone(), "(".into()]);
+                }
+            }
+        }
+        calls.insert(
+            ["process", ".", "kill", "(", "process", ".", "pid"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+    }
+    let mut lines = Vec::new();
+    for index in 0..tokens.len() {
+        if calls.iter().any(|call| tokens[index..].starts_with(call)) {
+            // Tokenize complete prefixes so multiline comments/strings retain their semantics.
+            let line = source
+                .match_indices('\n')
+                .map(|(at, _)| &source[..at])
+                .position(|prefix| {
+                    let count = termination_tokens(prefix, javascript).len();
+                    count > index
+                })
+                .map_or(source.lines().count().max(1), |n| n + 1);
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 /// Only flat Rust #[test] functions and Node test('static name', ...) are supported. This
@@ -1574,7 +1733,7 @@ fn expected_test_names(
     Ok(names)
 }
 
-fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
+fn node_tokens(source: &str) -> Vec<String> {
     // A tiny JS lexical scan preserves only static string operands, skipping comments and
     // consuming templates whole. Other API extraction uses the opaque-literal lexer.
     let bytes = source.as_bytes();
@@ -1632,6 +1791,11 @@ fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
         }
         tokens.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
     }
+    tokens
+}
+
+fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
+    let tokens = node_tokens(source);
     let mut names = Vec::new();
     for window in tokens.windows(4) {
         if window[0] == "test" && window[1] == "(" && window[3] == "," {
@@ -1646,67 +1810,462 @@ fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
 }
 
 fn positive_test_evidence(run: &CapturedRun, expected: &[String], toolchain: &QaToolchain) -> bool {
-    if expected.is_empty() || run.truncated {
+    let harness = match toolchain {
+        QaToolchain::Rust { .. } => TestHarness::Libtest,
+        QaToolchain::Node { .. } => TestHarness::Tap,
+    };
+    harness_test_evidence(run, Some(expected), harness)
+}
+
+/// Harness formats shared by private QA and ordinary trusted checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestHarness {
+    Libtest,
+    Tap,
+    Nextest,
+}
+
+/// Positive completion evidence; private QA additionally pins the exact expected name set.
+/// Ordinary Cargo checks can contain several independently completed test binaries.
+pub(crate) fn harness_test_evidence(
+    run: &CapturedRun,
+    expected: Option<&[String]>,
+    harness: TestHarness,
+) -> bool {
+    if run.truncated || expected.is_some_and(<[String]>::is_empty) {
         return false;
     }
-    let output = String::from_utf8_lossy(&run.output);
-    let mut observed = Vec::new();
-    match toolchain {
-        QaToolchain::Rust { .. } => {
-            for line in output.lines() {
-                if let Some(name) = line
-                    .strip_prefix("test ")
-                    .and_then(|line| line.strip_suffix(" ... ok"))
-                {
-                    observed.push(name.to_owned());
-                }
-            }
-            let summary = format!(
-                "test result: ok. {} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;",
-                expected.len()
-            );
-            if output
-                .lines()
-                .filter(|line| line.starts_with("test result: "))
-                .count()
-                != 1
-                || output
-                    .lines()
-                    .filter(|line| line.starts_with(&summary))
-                    .count()
-                    != 1
-            {
-                return false;
-            }
-        }
-        QaToolchain::Node { .. } => {
-            for line in output.lines() {
-                if let Some(rest) = line
-                    .strip_prefix("ok ")
-                    .and_then(|line| line.split_once(" - ").map(|(_, name)| name))
-                {
-                    observed.push(rest.to_owned());
-                }
-            }
-            for required in [
-                format!("1..{}", expected.len()),
-                format!("# tests {}", expected.len()),
-                format!("# pass {}", expected.len()),
-                "# fail 0".into(),
-                "# cancelled 0".into(),
-                "# skipped 0".into(),
-                "# todo 0".into(),
-            ] {
-                if output.lines().filter(|line| *line == required).count() != 1 {
-                    return false;
-                }
-            }
-        }
+    let output = strip_ansi(&String::from_utf8_lossy(&run.output));
+    if expected.is_none() {
+        return completed_test_stream(&output);
     }
+    let complete = match harness {
+        TestHarness::Libtest => completed_libtest(&output, expected.map(<[String]>::len)),
+        TestHarness::Tap => completed_tap(&output, expected.map(<[String]>::len)),
+        TestHarness::Nextest => completed_nextest(&output),
+    };
+    if !complete {
+        return false;
+    }
+    let Some(expected) = expected else {
+        return true;
+    };
+    let mut observed = output
+        .lines()
+        .filter_map(|line| match harness {
+            TestHarness::Libtest => line
+                .strip_prefix("test ")
+                .and_then(|line| line.strip_suffix(" ... ok")),
+            TestHarness::Tap => line
+                .strip_prefix("ok ")
+                .and_then(|line| line.split_once(" - ").map(|(_, name)| name)),
+            TestHarness::Nextest => None,
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     observed.sort();
     let mut expected = expected.to_vec();
     expected.sort();
     observed == expected
+}
+
+fn strip_ansi(output: &str) -> String {
+    let mut chars = output.chars();
+    let mut clean = String::new();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            clean.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // Terminfo color resets can include ESC(B before ESC[m.
+            Some('(' | ')' | '%' | '#') => {
+                chars.next();
+            }
+            Some(']') => {
+                let mut escape = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (escape && c == '\\') {
+                        break;
+                    }
+                    escape = c == '\x1b';
+                }
+            }
+            _ => {}
+        }
+    }
+    clean
+}
+
+/// Ordinary checks may concatenate different runners. Every closing block must be
+/// consistent, and every visible start must close, even after an earlier pass.
+fn completed_test_stream(output: &str) -> bool {
+    let mut block = String::new();
+    let mut positive = false;
+    let mut libtest_starts = Vec::new();
+    let mut tap_started = false;
+    let mut nextest_started = false;
+    let mut spec_started = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(count) = line.strip_prefix("running ").and_then(|rest| {
+            let (n, unit) = rest.split_once(' ')?;
+            matches!(unit, "test" | "tests")
+                .then(|| n.parse::<u64>().ok())
+                .flatten()
+        }) {
+            libtest_starts.push(count);
+        }
+        if line == "TAP version 13" {
+            if tap_started {
+                return false;
+            }
+            tap_started = true;
+        }
+        if trimmed.starts_with("Starting ") {
+            if nextest_started {
+                return false;
+            }
+            nextest_started = true;
+        }
+        block.push_str(line);
+        block.push('\n');
+        let spec_line = trimmed.strip_prefix("ℹ ").unwrap_or(trimmed);
+        if spec_line.starts_with("tests ") || trimmed.starts_with("✔ ") || trimmed.starts_with("✖ ")
+        {
+            spec_started = true;
+        }
+        let positive_count = |prefix: &str| {
+            block
+                .lines()
+                .find_map(|line| {
+                    let line = line.trim();
+                    line.strip_prefix("ℹ ")
+                        .unwrap_or(line)
+                        .strip_prefix(prefix)
+                        .and_then(|s| s.split_whitespace().next())
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
+                .is_some_and(|n| n > 0)
+        };
+        let (valid, passes) = if line.starts_with("test result: ") {
+            let executed = line.strip_prefix("test result: ok. ").and_then(|s| {
+                s.split(';').take(4).try_fold(0_u64, |sum, field| {
+                    sum.checked_add(field.split_whitespace().next()?.parse::<u64>().ok()?)
+                })
+            });
+            // A completed parent harness also closes inherited output from child
+            // probes it intentionally terminates (for example sandbox tests).
+            let consistent = if libtest_starts.is_empty() {
+                true
+            } else if let Some(index) = libtest_starts.iter().rposition(|n| Some(*n) == executed) {
+                libtest_starts.truncate(index);
+                true
+            } else {
+                false
+            };
+            (
+                consistent && completed_libtest(&block, None),
+                positive_count("test result: ok. "),
+            )
+        } else if line.starts_with("# todo ") {
+            tap_started = false;
+            (completed_tap(&block, None), positive_count("# pass "))
+        } else if spec_line.starts_with("todo ") {
+            spec_started = false;
+            (completed_spec(&block), positive_count("pass "))
+        } else if trimmed.starts_with("Summary ") {
+            nextest_started = false;
+            (
+                completed_nextest(&block),
+                trimmed
+                    .split_once("run: ")
+                    .and_then(|(_, s)| s.split_whitespace().next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .is_some_and(|n| n > 0),
+            )
+        } else {
+            continue;
+        };
+        if !valid {
+            return false;
+        }
+        positive |= passes;
+        block.clear();
+    }
+    positive
+        && libtest_starts.is_empty()
+        && !tap_started
+        && !nextest_started
+        && !spec_started
+        && !block.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("ok ")
+                || line.starts_with("not ok ")
+                || line.starts_with("test ")
+                || line.starts_with("ℹ tests ")
+                || line.starts_with("tests ")
+                || line.starts_with("✔ ")
+                || line.starts_with("✖ ")
+                || line.starts_with("# pass ")
+        })
+}
+
+fn completed_spec(output: &str) -> bool {
+    let mut counts = Vec::new();
+    for key in [
+        "tests",
+        "suites",
+        "pass",
+        "fail",
+        "cancelled",
+        "skipped",
+        "todo",
+    ] {
+        let prefix = format!("{key} ");
+        let mut values = output.lines().filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("ℹ ")
+                .unwrap_or(line)
+                .strip_prefix(&prefix)
+        });
+        let Some(count) = values.next().and_then(|n| n.parse::<u64>().ok()) else {
+            return false;
+        };
+        if values.next().is_some() {
+            return false;
+        }
+        counts.push(count);
+    }
+    let [tests, _, passed, failed, cancelled, skipped, todo] = counts.as_slice() else {
+        return false;
+    };
+    *failed == 0
+        && *cancelled == 0
+        && passed
+            .checked_add(*skipped)
+            .and_then(|n| n.checked_add(*todo))
+            == Some(*tests)
+}
+
+fn completed_libtest(output: &str, expected: Option<usize>) -> bool {
+    let private = expected.is_some();
+    let mut running = None;
+    let mut summaries = 0;
+    let mut passed_total = 0_u64;
+    let mut named_passes = 0_u64;
+    for line in output.lines() {
+        if let Some(header) = line.strip_prefix("running ").filter(|_| private) {
+            if running.is_some() {
+                return false;
+            }
+            let Some(count) = header
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+            else {
+                return false;
+            };
+            running = Some(count);
+            named_passes = 0;
+        }
+        if line.starts_with("test ") && line.ends_with(" ... ok") {
+            named_passes += 1;
+        }
+        if let Some(summary) = line.strip_prefix("test result: ") {
+            let Some(summary) = summary.strip_prefix("ok. ") else {
+                return false;
+            };
+            let mut fields = summary.split(';');
+            let mut counts = Vec::new();
+            for suffix in [
+                " passed",
+                " failed",
+                " ignored",
+                " measured",
+                " filtered out",
+            ] {
+                let Some(count) = fields
+                    .next()
+                    .and_then(|f| f.trim().strip_suffix(suffix))
+                    .and_then(|n| n.parse::<u64>().ok())
+                else {
+                    return false;
+                };
+                counts.push(count);
+            }
+            let [passed, failed, ignored, measured, filtered] = counts.as_slice() else {
+                return false;
+            };
+            let Some(executed) = passed
+                .checked_add(*failed)
+                .and_then(|n| n.checked_add(*ignored))
+                .and_then(|n| n.checked_add(*measured))
+            else {
+                return false;
+            };
+            if *failed != 0
+                || (private && (*ignored != 0 || *measured != 0 || *filtered != 0))
+                || (private && (named_passes > *passed || Some(*passed as usize) != expected))
+            {
+                return false;
+            }
+            match running.take() {
+                _ if !private => {}
+                Some(count) if count == executed => {}
+                None if private => {}
+                _ => return false,
+            }
+            let Some(total) = passed_total.checked_add(*passed) else {
+                return false;
+            };
+            passed_total = total;
+            summaries += 1;
+            named_passes = 0;
+        }
+    }
+    (!private || passed_total > 0)
+        && summaries > 0
+        && (!private || (running.is_none() && named_passes == 0 && summaries == 1))
+}
+
+fn completed_tap(output: &str, expected: Option<usize>) -> bool {
+    let private = expected.is_some();
+    let lines = output.lines().collect::<Vec<_>>();
+    let count = |prefix: &str| {
+        let mut values = lines.iter().filter_map(|line| line.strip_prefix(prefix));
+        let value = values.next()?.parse::<u64>().ok()?;
+        values.next().is_none().then_some(value)
+    };
+    let (
+        Some(tests),
+        Some(passed),
+        Some(failed),
+        Some(cancelled),
+        Some(skipped),
+        Some(todo),
+        Some(plan),
+    ) = (
+        count("# tests "),
+        count("# pass "),
+        count("# fail "),
+        count("# cancelled "),
+        count("# skipped "),
+        count("# todo "),
+        count("1.."),
+    )
+    else {
+        return false;
+    };
+    let suites = count("# suites ").unwrap_or(0);
+    let mut top_level = 0_u64;
+    let mut observed = 0_u64;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("not ok ")
+            && !trimmed.contains("# TODO")
+            && !trimmed.contains("# SKIP")
+        {
+            return false;
+        }
+        if let Some(result) = trimmed
+            .strip_prefix("ok ")
+            .or_else(|| trimmed.strip_prefix("not ok "))
+        {
+            let Some((number, name)) = result.split_once(" - ") else {
+                return false;
+            };
+            if number.parse::<u64>().is_err() {
+                return false;
+            }
+            // Absolute file wrappers are not named test evidence. The trusted runner
+            // additionally matches relative wrapper names against actual candidate files.
+            let name = name.split(" #").next().unwrap_or(name);
+            if !private && Path::new(name).is_absolute() {
+                return false;
+            }
+            observed += 1;
+            if trimmed == *line {
+                top_level += 1;
+            }
+        }
+    }
+    (!private || passed > 0)
+        && failed == 0
+        && cancelled == 0
+        && tests.checked_add(suites) == Some(observed)
+        && passed
+            .checked_add(skipped)
+            .and_then(|n| n.checked_add(todo))
+            == Some(tests)
+        && top_level == plan
+        && (!private
+            || (skipped == 0 && todo == 0 && suites == 0 && Some(tests as usize) == expected))
+}
+
+fn completed_nextest(output: &str) -> bool {
+    let mut summaries = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Summary "));
+    let Some(summary) = summaries
+        .next()
+        .and_then(|s| s.split_once(']').map(|(_, rest)| rest.trim()))
+    else {
+        return false;
+    };
+    if summaries.next().is_some() {
+        return false;
+    }
+    let Some((run, results)) = summary.split_once(" run: ") else {
+        return false;
+    };
+    let Some(run) = run
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let mut passed = None;
+    for result in results.split(',') {
+        let mut words = result.split_whitespace();
+        let (Some(count), Some(status)) = (
+            words.next().and_then(|n| n.parse::<u64>().ok()),
+            words.next(),
+        ) else {
+            return false;
+        };
+        match status {
+            "passed" if passed.is_none() => passed = Some(count),
+            "skipped" => {}
+            "flaky" if count <= run => {}
+            _ if count == 0 => {}
+            _ => return false,
+        }
+    }
+    let starts = output
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("Starting ")
+                .and_then(|s| s.split_whitespace().next())
+        })
+        .collect::<Vec<_>>();
+    if starts.len() > 1
+        || starts
+            .first()
+            .is_some_and(|n| n.parse::<u64>().ok() != Some(run))
+    {
+        return false;
+    }
+    passed == Some(run)
 }
 
 fn normalized(text: &str) -> String {
@@ -3250,6 +3809,14 @@ mod tests {
             ("build.rs", "fn main() {}"),
             ("package.json", r#"{"scripts":{"test":"exit 0"}}"#),
             ("package.json", r#"{"jest":{"testMatch":["trivial.js"]}}"#),
+            (
+                "package.json",
+                r#"{"config":{"node-options":"--import=./skip.mjs"}}"#,
+            ),
+            (
+                "package.json",
+                r#"{"engines":{"nodeOptions":"--import=./skip.mjs"}}"#,
+            ),
             (".npmrc", "node-options=--require ./skip.js"),
         ] {
             let mut fixture = Fixture::new();
@@ -3337,5 +3904,303 @@ mod tests {
             ),
             "a Node file wrapper cannot substitute for the expected test name"
         );
+    }
+    #[test]
+    fn ordinary_harness_evidence_rejects_missing_inconsistent_and_incomplete_summaries() {
+        use super::TestHarness;
+        let completed = "running 1 test\ntest acceptance ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let empty = "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let tap = "TAP version 13\nok 1 - acceptance\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+        let nextest =
+            "PASS [0.001s] fixture acceptance\nSummary [0.001s] 1 test run: 1 passed, 0 skipped\n";
+        let cases = [
+            (TestHarness::Libtest, completed.to_owned(), true),
+            (TestHarness::Libtest, format!("{completed}{empty}"), true),
+            (TestHarness::Libtest, empty.to_owned(), false),
+            (
+                TestHarness::Libtest,
+                format!("{completed}running 1 test\n{empty}"),
+                false,
+            ),
+            (
+                TestHarness::Libtest,
+                completed.replace("1 passed", "0 passed"),
+                false,
+            ),
+            (
+                TestHarness::Libtest,
+                format!(
+                    "{completed}test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
+                ),
+                true,
+            ),
+            (TestHarness::Tap, tap.to_owned(), true),
+            (
+                TestHarness::Tap,
+                tap.replace("acceptance", "/private/test.mjs"),
+                false,
+            ),
+            (
+                TestHarness::Tap,
+                tap.replace("# tests 1", "# tests 2"),
+                false,
+            ),
+            (TestHarness::Tap, format!("{tap}# pass 1\n"), false),
+            (TestHarness::Nextest, nextest.to_owned(), true),
+            (
+                TestHarness::Nextest,
+                nextest.replace("1 passed", "0 passed"),
+                false,
+            ),
+            (
+                TestHarness::Nextest,
+                nextest.replace("0 skipped", "1 failed"),
+                false,
+            ),
+            (TestHarness::Nextest, format!("{nextest}{nextest}"), true),
+        ];
+        for (harness, output, passes) in cases {
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert_eq!(
+                super::harness_test_evidence(&run, None, harness),
+                passes,
+                "a {harness:?} check needs positive, consistent completion evidence: {run:?}"
+            );
+            let truncated = kaisa_sys::CapturedRun {
+                truncated: true,
+                ..run
+            };
+            assert!(
+                !super::harness_test_evidence(&truncated, None, harness),
+                "truncation cannot establish a complete harness summary"
+            );
+        }
+    }
+    fn fixa3_evidence(output: &str) -> bool {
+        super::harness_test_evidence(
+            &kaisa_sys::CapturedRun {
+                output: output.as_bytes().to_vec(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            },
+            None,
+            super::TestHarness::Tap,
+        )
+    }
+
+    #[test]
+    fn review_fixa3_node_spec_reporter() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/n-spec-reporter.txt");
+        assert!(fixa3_evidence(output));
+        assert!(fixa3_evidence(&output.replace("ℹ ", "")));
+        assert!(!fixa3_evidence(
+            &output
+                .replace("tests 1", "tests 00")
+                .replace("pass 1", "pass 00")
+        ));
+        for bad in [
+            output.replace("fail 0", "fail 1"),
+            output.replace("cancelled 0", "cancelled 1"),
+            output.replace("pass 1", "pass 0"),
+        ] {
+            assert!(!fixa3_evidence(&bad));
+        }
+    }
+
+    #[test]
+    fn review_fixa3_two_node_runs() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/n-two-node-runs.txt");
+        assert!(fixa3_evidence(output));
+        assert!(!fixa3_evidence(&format!("{output}TAP version 13\n")));
+        assert!(!fixa3_evidence(&output.replacen("# fail 0", "# fail 1", 1)));
+        let spec = include_str!("../tests/fixtures/plain-goal-fixa3/n-spec-reporter.txt");
+        let rust = "running 1 test\ntest works ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n";
+        assert!(fixa3_evidence(&format!("{output}{spec}{rust}")));
+        assert!(!fixa3_evidence(&format!(
+            "{output}{spec}{rust}running 1 test\n"
+        )));
+        assert!(!fixa3_evidence(&format!("{output}ℹ tests 1\n")));
+        let nextest =
+            include_str!("../tests/fixtures/plain-goal-fixa3/nextest-status-level-fail.txt");
+        assert!(!fixa3_evidence(&format!("ℹ tests 1\n{nextest}")));
+        let inherited = include_str!("../tests/fixtures/plain-goal-fixa3/libtest-child-probes.txt");
+        assert!(fixa3_evidence(inherited));
+        assert!(!fixa3_evidence(&format!("{inherited}running 1 test\n")));
+    }
+
+    #[test]
+    fn review_fixa3_nextest_status_level_fail() {
+        let output =
+            include_str!("../tests/fixtures/plain-goal-fixa3/nextest-status-level-fail.txt");
+        assert!(fixa3_evidence(output));
+        assert!(!fixa3_evidence(&output.replace("Starting 3", "Starting 4")));
+        assert!(!fixa3_evidence(&format!(
+            "{output}Starting 1 test across 1 binary\n"
+        )));
+    }
+
+    #[test]
+    fn review_fixa3_nextest_flaky_retry() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/nextest-flaky-retry.txt");
+        assert!(fixa3_evidence(output));
+        assert!(fixa3_evidence(
+            &output.replace("2 passed (1 flaky)", "2 passed, 1 flaky")
+        ));
+        assert!(!fixa3_evidence(&output.replace("0 skipped", "1 failed")));
+        assert!(fixa3_evidence(&format!("{output}{output}")));
+    }
+
+    #[test]
+    fn review_fixa_libtest_accepts_inherited_stdout_and_color() {
+        use super::TestHarness;
+        let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        for output in [
+            format!(
+                "running 1 test\nrunning 1 test\ntest child ... ok\n{summary}test parent ... ok\n{summary}"
+            ),
+            format!("running 1 test\nrunning migrations\ntest accepts ... ok\n{summary}"),
+            format!(
+                "running golden files\n{summary}running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
+            ),
+            format!(
+                "running 1 test\ntest accepts ... ok\n{}",
+                summary.replace("ok.", "\x1b[32mok\x1b(B\x1b[m.")
+            ),
+        ] {
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert!(
+                super::harness_test_evidence(&run, None, TestHarness::Libtest),
+                "passing inherited output: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_private_counts_are_pinned_to_expected_tests() {
+        let expected = vec!["a".into(), "b".into()];
+        let output = "test a ... ok\ntest b ... ok\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n";
+        let run = kaisa_sys::CapturedRun {
+            output: output.as_bytes().to_vec(),
+            exit: Some(ProcessExit::Code(0)),
+            truncated: false,
+        };
+        assert!(!super::harness_test_evidence(
+            &run,
+            Some(&expected),
+            super::TestHarness::Libtest
+        ));
+        let output = "ok 1 - a\n    ok 1 - nested\nok 2 - b\n1..2\n# tests 3\n# pass 3\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+        let run = kaisa_sys::CapturedRun {
+            output: output.as_bytes().to_vec(),
+            ..run
+        };
+        assert!(!super::harness_test_evidence(
+            &run,
+            Some(&expected),
+            super::TestHarness::Tap
+        ));
+    }
+
+    #[test]
+    fn review_fixa_tap_names_can_end_in_source_extensions_and_punctuation() {
+        for name in [
+            "ships an executable src/cli.js",
+            "handles foo.ts",
+            "hello!? [v2] .cts",
+        ] {
+            let output = format!(
+                "ok 1 - {name}\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n"
+            );
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert!(
+                super::harness_test_evidence(&run, None, super::TestHarness::Tap),
+                "legitimate TAP name: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_termination_aliases_are_visible_to_spec_scan() {
+        for (path, source) in [
+            (
+                "src/lib.rs",
+                "use std::process; fn bail() { process::exit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process::exit as quit; fn bail() { quit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process::exit; fn bail() { exit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process as p; fn bail() { p::exit(2); }",
+            ),
+            ("index.js", "const { exit } = require('process'); exit(2);"),
+            ("index.js", "import { exit } from 'node:process'; exit(2);"),
+            ("index.js", "const { exit: quit } = process; quit(2);"),
+        ] {
+            let mut fixture = Fixture::new();
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("scan");
+            assert!(
+                findings.iter().any(|f| f.contains("process-termination")),
+                "{source}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_node_options_mentions_outside_package_configuration_are_harmless() {
+        for (path, source) in [
+            (
+                "src/cli.js",
+                "console.log(process.env.NODE_OPTIONS); // usage changed",
+            ),
+            ("src/cli.js", "const help = 'NODE_OPTIONS';"),
+            (
+                "package.json",
+                r#"{"description":"NODE_OPTIONS documentation","scripts":{"test":"node --test"}}"#,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            if path == "package.json" {
+                review_recommit(
+                    &mut fixture,
+                    &[(path, r#"{"scripts":{"test":"node --test"}}"#)],
+                );
+                fixture.base = fixture.candidate.commit.clone();
+            }
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("scan");
+            assert!(
+                findings.is_empty(),
+                "unrelated NODE_OPTIONS mention: {findings:?}"
+            );
+        }
     }
 }
