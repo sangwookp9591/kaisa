@@ -118,6 +118,7 @@ fn the_projects_test_command() -> DetectedCommand {
 /// The policy a test run adopts.
 fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
     kaisa_domain::Policy {
+        routing: kaisa_domain::RoutingPolicy::default(),
         revision_limit: DEFAULT_REVISION_LIMIT,
         allowed_egress_hosts: Vec::new(),
         confine_agents,
@@ -1134,5 +1135,150 @@ fn a_first_pass_pack_contains_the_same_diff_and_check_evidence_as_full_review() 
         first,
         review_fields(full),
         "both reviewers judge the same candidate with the same evidence"
+    );
+}
+
+#[test]
+fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalates() {
+    use kaisa_domain::{AgentEntry, AgentKind, Catalog, CatalogModel, Event, EventKind, Grade};
+    use serde_json::json;
+
+    const MEASURED_EPISODES: usize = 5;
+    const SEED_COST_USD: f64 = 1.0;
+    let bench = Workbench::new("measured-route-revision");
+    let state = bench.base.join("state");
+    std::fs::create_dir_all(&state).expect("isolated state");
+    let mut ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("ledger");
+    for index in 0..MEASURED_EPISODES {
+        let task = format!("task_seed{index}");
+        let attempt = format!("att_seed{index}");
+        for (kind, subject, payload) in [
+            (
+                EventKind::RouteDecided,
+                task.clone(),
+                json!({"agent":"claude","model":"haiku","effort":"medium","task_class":"T1:Developer","routing_task":task,"strategy":"cold_start"}),
+            ),
+            (
+                EventKind::AttemptAdmitted,
+                attempt.clone(),
+                json!({"task":task}),
+            ),
+            (
+                EventKind::UsageRecorded,
+                attempt.clone(),
+                json!({"input_tokens":100,"output_tokens":50,"cost_usd":SEED_COST_USD}),
+            ),
+            (
+                EventKind::GateDecided,
+                attempt.clone(),
+                json!({"attempt":attempt,"decision":"Deliver"}),
+            ),
+        ] {
+            ledger
+                .append(Event {
+                    kind,
+                    subject,
+                    payload_version: 1,
+                    payload: payload.to_string(),
+                })
+                .expect("seed outcome");
+        }
+    }
+    drop(ledger);
+    let mut catalog = Catalog::new();
+    catalog
+        .add(AgentEntry {
+            name: "claude".to_owned(),
+            kind: AgentKind::CliAgent {
+                program: the_fake_agent().to_string_lossy().into_owned(),
+            },
+            models: vec![
+                CatalogModel {
+                    id: "haiku".to_owned(),
+                    grade: Grade::T1,
+                },
+                CatalogModel {
+                    id: "sonnet".to_owned(),
+                    grade: Grade::T2,
+                },
+                CatalogModel {
+                    id: "opus".to_owned(),
+                    grade: Grade::T3,
+                },
+            ],
+            personal: false,
+        })
+        .expect("test catalog");
+    let developer = |mcp: &Path| {
+        let mut spec = scripted(mcp, &["--fake-write-next", STEP_PREFIX]);
+        spec.args
+            .extend(["--model", "haiku", "--effort", "medium"].map(str::to_owned));
+        spec
+    };
+    let reviewer = |mcp: &Path| {
+        let mut spec = scripted(mcp, &["--fake-review-require", SECOND_STEP]);
+        spec.args
+            .extend(["--model", "sonnet", "--effort", "medium"].map(str::to_owned));
+        spec
+    };
+    let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
+    let policy = a_policy(true);
+    let request = VerifiedRequest {
+        repository: &bench.repository(),
+        state_directory: &state,
+        goal: GOAL,
+        write_set: &write_set,
+        developer: &developer,
+        reviewer: &reviewer,
+        kaisa_executable: Path::new(env!("CARGO_BIN_EXE_kaisa")),
+        confine_agent: true,
+        checks: &[the_projects_test_command()],
+        policy: &policy,
+        observed: false,
+        first_pass: None,
+        egress_hosts: &[],
+        agent_writable: &[],
+        reduced_mode: &kaisa_domain::ReducedModeBasis::None,
+    };
+    let result = kaisa_daemon::run_verified_goal_with_routing(&request, &catalog)
+        .expect("verified fake loop");
+    assert!(
+        matches!(result.delivery, Delivery::Deliver { .. }),
+        "the revision still passes the existing delivery gate"
+    );
+    let ledger =
+        kaisa_ledger::EventStore::open_read_only(&state.join("kaisa.db")).expect("read ledger");
+    let observations = ledger.routing_observations().expect("derive outcomes");
+    let developer_routes: Vec<_> = observations
+        .iter()
+        .filter(|o| o.route["task_class"] == "T1:Developer" && !o.task.starts_with("task_seed"))
+        .collect();
+    let first = developer_routes.first().expect("initial actual developer");
+    let revision = developer_routes.last().expect("revision actual developer");
+    assert_eq!(
+        (&first.route["model"], &first.route["strategy"]),
+        (&json!("haiku"), &json!("measured")),
+        "the initial launch uses measured history"
+    );
+    assert!(
+        first.failed && first.delivered == Some(false),
+        "the blocking review is charged back to the measured developer route"
+    );
+    assert_eq!(
+        (&revision.route["model"], &revision.route["strategy"]),
+        (&json!("sonnet"), &json!("escalated")),
+        "the real bounded revision path escalates the model"
+    );
+    assert!(
+        revision.latency_ms.is_some(),
+        "the spawn path records measured wall time"
+    );
+    assert_eq!(
+        kaisa_daemon::routing_cells(&observations, policy.policy().routing.window),
+        kaisa_daemon::routing_cells(
+            &ledger.routing_observations().expect("replay"),
+            policy.policy().routing.window
+        ),
+        "cell aggregates are identical on ledger replay"
     );
 }

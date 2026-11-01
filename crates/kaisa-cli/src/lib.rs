@@ -16,6 +16,7 @@ mod init;
 mod local_agent;
 mod mcp_serve;
 mod policy;
+mod routing;
 mod tui;
 mod verified;
 mod watch;
@@ -97,9 +98,12 @@ More commands:
   kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
   kaisa policy show|set    view or change your personal policy
+  kaisa route explain <task|last>  recorded route and candidate constraints
+  kaisa stats routing      measured routing cells; unknown costs stay labelled
 
 Goal options:
   --agent codex            Codex develops (observed); Claude Code reviews
+  --model <id>             pin a model; automatic routing leaves pins unchanged
   --check-program <path> [--check-arg <arg>]...
                            your own trusted check instead of the project's tests
   --confine-claude         try a confined Claude Code run (T16.0 trial)
@@ -136,6 +140,8 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
+        Some("route") => routing::run(&args[1..], false, out, err),
+        Some("stats") => routing::run(&args[1..], true, out, err),
         Some("mcp") => mcp_serve::run(&args[1..], out, err),
         Some(command) if PLANNED_COMMANDS.contains(&command) => {
             writeln!(

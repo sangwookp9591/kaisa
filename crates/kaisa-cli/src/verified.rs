@@ -69,7 +69,7 @@ pub(crate) fn first_pass_route(personal: &Catalog) -> Option<LocalRoute> {
 }
 
 /// Claude Code's built-in models and the grades they serve.
-fn claude_catalog() -> Catalog {
+pub(crate) fn claude_catalog() -> Catalog {
     let mut catalog = Catalog::new();
     let built_in = AgentEntry {
         name: "claude".to_owned(),
