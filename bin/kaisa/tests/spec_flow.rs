@@ -1264,9 +1264,8 @@ fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
         true,
         platform_isolation_acceptance(),
     );
-    if bench.private_qa_unavailable(&outcome) {
-        return;
-    }
+    // An evidenced deterministic failure dominates missing private-QA isolation on
+    // every platform. Do not take the Windows-only INCONCLUSIVE shortcut here.
     assert_eq!(
         gate_line(&outcome, "staged review approved").status,
         AcceptanceStatus::Pass,

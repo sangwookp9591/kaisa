@@ -17,7 +17,9 @@ use kaisa_domain::{
 };
 use kaisa_ledger::EventStore;
 use kaisa_sys::{CapturedRun, ProcessExit, ProcessSpec, run_captured};
-use kaisa_workspace::{Candidate, CandidateCheckout, QaKind, QaSuite, QaTestFile, record_qa_suite};
+use kaisa_workspace::{
+    Candidate, CandidateCheckout, QaKind, QaSuite, QaTestFile, external_tool_path, record_qa_suite,
+};
 use serde_json::{Value, json};
 
 use crate::goal::{GoalError, GoalOutcome, at, record, record_execution};
@@ -918,7 +920,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
                 file,
                 "\n[[test]]\nname = {}\npath = {}",
                 json!(name),
-                json!(path.to_string_lossy())
+                json!(external_tool_path(&path))
             )
             .map_err(at("adding immutable QA target"))?;
         }
@@ -949,7 +951,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             "--no-run".into(),
             "--message-format=json".into(),
             "--manifest-path".into(),
-            manifest.to_string_lossy().into_owned(),
+            external_tool_path(&manifest),
         ];
         if !generated_lockfile {
             args.push("--locked".into());
@@ -1049,7 +1051,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
                         args: vec![
                             "--test".into(),
                             "--test-reporter=tap".into(),
-                            installed[index].to_string_lossy().into_owned(),
+                            external_tool_path(&installed[index]),
                         ],
                         working_directory: checkout.path().to_owned(),
                         env: Vec::new(),
@@ -1162,9 +1164,9 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
 }
 
 fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<String>, GoalError> {
-    let output = std::process::Command::new(cargo)
+    let output = std::process::Command::new(external_tool_path(cargo))
         .arg("-vV")
-        .current_dir(directory)
+        .current_dir(external_tool_path(directory))
         .env_clear()
         .envs(kaisa_sys::base_environment())
         .output()
@@ -1184,7 +1186,7 @@ fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<S
     // cfg and exact-host runners: --no-run is mandatory and Kaisa executes binaries itself.
     let runner = format!(
         "[{}, \"--kaisa-no-runner\"]",
-        json!(cargo.to_string_lossy())
+        json!(external_tool_path(cargo))
     );
     Ok(vec![
         "--config".into(),
@@ -1233,10 +1235,10 @@ fn prepare_node_inputs(checkout: &Path, parent: &Path) -> Result<(), GoalError> 
             .map_err(at("Node entry metadata"))?
             .is_dir()
         {
-            std::os::windows::fs::symlink_dir(entry.path(), destination)
+            std::os::windows::fs::symlink_dir(external_tool_path(&entry.path()), destination)
                 .map_err(at("linking public Node directory"))?;
         } else {
-            std::os::windows::fs::symlink_file(entry.path(), destination)
+            std::os::windows::fs::symlink_file(external_tool_path(&entry.path()), destination)
                 .map_err(at("linking public Node module"))?;
         }
     }
@@ -1299,11 +1301,15 @@ fn qa_command(
     #[cfg(not(target_os = "macos"))]
     let _ = &mut sandbox;
     let mut process = process.clone();
+    // Keep the canonical checkout/runtime above for sandbox and integrity comparisons.
+    // Child tools must receive ordinary Windows paths, including their cwd and outputs.
+    process.program = external_tool_path(&process.program).into();
+    process.working_directory = external_tool_path(&process.working_directory).into();
     for (key, value) in [
-        ("CARGO_HOME", cargo_home.to_string_lossy().into_owned()),
+        ("CARGO_HOME", external_tool_path(&cargo_home)),
         (
             "CARGO_TARGET_DIR",
-            runtime.join("target").to_string_lossy().into_owned(),
+            external_tool_path(&runtime.join("target")),
         ),
         ("RUSTC_WRAPPER", String::new()),
         ("RUSTC_WORKSPACE_WRAPPER", String::new()),
@@ -1314,11 +1320,11 @@ fn qa_command(
         ("NODE_OPTIONS", String::new()),
         (
             "KAISA_STATE_DIR",
-            runtime.join("test-state").to_string_lossy().into_owned(),
+            external_tool_path(&runtime.join("test-state")),
         ),
-        ("TMPDIR", runtime.to_string_lossy().into_owned()),
-        ("TMP", runtime.to_string_lossy().into_owned()),
-        ("TEMP", runtime.to_string_lossy().into_owned()),
+        ("TMPDIR", external_tool_path(runtime)),
+        ("TMP", external_tool_path(runtime)),
+        ("TEMP", external_tool_path(runtime)),
     ] {
         process.env.push((key.to_owned(), value));
     }
@@ -1383,7 +1389,7 @@ fn add_cli_help(
                             "--offline".into(),
                             "--message-format=json".into(),
                             "--manifest-path".into(),
-                            checkout.join("Cargo.toml").to_string_lossy().into_owned(),
+                            external_tool_path(&checkout.join("Cargo.toml")),
                             "--bin".into(),
                             name,
                         ],
@@ -2565,6 +2571,9 @@ mod tests {
             "[[bin]]\nname = \"qa-cli\"\npath = \"src/command.rs\""
         )
         .expect("explicit bin");
+        // Windows publishes final write metadata when the writing handle closes.
+        // Git must see the appended bin declaration rather than a cached index stat.
+        drop(manifest);
         std::fs::write(fixture.repository.join("src/command.rs"), "fn main() { assert!(std::env::args().any(|arg| arg == \"--help\")); println!(\"Usage: qa-cli <input>\"); }").expect("custom CLI entry");
         git(
             &fixture.repository,
@@ -2590,6 +2599,11 @@ mod tests {
             &temporary.0.join("help"),
         )
         .expect("fresh help checkout");
+        assert_eq!(
+            crate::qa_interface::rust_bins(checkout.path()).expect("frozen CLI bins"),
+            vec![("qa-cli".into(), "src/command.rs".into())],
+            "the frozen candidate must contain the committed explicit bin"
+        );
         let sources = crate::verify::CheckedSources::record(checkout.path()).expect("pin sources");
         let mut interface = crate::qa_interface::extract_public_interface(checkout.path())
             .expect("public contract");
