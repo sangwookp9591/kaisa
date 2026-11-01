@@ -95,9 +95,11 @@ only after the orchestrator's final-tree gate passes. Provisional approval requi
 Plain `kaisa "<goal>"` has no private QA. Recognised Cargo/libtest, nextest and
 Node TAP test checks require positive completion evidence: at least one executed
 test, no failures and consistent summaries. The recorded premature-`exit(0)`
-candidate is blocked on this path too. Added library termination calls and
-QA-influencing configuration changes stop for a person; other commands retain
-exit-code semantics with receipts labelled `exit-code only`. These are bounded
+candidate is blocked on this path too. Added process termination is advisory on
+plain goals and remains blocking in private QA; reviewers and receipts include
+its file and line. QA-influencing configuration changes stop for a person.
+Compile-only `cargo test --no-run` and unrecognised commands retain exit-code
+semantics with receipts labelled `exit-code only`. These are bounded
 lexical and in-process checks, not protection against arbitrary output forgery.
 See the [offline fake-agent demo](examples/spec-demo/),
 [recorded results](docs/evidence/spec-demo/traceability.md), and

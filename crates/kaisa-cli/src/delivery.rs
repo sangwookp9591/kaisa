@@ -28,6 +28,7 @@ pub fn report_delivery(delivery: &Delivery) -> (String, u8) {
                     RevisionReason::FailingCheck(command) => {
                         format!("- failing check: {}", command.join(" "))
                     }
+                    RevisionReason::MissingTestEvidence(reason) => format!("- {reason}"),
                     RevisionReason::Finding(finding) => {
                         let location = finding.line.map_or_else(
                             || finding.path.to_string(),
@@ -72,7 +73,11 @@ pub fn report_verified_outcome(outcome: &kaisa_daemon::VerifiedOutcome) -> (Stri
                 .chars()
                 .take(240)
                 .collect();
-            text.push_str(&format!("\nadvisory: {}: {message}", finding.path));
+            if message.starts_with("added process termination at ") {
+                text.push_str(&format!("\nadvisory: {message}"));
+            } else {
+                text.push_str(&format!("\nadvisory: {}: {message}", finding.path));
+            }
         }
         if let Some(candidate) = &outcome.candidate {
             let branch = outcome

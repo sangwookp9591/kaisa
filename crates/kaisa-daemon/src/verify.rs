@@ -49,6 +49,8 @@ pub struct Evidence {
     pub definitions_changed: Vec<String>,
     /// File-specific test weakening signals. Any of them stops delivery for a person.
     pub weakened_tests: Vec<String>,
+    /// Reviewer-visible process termination advice; never a plain-goal person gate.
+    pub advisories: Vec<String>,
 }
 
 impl Evidence {
@@ -66,8 +68,27 @@ impl Evidence {
         match self.test_evidence {
             None => "exit-code only",
             Some(true) => "positive test evidence",
-            Some(false) => "no positive test evidence",
+            Some(false) if self.exit == Some(ProcessExit::Code(0)) => "no positive test evidence",
+            Some(false) => "test command failed",
         }
+    }
+
+    /// Actionable explanation when exit zero supplied no positive completion evidence.
+    #[must_use]
+    pub fn missing_test_evidence_reason(&self) -> Option<String> {
+        if self.test_evidence != Some(false) || self.exit != Some(ProcessExit::Code(0)) {
+            return None;
+        }
+        let missing =
+            if self.output_tail.contains("0 passed;") || self.output_tail.contains("# tests 0") {
+                "the command exited 0 but reported no executed tests"
+            } else {
+                "the command exited 0 but reported no complete passing test summary"
+            };
+        Some(format!(
+            "no positive test evidence from `{}`: {missing}; run at least one test with a supported text reporter and rerun kaisa",
+            self.check.join(" ")
+        ))
     }
 
     /// The reason at the delivery boundary, capped even for programmatically built evidence.
@@ -120,9 +141,8 @@ pub fn run_trusted_checks(
 
     let mut weakened_tests = kaisa_workspace::weakened_tests(repository, base, candidate)
         .map_err(at("comparing candidate tests"))?;
-    weakened_tests.extend(crate::qa::qa_influencing_findings(
-        repository, base, candidate,
-    )?);
+    let (configuration, advisories) = crate::qa::plain_qa_findings(repository, base, candidate)?;
+    weakened_tests.extend(configuration);
     let place: PathBuf = state_directory
         .join("checks")
         .join(format!("check_{}", fresh_suffix()));
@@ -166,18 +186,41 @@ pub fn run_trusted_checks(
         let source_changed = !sources
             .matches(checkout.path(), &candidate.tree)
             .map_err(at("validating checked candidate sources"))?;
+        let harness = trusted_test_harness(repository, base, check)?;
+        let test_evidence = harness.map(|harness| {
+            let complete = crate::qa::harness_test_evidence(&run, None, harness);
+            if harness != crate::qa::TestHarness::Tap {
+                return complete;
+            }
+            let output = String::from_utf8_lossy(&run.output);
+            complete
+                && !output.lines().any(|line| {
+                    let Some((_, name)) = line
+                        .trim_start()
+                        .strip_prefix("ok ")
+                        .and_then(|s| s.split_once(" - "))
+                    else {
+                        return false;
+                    };
+                    let name = name.split(" #").next().unwrap_or(name);
+                    // Node's exit-zero wrapper identifies a file that actually exists, unlike
+                    // a descriptive test name merely ending in .js or .ts.
+                    let path = Path::new(name);
+                    spec.working_directory.join(path).is_file()
+                })
+        });
         evidence.push(Evidence {
             candidate_tree: candidate.tree.clone(),
             check: check.argv.clone(),
             exit: run.exit,
             failure_reason: source_changed.then(|| CHANGED_CHECK_SOURCES.to_owned()),
-            test_evidence: trusted_test_harness(repository, base, check)?
-                .map(|harness| crate::qa::harness_test_evidence(&run, None, harness)),
+            test_evidence,
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             output_tail: review_output_tail(&run),
             confined: sandbox.is_confined(),
             definitions_changed: definitions_changed.clone(),
             weakened_tests: weakened_tests.clone(),
+            advisories: advisories.clone(),
         });
         if source_changed {
             // Keep the failed evidence, but never let later checks run on changed sources.
@@ -197,6 +240,14 @@ fn trusted_test_harness(
     fn direct(argv: &[String]) -> Option<TestHarness> {
         let program = Path::new(argv.first()?).file_stem()?.to_str()?;
         let args = &argv[1..];
+        if program == "cargo"
+            && args
+                .iter()
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg == "--no-run")
+        {
+            return None;
+        }
         if program == "node"
             && args
                 .iter()
@@ -262,6 +313,13 @@ fn trusted_test_harness(
     let output = Command::new("git")
         .args(["show", &format!("{base}:{manifest}")])
         .current_dir(repository)
+        .env_clear()
+        .envs(kaisa_sys::base_environment())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
         .output()
         .map_err(at("reading trusted test runner"))?;
     if !output.status.success() {
@@ -336,6 +394,13 @@ fn referenced_check_paths(
     let tracked = Command::new("git")
         .args(["ls-tree", "-r", "--name-only", "-z", base, "--"])
         .current_dir(repository)
+        .env_clear()
+        .envs(kaisa_sys::base_environment())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
         .output()
         .map_err(at("listing trusted check files"))?;
     if !tracked.status.success() {

@@ -63,6 +63,7 @@ pub(crate) fn revision_findings(reasons: &[RevisionReason]) -> Vec<String> {
             RevisionReason::FailingCheck(check) => {
                 findings.push(format!("failing check: `{}`", check.join(" ")));
             }
+            RevisionReason::MissingTestEvidence(reason) => findings.push(reason.clone()),
             RevisionReason::Finding(finding) => {
                 let place: String = finding.line.map_or_else(
                     || finding.path.as_str().to_owned(),

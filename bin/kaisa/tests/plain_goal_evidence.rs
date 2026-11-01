@@ -190,13 +190,35 @@ fn a_legitimate_plain_goal_with_completed_tests_is_delivered() {
 }
 
 #[test]
-fn a_plain_goal_that_adds_a_library_termination_call_waits_for_a_person() {
+fn a_plain_goal_termination_scan_is_advisory_even_with_exit_code_only_checks() {
     let project = Project::new("goal-guard", LIBRARY);
     let output = project.goal("src/lib.rs", EARLY_EXIT, &["git", "diff", "--exit-code"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("waiting for you") && stdout.contains("process-termination"),
-        "the shared diff guard must name the call even when the check is exit-code only: {output:?}"
+        output.status.success()
+            && stdout.contains("advisory: added process termination at src/lib.rs:1"),
+        "plain goals expose termination without a person gate: {output:?}"
+    );
+    assert!(project.receipts().iter().all(|r| {
+        r["weakened_tests"].as_array().expect("findings").is_empty()
+            && r["advisories"]
+                .as_array()
+                .expect("advice")
+                .iter()
+                .any(|a| a == "advisory: added process termination at src/lib.rs:1")
+    }));
+    let ledger = kaisa_ledger::EventStore::open_read_only(&project.root.join("state/kaisa.db"))
+        .expect("ledger");
+    assert!(
+        ledger
+            .attempts_from_log()
+            .expect("attempts")
+            .into_iter()
+            .filter_map(|a| a.context_pack)
+            .filter_map(|digest| ledger.context_pack(&digest).expect("pack"))
+            .any(|pack| String::from_utf8_lossy(&pack)
+                .contains("advisory: added process termination at src/lib.rs:1")),
+        "reviewer receives the advisory in its evidence"
     );
 }
 
@@ -255,8 +277,8 @@ fn a_plain_goal_with_no_executed_tests_records_the_missing_positive_evidence() {
     assert!(
         developer_packs
             .iter()
-            .any(|pack| pack.contains("failing check:")
-                && pack.contains("no positive test evidence")),
+            .any(|pack| pack.contains("no positive test evidence from `")
+                && pack.contains("no executed tests")),
         "bounded revisions must explain the deterministic harness failure: {developer_packs:?}"
     );
 }
@@ -323,7 +345,7 @@ fn node_and_npm_test_checks_require_completed_named_tests() {
     if !node_available() {
         return;
     }
-    const NODE_PASS: &str = "import test from 'node:test'; import assert from 'node:assert/strict'; test('acceptance', () => { assert.equal(true, true); });\n";
+    const NODE_PASS: &str = "import test from 'node:test'; import assert from 'node:assert/strict'; test('ships an executable src/cli.js', () => { assert.equal(true, true); });\n";
     const NODE_EXIT: &str = "process.exit(0);\n";
     for (name, source, should_pass) in [
         ("node-pass", NODE_PASS, true),
@@ -418,7 +440,110 @@ fn a_plain_goal_that_adds_node_process_exit_in_a_library_is_not_delivered() {
         "Node library termination must block delivery despite an approving reviewer: {output:?}"
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("process-termination"),
-        "the shared library diff guard must explain the stop: {output:?}"
+        String::from_utf8_lossy(&output.stdout).contains("no positive test evidence from `"),
+        "positive evidence, not the advisory scan, must explain the stop: {output:?}"
     );
+}
+
+#[test]
+fn review_fixa_real_cargo_stdout_variants_deliver() {
+    let reexec = r#"pub fn accepts() -> bool { true }
+#[cfg(test)] mod tests {
+    #[test] fn child_probe() { assert!(super::accepts()); }
+    #[test] fn parent() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "tests::child_probe"]).status().expect("child");
+        assert!(status.success());
+    }
+}
+"#;
+    for (name, source, args) in [
+        (
+            "self-reexec",
+            reexec.to_owned(),
+            vec!["cargo", "test", "--offline"],
+        ),
+        (
+            "nocapture",
+            LIBRARY.replace(
+                "assert!(accepts());",
+                "println!(\"running migrations\"); assert!(accepts());",
+            ),
+            vec!["cargo", "test", "--offline", "--", "--nocapture"],
+        ),
+        (
+            "color",
+            LIBRARY.to_owned(),
+            vec!["cargo", "test", "--offline", "--", "--color", "always"],
+        ),
+    ] {
+        let project = Project::new(name, &source);
+        let output = project.goal("src/lib.rs", &format!("{source}// comment\n"), &args);
+        assert!(output.status.success(), "passing {name} goal: {output:?}");
+        assert!(
+            project
+                .receipts()
+                .iter()
+                .all(|r| r["validation"] == "positive test evidence")
+        );
+    }
+    let project = Project::new("custom-harness", LIBRARY);
+    project.write("Cargo.toml", "[package]\nname = \"plain-evidence\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[[test]]\nname = \"golden\"\nharness = false\n");
+    project.write(
+        "tests/golden.rs",
+        "fn main() { println!(\"running golden files\"); assert!(plain_evidence::accepts()); }\n",
+    );
+    project.commit();
+    let output = project.goal(
+        "src/lib.rs",
+        &format!("{LIBRARY}// comment\n"),
+        &["cargo", "test", "--offline"],
+    );
+    assert!(
+        output.status.success(),
+        "passing custom harness plus libtest: {output:?}"
+    );
+}
+
+#[test]
+fn review_fixa_no_run_is_compile_only_and_missing_evidence_is_actionable() {
+    let project = Project::new("compile-only", ZERO_TESTS);
+    let evidence = project.checks(&["cargo", "test", "--offline", "--no-run"]);
+    assert!(
+        evidence
+            .iter()
+            .all(|e| e.passed() && e.validation_label() == "exit-code only")
+    );
+    let output = project.goal("src/notes.md", "docs", &["cargo", "test", "--offline"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no positive test evidence from `")
+            && stdout.contains("the command exited 0 but reported no executed tests")
+            && stdout.contains("run at least one test"),
+        "actionable failure: {output:?}"
+    );
+    assert!(!stdout.contains("Some(Code(0))"));
+}
+
+#[test]
+fn review_fixa_plain_cli_exit_aliases_are_advisory_with_passing_tests() {
+    for (name, source) in [
+        ("direct", "fn main() { std::process::exit(2); }"),
+        (
+            "module",
+            "use std::process; fn main() { process::exit(2); }",
+        ),
+        (
+            "function",
+            "use std::process::exit as quit; fn main() { quit(2); }",
+        ),
+    ] {
+        let project = Project::new(name, LIBRARY);
+        let output = project.goal("src/main.rs", source, &["cargo", "test", "--offline"]);
+        assert!(output.status.success(), "legitimate CLI exit: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("advisory: added process termination at src/main.rs:1")
+        );
+    }
 }

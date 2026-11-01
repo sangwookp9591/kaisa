@@ -13,8 +13,9 @@ The common comparison runs the same candidate edit and always-approving fake rev
 through the ordinary verified-goal CLI on each revision. After additionally runs
 termination/configuration attacks through the spec path (which did not exist on the
 before revision). Ordinary goals now block the recorded exit-zero fixture too,
-using the shared positive harness evidence parser and termination/configuration
-findings. Independent private acceptance tests remain specific to `build --spec`.
+using positive harness completion evidence. Added termination is advisory on
+plain goals and remains blocking in private QA; configuration guards still apply.
+Independent private acceptance tests remain specific to `build --spec`.
 
 | Pattern | Before | After | Observed gate reason / line | Raw evidence |
 |---|---|---|---|---|
@@ -26,7 +27,7 @@ findings. Independent private acceptance tests remain specific to `build --spec`
 | catch-unwind | delivered (exit 0) | blocked (ordinary goal) | weakened_tests: src/lib.rs: assertions swallowed by catch_unwind (0 -> 1) | [before](spec-demo/before/catch-unwind.txt), [after](spec-demo/after/catch-unwind.txt) |
 | self-compare | blocked (exit 3) | blocked (ordinary goal) | weakened_tests: src/lib.rs: tautological assertions added (0 -> 1) | [before](spec-demo/before/self-compare.txt), [after](spec-demo/after/self-compare.txt) |
 | legacy-cargo-config | blocked (exit 4) | blocked (ordinary goal) | the candidate changed what its checks run: .cargo/config | [before](spec-demo/before/legacy-cargo-config.txt), [after](spec-demo/after/legacy-cargo-config.txt) |
-| exit-zero | delivered (exit 0) | blocked (ordinary goal, exit 3; spec build also blocked) | weakened_tests: Added process-termination call in src/lib.rs; reviewer justification with evidence required; the trusted Cargo check also lacks positive completion evidence | [before](spec-demo/before/exit-zero.txt), [earlier ordinary after](spec-demo/after/exit-zero.txt), [plain-goal guard rerun](spec-demo/plain-goal-guards/exit-zero.txt), [spec after](spec-demo/after-spec/exit-zero/06-build-fail.txt) |
+| exit-zero | delivered (exit 0) | blocked (ordinary goal, exit 4 after FIXA2; spec build also blocked) | no positive test evidence from `cargo test --offline`: the command exited 0 but reported no executed tests; run at least one test with a supported text reporter and rerun kaisa | [before](spec-demo/before/exit-zero.txt), [earlier ordinary after](spec-demo/after/exit-zero.txt), [plain-goal guard rerun](spec-demo/plain-goal-guards/exit-zero.txt), [spec after](spec-demo/after-spec/exit-zero/06-build-fail.txt) |
 | cargo-runner | blocked (exit 3) | blocked (spec build) | deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate | [before](spec-demo/before/cargo-runner.txt), [ordinary after](spec-demo/after/cargo-runner.txt), [spec after](spec-demo/after-spec/cargo-runner/06-build-fail.txt) |
 | build-rs-private-swap | blocked (exit 3) | blocked (spec build) | deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate | [before](spec-demo/before/build-rs-private-swap.txt), [ordinary after](spec-demo/after/build-rs-private-swap.txt), [spec after](spec-demo/after-spec/build-rs-private-swap/06-build-fail.txt) |
 
@@ -77,3 +78,7 @@ python3 examples/spec-demo/run.py --attack build-rs-private-swap --output target
 
 This is a finite adversarial fixture comparison, not a security completeness score.
 Lexical disguises and anticipated in-process output forgery remain documented limits.
+
+The [FIXA2 review rerun](plain-goal-fixa2.md) records the 57 plain-goal cases
+against `6871daf`, including false-block counts, all per-case outcomes, restored
+private summary-count regressions and the remaining output-format limitations.

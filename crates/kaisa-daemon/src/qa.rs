@@ -1504,6 +1504,18 @@ pub(crate) fn qa_influencing_findings(
             .iter()
             .any(|key| {
                 before.as_ref().and_then(|v| v.get(key)) != after.as_ref().and_then(|v| v.get(key))
+            }) || [
+                "/config/node-options",
+                "/config/nodeOptions",
+                "/config/NODE_OPTIONS",
+                "/engines/node-options",
+                "/engines/nodeOptions",
+                "/devEngines/node-options",
+            ]
+            .iter()
+            .any(|pointer| {
+                before.as_ref().and_then(|v| v.pointer(pointer))
+                    != after.as_ref().and_then(|v| v.pointer(pointer))
             })
         } else {
             false
@@ -1513,7 +1525,7 @@ pub(crate) fn qa_influencing_findings(
         }
         if !matches!(
             Path::new(&path).extension().and_then(|s| s.to_str()),
-            Some("rs" | "js" | "mjs" | "cjs" | "ts")
+            Some("rs" | "js" | "mjs" | "cjs" | "ts" | "mts" | "cts")
         ) || path.split('/').any(|part| part == "tests")
             || file.contains(".test.")
             || file.contains(".spec.")
@@ -1525,26 +1537,173 @@ pub(crate) fn qa_influencing_findings(
         };
         let before = source(base);
         let after = source(&candidate.commit);
-        let javascript = !path.ends_with(".rs");
-        let before_code = crate::qa_interface::code_tokens(&before, javascript).join("");
-        let after_code = crate::qa_interface::code_tokens(&after, javascript).join("");
-        if [
-            "std::process::exit(",
-            "process::abort(",
-            "process.exit(",
-            "process.kill(process.pid",
-        ]
-        .iter()
-        .any(|call| after_code.matches(call).count() > before_code.matches(call).count())
-        {
-            findings.insert(format!("Added process-termination call in {path}; reviewer justification with evidence required"));
-        }
-        let added = after;
-        if added.contains("NODE_OPTIONS") {
-            findings.insert(format!("QA-influencing configuration: {path} changes node options; reviewer justification with evidence required"));
+        let before_calls = termination_lines(&before, !path.ends_with(".rs"));
+        let after_calls = termination_lines(&after, !path.ends_with(".rs"));
+        if after_calls.len() > before_calls.len() {
+            for line in after_calls {
+                findings.insert(format!("Added process-termination call at {path}:{line}; reviewer justification with evidence required"));
+            }
         }
     }
     Ok(findings.into_iter().collect())
+}
+
+/// Plain goals expose termination findings to reviewers without a person gate.
+pub(crate) fn plain_qa_findings(
+    repository: &Path,
+    base: &str,
+    candidate: &Candidate,
+) -> Result<(Vec<String>, Vec<String>), GoalError> {
+    let mut blocking = Vec::new();
+    let mut advisory = Vec::new();
+    for finding in qa_influencing_findings(repository, base, candidate)? {
+        if let Some(location) = finding.strip_prefix("Added process-termination call at ") {
+            let location = location.split(';').next().unwrap_or(location);
+            advisory.push(format!("advisory: added process termination at {location}"));
+        } else {
+            blocking.push(finding);
+        }
+    }
+    Ok((blocking, advisory))
+}
+
+fn termination_tokens(source: &str, javascript: bool) -> Vec<String> {
+    if javascript {
+        return node_tokens(source);
+    }
+    let tokens = crate::qa_interface::code_tokens(source, false);
+    let mut result = Vec::new();
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(token) = iter.next() {
+        if token == ":" && iter.peek().is_some_and(|t| t == ":") {
+            iter.next();
+            result.push("::".into());
+        } else {
+            result.push(token);
+        }
+    }
+    result
+}
+
+/// Bounded lexical detection, including common imported process/function aliases.
+fn termination_lines(source: &str, javascript: bool) -> Vec<usize> {
+    let tokens = termination_tokens(source, javascript);
+    let mut calls: BTreeSet<Vec<String>> = BTreeSet::new();
+    let mut add = |name: &str, separator: &str| {
+        for function in ["exit", "abort"] {
+            calls.insert(vec![
+                name.into(),
+                separator.into(),
+                function.into(),
+                "(".into(),
+            ]);
+        }
+    };
+    if javascript {
+        add("process", ".");
+    } else {
+        calls.insert(
+            ["std", "::", "process", "::", "exit", "("]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        calls.insert(
+            ["std", "::", "process", "::", "abort", "("]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        for (index, token) in tokens.iter().enumerate() {
+            if token != "use" {
+                continue;
+            }
+            let end = tokens[index..]
+                .iter()
+                .position(|t| t == ";")
+                .map_or(tokens.len(), |n| index + n);
+            let import = &tokens[index + 1..end];
+            if import.starts_with(&["std".into(), "::".into(), "process".into()]) {
+                let alias = import
+                    .iter()
+                    .position(|t| t == "as")
+                    .and_then(|n| import.get(n + 1));
+                if import.get(3).is_none() || import.get(3).is_some_and(|t| t == "as") {
+                    let name = alias.map_or("process", String::as_str);
+                    for function in ["exit", "abort"] {
+                        calls.insert(vec![name.into(), "::".into(), function.into(), "(".into()]);
+                    }
+                } else if import.get(4).is_some_and(|t| t == "exit" || t == "abort") {
+                    calls.insert(vec![alias.unwrap_or(&import[4]).clone(), "(".into()]);
+                }
+            }
+        }
+    }
+    if javascript {
+        for (index, token) in tokens.iter().enumerate() {
+            if !matches!(token.as_str(), "const" | "let" | "var" | "import") {
+                continue;
+            }
+            let end = tokens[index..]
+                .iter()
+                .position(|t| t == ";")
+                .map_or(tokens.len(), |n| index + n);
+            let declaration = &tokens[index + 1..end];
+            let process_module = declaration
+                .iter()
+                .any(|t| t == "string:process" || t == "string:node:process")
+                || declaration.windows(2).any(|w| w == ["=", "process"]);
+            if !process_module {
+                continue;
+            }
+            if declaration.first().is_some_and(|t| t != "{") {
+                for function in ["exit", "abort"] {
+                    calls.insert(vec![
+                        declaration[0].clone(),
+                        ".".into(),
+                        function.into(),
+                        "(".into(),
+                    ]);
+                }
+            }
+            for (n, name) in declaration
+                .iter()
+                .enumerate()
+                .take_while(|(_, t)| t.as_str() != "}")
+            {
+                if matches!(name.as_str(), "exit" | "abort") {
+                    let alias = if declaration
+                        .get(n + 1)
+                        .is_some_and(|t| t == "as" || t == ":")
+                    {
+                        declaration.get(n + 2).unwrap_or(name)
+                    } else {
+                        name
+                    };
+                    calls.insert(vec![alias.clone(), "(".into()]);
+                }
+            }
+        }
+        calls.insert(
+            ["process", ".", "kill", "(", "process", ".", "pid"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+    }
+    let mut lines = Vec::new();
+    for index in 0..tokens.len() {
+        if calls.iter().any(|call| tokens[index..].starts_with(call)) {
+            // Tokenize complete prefixes so multiline comments/strings retain their semantics.
+            let line = source
+                .match_indices('\n')
+                .map(|(at, _)| &source[..at])
+                .position(|prefix| {
+                    let count = termination_tokens(prefix, javascript).len();
+                    count > index
+                })
+                .map_or(source.lines().count().max(1), |n| n + 1);
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 /// Only flat Rust #[test] functions and Node test('static name', ...) are supported. This
@@ -1574,7 +1733,7 @@ fn expected_test_names(
     Ok(names)
 }
 
-fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
+fn node_tokens(source: &str) -> Vec<String> {
     // A tiny JS lexical scan preserves only static string operands, skipping comments and
     // consuming templates whole. Other API extraction uses the opaque-literal lexer.
     let bytes = source.as_bytes();
@@ -1632,6 +1791,11 @@ fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
         }
         tokens.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
     }
+    tokens
+}
+
+fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
+    let tokens = node_tokens(source);
     let mut names = Vec::new();
     for window in tokens.windows(4) {
         if window[0] == "test" && window[1] == "(" && window[3] == "," {
@@ -1671,10 +1835,10 @@ pub(crate) fn harness_test_evidence(
     if run.truncated || expected.is_some_and(<[String]>::is_empty) {
         return false;
     }
-    let output = String::from_utf8_lossy(&run.output);
+    let output = strip_ansi(&String::from_utf8_lossy(&run.output));
     let complete = match harness {
-        TestHarness::Libtest => completed_libtest(&output, expected.is_some()),
-        TestHarness::Tap => completed_tap(&output, expected.is_some()),
+        TestHarness::Libtest => completed_libtest(&output, expected.map(<[String]>::len)),
+        TestHarness::Tap => completed_tap(&output, expected.map(<[String]>::len)),
         TestHarness::Nextest => completed_nextest(&output),
     };
     if !complete {
@@ -1702,13 +1866,49 @@ pub(crate) fn harness_test_evidence(
     observed == expected
 }
 
-fn completed_libtest(output: &str, private: bool) -> bool {
+fn strip_ansi(output: &str) -> String {
+    let mut chars = output.chars();
+    let mut clean = String::new();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            clean.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // Terminfo color resets can include ESC(B before ESC[m.
+            Some('(' | ')' | '%' | '#') => {
+                chars.next();
+            }
+            Some(']') => {
+                let mut escape = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (escape && c == '\\') {
+                        break;
+                    }
+                    escape = c == '\x1b';
+                }
+            }
+            _ => {}
+        }
+    }
+    clean
+}
+
+fn completed_libtest(output: &str, expected: Option<usize>) -> bool {
+    let private = expected.is_some();
     let mut running = None;
     let mut summaries = 0;
     let mut passed_total = 0_u64;
     let mut named_passes = 0_u64;
     for line in output.lines() {
-        if let Some(header) = line.strip_prefix("running ") {
+        if let Some(header) = line.strip_prefix("running ").filter(|_| private) {
             if running.is_some() {
                 return false;
             }
@@ -1759,11 +1959,12 @@ fn completed_libtest(output: &str, private: bool) -> bool {
             };
             if *failed != 0
                 || (private && (*ignored != 0 || *measured != 0 || *filtered != 0))
-                || named_passes > *passed
+                || (private && (named_passes > *passed || Some(*passed as usize) != expected))
             {
                 return false;
             }
             match running.take() {
+                _ if !private => {}
                 Some(count) if count == executed => {}
                 None if private => {}
                 _ => return false,
@@ -1776,10 +1977,11 @@ fn completed_libtest(output: &str, private: bool) -> bool {
             named_passes = 0;
         }
     }
-    running.is_none() && named_passes == 0 && passed_total > 0 && (!private || summaries == 1)
+    passed_total > 0 && (!private || (running.is_none() && named_passes == 0 && summaries == 1))
 }
 
-fn completed_tap(output: &str, private: bool) -> bool {
+fn completed_tap(output: &str, expected: Option<usize>) -> bool {
+    let private = expected.is_some();
     let lines = output.lines().collect::<Vec<_>>();
     let count = |prefix: &str| {
         let mut values = lines.iter().filter_map(|line| line.strip_prefix(prefix));
@@ -1827,14 +2029,10 @@ fn completed_tap(output: &str, private: bool) -> bool {
             if number.parse::<u64>().is_err() {
                 return false;
             }
-            // Node reports a file wrapper as a passing test when its process exits early.
-            // A wrapper supplies no named test completion evidence.
+            // Absolute file wrappers are not named test evidence. The trusted runner
+            // additionally matches relative wrapper names against actual candidate files.
             let name = name.split(" #").next().unwrap_or(name);
-            if !private
-                && [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix))
-            {
+            if !private && Path::new(name).is_absolute() {
                 return false;
             }
             observed += 1;
@@ -1852,7 +2050,8 @@ fn completed_tap(output: &str, private: bool) -> bool {
             .and_then(|n| n.checked_add(todo))
             == Some(tests)
         && top_level == plan
-        && (!private || (skipped == 0 && todo == 0 && suites == 0))
+        && (!private
+            || (skipped == 0 && todo == 0 && suites == 0 && Some(tests as usize) == expected))
 }
 
 fn completed_nextest(output: &str) -> bool {
@@ -3442,6 +3641,14 @@ mod tests {
             ("build.rs", "fn main() {}"),
             ("package.json", r#"{"scripts":{"test":"exit 0"}}"#),
             ("package.json", r#"{"jest":{"testMatch":["trivial.js"]}}"#),
+            (
+                "package.json",
+                r#"{"config":{"node-options":"--import=./skip.mjs"}}"#,
+            ),
+            (
+                "package.json",
+                r#"{"engines":{"nodeOptions":"--import=./skip.mjs"}}"#,
+            ),
             (".npmrc", "node-options=--require ./skip.js"),
         ] {
             let mut fixture = Fixture::new();
@@ -3545,7 +3752,7 @@ mod tests {
             (
                 TestHarness::Libtest,
                 format!("{completed}running 1 test\n{empty}"),
-                false,
+                true,
             ),
             (
                 TestHarness::Libtest,
@@ -3557,7 +3764,7 @@ mod tests {
                 format!(
                     "{completed}test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
                 ),
-                false,
+                true,
             ),
             (TestHarness::Tap, tap.to_owned(), true),
             (
@@ -3602,6 +3809,155 @@ mod tests {
             assert!(
                 !super::harness_test_evidence(&truncated, None, harness),
                 "truncation cannot establish a complete harness summary"
+            );
+        }
+    }
+    #[test]
+    fn review_fixa_libtest_accepts_inherited_stdout_and_color() {
+        use super::TestHarness;
+        let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        for output in [
+            format!(
+                "running 2 tests\nrunning 1 test\ntest child ... ok\n{summary}test parent ... ok\n{summary}"
+            ),
+            format!("running 1 test\nrunning migrations\ntest accepts ... ok\n{summary}"),
+            format!(
+                "running golden files\n{summary}running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
+            ),
+            format!(
+                "running 1 test\ntest accepts ... ok\n{}",
+                summary.replace("ok.", "\x1b[32mok\x1b(B\x1b[m.")
+            ),
+        ] {
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert!(
+                super::harness_test_evidence(&run, None, TestHarness::Libtest),
+                "passing inherited output: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_private_counts_are_pinned_to_expected_tests() {
+        let expected = vec!["a".into(), "b".into()];
+        let output = "test a ... ok\ntest b ... ok\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n";
+        let run = kaisa_sys::CapturedRun {
+            output: output.as_bytes().to_vec(),
+            exit: Some(ProcessExit::Code(0)),
+            truncated: false,
+        };
+        assert!(!super::harness_test_evidence(
+            &run,
+            Some(&expected),
+            super::TestHarness::Libtest
+        ));
+        let output = "ok 1 - a\n    ok 1 - nested\nok 2 - b\n1..2\n# tests 3\n# pass 3\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+        let run = kaisa_sys::CapturedRun {
+            output: output.as_bytes().to_vec(),
+            ..run
+        };
+        assert!(!super::harness_test_evidence(
+            &run,
+            Some(&expected),
+            super::TestHarness::Tap
+        ));
+    }
+
+    #[test]
+    fn review_fixa_tap_names_can_end_in_source_extensions_and_punctuation() {
+        for name in [
+            "ships an executable src/cli.js",
+            "handles foo.ts",
+            "hello!? [v2] .cts",
+        ] {
+            let output = format!(
+                "ok 1 - {name}\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n"
+            );
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert!(
+                super::harness_test_evidence(&run, None, super::TestHarness::Tap),
+                "legitimate TAP name: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_termination_aliases_are_visible_to_spec_scan() {
+        for (path, source) in [
+            (
+                "src/lib.rs",
+                "use std::process; fn bail() { process::exit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process::exit as quit; fn bail() { quit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process::exit; fn bail() { exit(2); }",
+            ),
+            (
+                "src/lib.rs",
+                "use std::process as p; fn bail() { p::exit(2); }",
+            ),
+            ("index.js", "const { exit } = require('process'); exit(2);"),
+            ("index.js", "import { exit } from 'node:process'; exit(2);"),
+            ("index.js", "const { exit: quit } = process; quit(2);"),
+        ] {
+            let mut fixture = Fixture::new();
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("scan");
+            assert!(
+                findings.iter().any(|f| f.contains("process-termination")),
+                "{source}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_fixa_node_options_mentions_outside_package_configuration_are_harmless() {
+        for (path, source) in [
+            (
+                "src/cli.js",
+                "console.log(process.env.NODE_OPTIONS); // usage changed",
+            ),
+            ("src/cli.js", "const help = 'NODE_OPTIONS';"),
+            (
+                "package.json",
+                r#"{"description":"NODE_OPTIONS documentation","scripts":{"test":"node --test"}}"#,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            if path == "package.json" {
+                review_recommit(
+                    &mut fixture,
+                    &[(path, r#"{"scripts":{"test":"node --test"}}"#)],
+                );
+                fixture.base = fixture.candidate.commit.clone();
+            }
+            review_recommit(&mut fixture, &[(path, source)]);
+            let findings = super::qa_influencing_findings(
+                &fixture.repository,
+                &fixture.base,
+                &fixture.candidate,
+            )
+            .expect("scan");
+            assert!(
+                findings.is_empty(),
+                "unrelated NODE_OPTIONS mention: {findings:?}"
             );
         }
     }
