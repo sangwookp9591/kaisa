@@ -1,0 +1,18 @@
+spec agent containment: reduced ([DescendantContainment])
+spec_missing v1 digest=41825642f81f99ebe3e0c948410dfafc69f312dd1dca047832edc6bbcb6db998 provisional draft (NOT human-approved) frozen=false
+{
+  "id": "spec_missing",
+  "version": 1,
+  "title": "Reject empty inputs",
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "Reject empty inputs."
+    }
+  ],
+  "criteria": [],
+  "ambiguities": [],
+  "invariants": [],
+  "error_behaviour": []
+}
+missing acceptance criteria: R1

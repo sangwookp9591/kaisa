@@ -1,0 +1,35 @@
+{
+  "fail": {
+    "run_id": "run_dmjv6idr5liw00022ox0000000",
+    "final_tree": "ea81301c34e6391612691ddd942f623a0705cc2b",
+    "requirements": [
+      {
+        "requirement_id": "R1",
+        "text": "Reject empty inputs.",
+        "criteria": [
+          {
+            "criterion_id": "AC-1",
+            "private_tests": [
+              {
+                "test_id": "empty-input",
+                "kind": "acceptance",
+                "passed": false,
+                "candidate_tree": "ea81301c34e6391612691ddd942f623a0705cc2b",
+                "output_digest": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+              },
+              {
+                "test_id": "empty-input",
+                "kind": "adversarial",
+                "passed": false,
+                "candidate_tree": "ea81301c34e6391612691ddd942f623a0705cc2b",
+                "output_digest": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+              }
+            ],
+            "development_tests": []
+          }
+        ]
+      }
+    ],
+    "gaps": []
+  }
+}

@@ -1,0 +1,7 @@
+Command: ["/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa", "--agent-program", "/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa-fake-agent", "--agent-arg", "--fake-write", "--agent-arg", "test.mjs", "--agent-arg", "--fake-content", "--agent-arg", "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest.skip('value', () => {\n  assert.equal(true, false);\n});\n", "--reviewer-arg", "--fake-review-require", "--reviewer-arg", "test.mjs", "--check-program", "/usr/local/bin/node", "--check-arg", "--test", "fix failing acceptance tests"]
+▶ fix failing acceptance tests
+att_dmjv7fqnsx3k0000o410000002 exited with code 0; work preserved on kaisa/att_dmjv7fqnsx3k0000o410000002 at 2d2fb4bfe224; context pack 206e6c814243; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+att_dmjv7g0r0meo0000o410000006 exited with code 0; no changes to preserve; context pack ad0c084bcfa2; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+waiting for you: weakened_tests: test.mjs: tests and assertions decreased (1 -> 0); test.mjs: .skip added (0 -> 1)
+
+CLI exit: 3

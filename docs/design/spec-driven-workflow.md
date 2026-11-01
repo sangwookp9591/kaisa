@@ -1,6 +1,6 @@
-# Specification-driven, independently verified workflow (design, v0.1)
+# Specification-driven, independently verified workflow (implemented workflow)
 
-Status: design for implementation. It extends the verified run (`team.rs`: developer → trusted checks → reviewer → gate) without replacing it. Plain `kaisa "<goal>"` keeps working unchanged. The new workflow runs when a goal is bound to a specification: `kaisa build --spec <id>`.
+Status: implemented on `feat/spec-workflow`; offline macOS evidence and deviations are recorded in [the evidence index](../evidence/isolation.md) and [limits](../evidence/limitations.md). It extends the verified run (`team.rs`: developer → trusted checks → reviewer → gate) without replacing it. Plain `kaisa "<goal>"` keeps working unchanged. The new workflow runs when a goal is bound to a specification: `kaisa build --spec <id>`.
 
 The purpose is **separated ownership with independently verifiable evidence**, not more tests:
 
@@ -118,7 +118,7 @@ well as instructed; its filesystem view must not be equated with prompt-pack cle
 
 `PASS` only when all hold: spec approval verified (human, or provisional with the policy allowing it — the result then says `PASS (provisional spec)`); spec digest unchanged; traceability complete; deterministic checks green; every private acceptance and adversarial test passed on the final tree; domain test review has no blocking finding; context-aware review approved with no unresolved blocking finding; legacy characterization honoured; evidence preserved. `FAIL` when any check failed with evidence. `INCONCLUSIVE` when a check could not run or isolation was reduced without policy acceptance. A reviewer approval never overrides a failed deterministic check. Delivery (the result branch and its merge instructions) happens only on PASS; exit codes: PASS 0, FAIL 4, INCONCLUSIVE 3.
 
-## 6. Implementation plan and ownership
+## 6. Implemented work packages and ownership
 
 | Work package | Priority | Owns (new files unless stated) |
 |---|---|---|
@@ -131,3 +131,19 @@ well as instructed; its filesystem view must not be equated with prompt-pack cle
 | WP7 Reports, docs, demo, evidence | P2 | architecture docs, README, `kaisa spec report`, end-to-end demo, before/after comparison |
 
 Waves: WP1 + WP2 + WP3 (independent) → WP4 + WP5 + WP6 (integration) → WP7 (real runs, reports).
+
+## Implementation deviations and evidence (WP7)
+
+The CLI uses production characterization, domain-test-review and staged-review adapters.
+Ordered review stages arrive together in a single agent session; the parser enforces
+answer order, not temporal blindness of reasoning. Drafting and build are separate
+commands. Reports are Markdown at the CLI, with JSON traceability preserved under
+`state/spec-runs/<run>/traceability.json`. Explicit fake launches bypass measured model
+routing; the offline demo makes no model-quality or price claim. Parallel explicit DAG
+missions are a separate entry path from the serial spec-build revision loop.
+
+[PASS and FAIL reports](../evidence/spec-demo/traceability.md) include every gate line
+and final-tree mappings. [Isolation regressions](../evidence/isolation.md),
+[before/after runs](../evidence/before-after.md), and
+[execution costs and limits](../evidence/limitations.md) distinguish runtime observations
+from static mechanisms and unverified platforms.

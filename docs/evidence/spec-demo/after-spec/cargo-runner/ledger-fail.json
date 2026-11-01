@@ -1,0 +1,362 @@
+[
+  {
+    "sequence": 1,
+    "kind": "mission.created",
+    "subject": "mis_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"goal\":\"Draft a specification from these original requirements and the repository context. You are read-only. Kaisa owns the R identifiers and verbatim text: [{\\\"id\\\":\\\"R1\\\",\\\"text\\\":\\\"Reject empty inputs.\\\"}]\\nPropose observable criteria (Normal, Edge, Error, Invariant), ambiguities, invariants and error behaviour. Mark correction=true only for explicit legacy behaviour changes. Do not claim approval. Finish with exactly one unquoted ```kaisa-spec JSON fence containing {\\\"title\\\":string,\\\"criteria\\\":[{\\\"id\\\":\\\"AC-1\\\",\\\"requirement_ids\\\":[\\\"R1\\\"],\\\"given\\\":string,\\\"when\\\":string,\\\"then\\\":string,\\\"kind\\\":\\\"Normal\\\",\\\"correction\\\":false}],\\\"ambiguities\\\":[{\\\"id\\\":\\\"A-1\\\",\\\"requirement_ids\\\":[\\\"R1\\\"],\\\"question\\\":string}],\\\"invariants\\\":[],\\\"error_behaviour\\\":[]}. Never invent, omit or reassign source requirements.\"}",
+    "hash": "b81ec0b4fd22646379880bdbfa92b32d340977dd450ef8b696147f97542d6dc0"
+  },
+  {
+    "sequence": 2,
+    "kind": "run.started",
+    "subject": "run_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"mission\":\"mis_dmjv6ir4ieps00023640000000\"}",
+    "hash": "715c2bb6fac762dea5ad2c74447125d973cc1f73ffe560ba686398e9f3ef590d"
+  },
+  {
+    "sequence": 3,
+    "kind": "attempt.admitted",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6ir4ieps00023640000000\"}",
+    "hash": "2353fcc1c9d9dfbdfe85083d16a25c9cb76b85c25b56ab71513618bb2731ac7e"
+  },
+  {
+    "sequence": 4,
+    "kind": "context_pack.recorded",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"82170270e8257d2a3e1c3094ab66e1c4a1b20f63d38bbae97a228f03f39d344f\"}",
+    "hash": "cc634036be90cfaa50d16e6cff077b26275a93eebf8348500966c7caa04c2fd1"
+  },
+  {
+    "sequence": 5,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admitted\":true,\"missing\":[\"descendants\"],\"observed\":false},\"execution\":\"starting\",\"login_keychain_access\":false,\"notice\":null,\"run_id\":null}",
+    "hash": "9fdc350cafb31f20c688b178b3902df4c127ff86874f72a98935fca1f892882a"
+  },
+  {
+    "sequence": 6,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"running\"}",
+    "hash": "8e13096a552937797d4928c5a8cce8fa3ef7a3cfd002832980f4d92793aa2238"
+  },
+  {
+    "sequence": 7,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"elapsed_ms\":19,\"execution\":\"running\"}",
+    "hash": "9175fc4817c97a6630826f3074e6071b8effafb2e9936b482fa1e279352650bb"
+  },
+  {
+    "sequence": 8,
+    "kind": "attempt.usage_recorded",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"cost_usd\":0.0,\"input_tokens\":1,\"output_tokens\":1}",
+    "hash": "9c86587c51ce1be35275d7a9e69f6593087fc29e2c43d78d30d2bde76b80db0d"
+  },
+  {
+    "sequence": 9,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"exited:0\"}",
+    "hash": "569486655cf784d3d951224bf3af3d1b62e3bdd698bb8283bdc9f286dbe9f442"
+  },
+  {
+    "sequence": 10,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6ir4ieps00023640000000",
+    "payload_version": 1,
+    "payload": "{\"cleanup\":\"reclaimed\"}",
+    "hash": "5e605b9c59341c515a8df628c190dfce4dc844daa24ebe6c20e572b2411f9f66"
+  },
+  {
+    "sequence": 11,
+    "kind": "spec.drafted",
+    "subject": "spec_missing",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"41825642f81f99ebe3e0c948410dfafc69f312dd1dca047832edc6bbcb6db998\",\"version\":1,\"approval_kind\":\"unapproved\",\"user\":null,\"approval\":null,\"attempts_unconfined_since_draft\":false}",
+    "hash": "ce9cea7b1c96ca9b7e03e5f3ac908903d0b212500b35eebc276ae01b3ee2a0d7"
+  },
+  {
+    "sequence": 12,
+    "kind": "mission.created",
+    "subject": "mis_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"goal\":\"Draft a specification from these original requirements and the repository context. You are read-only. Kaisa owns the R identifiers and verbatim text: [{\\\"id\\\":\\\"R1\\\",\\\"text\\\":\\\"Reject empty inputs.\\\"}]\\nPropose observable criteria (Normal, Edge, Error, Invariant), ambiguities, invariants and error behaviour. Mark correction=true only for explicit legacy behaviour changes. Do not claim approval. Finish with exactly one unquoted ```kaisa-spec JSON fence containing {\\\"title\\\":string,\\\"criteria\\\":[{\\\"id\\\":\\\"AC-1\\\",\\\"requirement_ids\\\":[\\\"R1\\\"],\\\"given\\\":string,\\\"when\\\":string,\\\"then\\\":string,\\\"kind\\\":\\\"Normal\\\",\\\"correction\\\":false}],\\\"ambiguities\\\":[{\\\"id\\\":\\\"A-1\\\",\\\"requirement_ids\\\":[\\\"R1\\\"],\\\"question\\\":string}],\\\"invariants\\\":[],\\\"error_behaviour\\\":[]}. Never invent, omit or reassign source requirements.\"}",
+    "hash": "908b05220a7eac080405eaf5847ed3f4d8583274ec25b43bfe37dfbde892be54"
+  },
+  {
+    "sequence": 13,
+    "kind": "run.started",
+    "subject": "run_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"mission\":\"mis_dmjv6iubryz400023ez0000000\"}",
+    "hash": "46855481de9140907806ca8ef12e090b73a5a037b77055176d51e73a16ec939d"
+  },
+  {
+    "sequence": 14,
+    "kind": "attempt.admitted",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6iubryz400023ez0000000\"}",
+    "hash": "a0acee6e2694f6946b920e80a04c2473fae4615890d43846e2a9f47d806b3961"
+  },
+  {
+    "sequence": 15,
+    "kind": "context_pack.recorded",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"82170270e8257d2a3e1c3094ab66e1c4a1b20f63d38bbae97a228f03f39d344f\"}",
+    "hash": "d0d82a2c5d2d245af814f8d412a4598e9530ef15431ad9b772c798f9f7927788"
+  },
+  {
+    "sequence": 16,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admitted\":true,\"missing\":[\"descendants\"],\"observed\":false},\"execution\":\"starting\",\"login_keychain_access\":false,\"notice\":null,\"run_id\":null}",
+    "hash": "be988e08b0769032b403f632068a0b14d44b96f9339c0564f906a810000f5a03"
+  },
+  {
+    "sequence": 17,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"running\"}",
+    "hash": "206f6ec9c89bcfa7699a00c6bdcc49bfee40627dda6333530da7a8855dd8cd8c"
+  },
+  {
+    "sequence": 18,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"elapsed_ms\":17,\"execution\":\"running\"}",
+    "hash": "ae208e8b434b65c324c3792074cb233bae4931055426449d5904754f7213152d"
+  },
+  {
+    "sequence": 19,
+    "kind": "attempt.usage_recorded",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"cost_usd\":0.0,\"input_tokens\":1,\"output_tokens\":1}",
+    "hash": "eaf858fc2c66532aa561e3fd33c4e7198783e6ba48c463751b2e10c075fb7b47"
+  },
+  {
+    "sequence": 20,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"exited:0\"}",
+    "hash": "be68a01b03573e714b927dd438c4a85961e013545badbd3b22c4775a831cf273"
+  },
+  {
+    "sequence": 21,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6iubryz400023ez0000000",
+    "payload_version": 1,
+    "payload": "{\"cleanup\":\"reclaimed\"}",
+    "hash": "d641cb4fafa195c85f4f47ba54c3f38a6754386f6388227f2682ebc8dccc7b02"
+  },
+  {
+    "sequence": 22,
+    "kind": "spec.drafted",
+    "subject": "spec_demo",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"aa114d00524200c9e3bd21784f88d7b7b1c1157f8454c214cc900d6a43ad497c\",\"version\":1,\"approval_kind\":\"unapproved\",\"user\":null,\"approval\":null,\"attempts_unconfined_since_draft\":false}",
+    "hash": "d47846939a27bcaebff0afee57c37f07945bcf9b2be540935b0c4e9cd9021b7e"
+  },
+  {
+    "sequence": 23,
+    "kind": "spec.approved",
+    "subject": "spec_demo",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"aa114d00524200c9e3bd21784f88d7b7b1c1157f8454c214cc900d6a43ad497c\",\"version\":1,\"approval_kind\":\"provisional\",\"user\":null,\"approval\":{\"kind\":\"provisional\",\"user\":null,\"receipt\":{\"attempts_unconfined_since_draft\":false,\"kind\":\"provisional\",\"policy\":\"allow_provisional_spec\"}},\"attempts_unconfined_since_draft\":false}",
+    "hash": "e23ad004ec8e901cb243f9b043e028af0d571d9c0d2c4552867d9ddb9ecbbae6"
+  },
+  {
+    "sequence": 24,
+    "kind": "spec.frozen",
+    "subject": "spec_demo",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"aa114d00524200c9e3bd21784f88d7b7b1c1157f8454c214cc900d6a43ad497c\",\"version\":1,\"approval_kind\":\"provisional\",\"user\":null,\"approval\":{\"kind\":\"provisional\",\"user\":null,\"receipt\":{\"attempts_unconfined_since_draft\":false,\"kind\":\"provisional\",\"policy\":\"allow_provisional_spec\"}},\"attempts_unconfined_since_draft\":false}",
+    "hash": "71a7008d3665932c4ed2ea81a170911352758abab0ccaa3df293cd1ca825765c"
+  },
+  {
+    "sequence": 25,
+    "kind": "run.policy_adopted",
+    "subject": "22a3786ddddf971fdf6fb7abaa4391ac7fdf552368f67d992082e4043a8f4c5b",
+    "payload_version": 1,
+    "payload": "{\"canonical\":\"accept_reduced_assurance_approval=false\\nallow_provisional_spec=true\\nallowed_egress_hosts=api.anthropic.com,api.openai.com\\nconfine_agents=true\\nmax_parallel=4\\nmin_grade_for_security_review=T3\\non_failure=stop\\nrequire_person_when_check_definitions_change=true\\nrequire_person_when_tests_weaken=true\\nrevision_limit=0\\nrouting_exploration_bps=500\\nrouting_latency_budget_ms=none\\nrouting_min_samples=5\\nrouting_seed=0\\nrouting_target_delivery_bps=8000\\nrouting_window=100\\nverify_each_task=true\\n\"}",
+    "hash": "90b55d04493d6484a2881f3eff60a0027c120bcabf3fc7cc4bf776c3c560c295"
+  },
+  {
+    "sequence": 26,
+    "kind": "run.started",
+    "subject": "run_dmjv6iyim8y000023tk0000000",
+    "payload_version": 1,
+    "payload": "{\"accepted_qa_isolation\":null,\"goal\":\"spec_demo\",\"repository\":\"{\\\"initial_commits\\\":[\\\"6a5120b50b7333e8e1711b9ef493ffc5e2df8477\\\"],\\\"root\\\":\\\"/private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-spec-demo-_oao3u18/repo\\\"}\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"spec_id\":\"spec_demo\",\"version\":null}",
+    "hash": "50a09b955ddf200f06c16c09125fb3a906e9215c86b6aa36b0862ad29f5b1a5c"
+  },
+  {
+    "sequence": 27,
+    "kind": "attempt.admitted",
+    "subject": "att_dmjv6izxf5zs00023tk0000002",
+    "payload_version": 1,
+    "payload": "{\"read_only\":true,\"role\":\"characterization\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"task\":\"task_dmjv6izxf5zs00023tk0000002\"}",
+    "hash": "ea5c83d69ca5378f8da176163a300f2c31b0f81b1560b27bc60465bc5721190f"
+  },
+  {
+    "sequence": 28,
+    "kind": "context_pack.recorded",
+    "subject": "att_dmjv6izxf5zs00023tk0000002",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"8bc1a69f708979a0259c9a50a6fd000c5e7482d36114bdc10ce1c209baab34c4\"}",
+    "hash": "5a4ecbad4ee7f9e4c79e84e177fa3b493209b8cf7dd67b0593b9dd79d6cd7fd1"
+  },
+  {
+    "sequence": 29,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6izxf5zs00023tk0000002",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admitted\":true,\"missing\":[\"descendants\"],\"observed\":false},\"execution\":\"starting\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000\"}",
+    "hash": "3e9d3fd65349e86410a10e2ae66d2a3ae15202b821365b8d4e354ccb04880f2f"
+  },
+  {
+    "sequence": 30,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6izxf5zs00023tk0000002",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"running\"}",
+    "hash": "6b0eeea56e5430f2a4d353642e86bf1ece934678ba08c5387fd3dc16229dd6be"
+  },
+  {
+    "sequence": 31,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6izxf5zs00023tk0000002",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"exited:0\"}",
+    "hash": "e262787ee4264e4f6862100fc324af37a5e0d3038665afa91ddd7f01ff08bec6"
+  },
+  {
+    "sequence": 32,
+    "kind": "qa.result",
+    "subject": "legacy-empty",
+    "payload_version": 1,
+    "payload": "{\"attempt\":\"characterization\",\"blocking_findings\":[],\"candidate_tree\":\"3383dc3244ff98cca1ccbc4fd787f638a7767f38\",\"confined\":true,\"criterion_ids\":[\"legacy-empty\"],\"expected_tests\":[\"legacy_empty\"],\"kind\":\"acceptance\",\"output_digest\":\"653faf018bd2c48aec892d0e27ba759384003ed0482297cd0d658dadf175c211\",\"passed\":true,\"positive_evidence\":true,\"private_test_integrity\":\"write-denied\",\"private_test_unchanged\":true,\"qa_evidence\":\"candidate-influenceable-in-process\",\"qa_isolation\":\"reduced(pre-development private characterization; developer isolation must be checked by workflow)\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000_characterization_proposal_dmjv6j1ph34000023tk0000003\",\"source_unchanged\":true,\"test_id\":\"legacy-empty\"}",
+    "hash": "d2b3c0645b786291da5d2a23b18b3dbf0db7ffe1f19efba4c0172a3a1e174b4d"
+  },
+  {
+    "sequence": 33,
+    "kind": "characterization.baseline",
+    "subject": "run_dmjv6iyim8y000023tk0000000",
+    "payload_version": 1,
+    "payload": "{\"areas\":[{\"path\":\"src/lib.rs\",\"reason\":\"public entry point; no covering lexical test reference (heuristic)\"}],\"base_commit\":\"6a5120b50b7333e8e1711b9ef493ffc5e2df8477\",\"base_tree\":\"3383dc3244ff98cca1ccbc4fd787f638a7767f38\",\"behaviours\":[{\"description\":\"empty input currently accepted\",\"disposition\":{\"criterion_id\":\"AC-1\",\"kind\":\"correct\"},\"edge_case\":true,\"path\":\"src/lib.rs\",\"test_id\":\"legacy-empty\"}],\"notes\":[],\"questions\":[],\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"suite_digest\":\"e5d2cf259fd41b35a9854bea8ef1a24a04954a0fdca4bd99b30a5db5c049cb3d\",\"suite_directory\":\"/private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-spec-demo-_oao3u18/state/qa/run_dmjv6iyim8y000023tk0000000_characterization_dmjv6je9cbhc00023tk0000006/acceptance\",\"tests\":[{\"base_tree\":\"3383dc3244ff98cca1ccbc4fd787f638a7767f38\",\"confined\":true,\"dropped\":false,\"note\":\"current behaviour observed\",\"output_digest\":\"653faf018bd2c48aec892d0e27ba759384003ed0482297cd0d658dadf175c211\",\"passed\":true,\"private_test_integrity\":\"write-denied\",\"qa_evidence\":\"candidate-influenceable-in-process\",\"test_id\":\"legacy-empty\"}]}",
+    "hash": "bb404948756ea4c8c0f21cde8774f64cc236e9d9a2504fb78bb7cda59aa1d932"
+  },
+  {
+    "sequence": 34,
+    "kind": "mission.created",
+    "subject": "mis_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"goal\":\"Implement the frozen specification below. Requirements and criteria are immutable. Private QA source is unavailable; fix behaviour from observable failures.\\n{\\\"ambiguities\\\":[],\\\"criteria\\\":[{\\\"correction\\\":true,\\\"given\\\":\\\"empty input\\\",\\\"id\\\":\\\"AC-1\\\",\\\"kind\\\":\\\"Normal\\\",\\\"requirement_ids\\\":[\\\"R1\\\"],\\\"then\\\":\\\"false\\\",\\\"when\\\":\\\"accept is called\\\"}],\\\"error_behaviour\\\":[],\\\"id\\\":\\\"spec_demo\\\",\\\"invariants\\\":[],\\\"requirements\\\":[{\\\"id\\\":\\\"R1\\\",\\\"text\\\":\\\"Reject empty inputs.\\\"}],\\\"title\\\":\\\"Reject empty inputs\\\",\\\"version\\\":1}\"}",
+    "hash": "4e59887f26ce3566aa5de8dfc7577c68d9bc1633530e99d0bef07f73062b8dcc"
+  },
+  {
+    "sequence": 35,
+    "kind": "run.started",
+    "subject": "run_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"mission\":\"mis_dmjv6jf63rcw00023tk0000007\"}",
+    "hash": "dfba32d3985edf6fad37023ff1f02ecf87a488b59ddd299b79f7130451ec88a1"
+  },
+  {
+    "sequence": 36,
+    "kind": "attempt.admitted",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"developer\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"task\":\"task_dmjv6jf63rcw00023tk0000007\"}",
+    "hash": "ef2aee2dea1e2a0906e4a38fffaaf11311d939119192ad824368aed8a5151cc0"
+  },
+  {
+    "sequence": 37,
+    "kind": "context_pack.recorded",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"digest\":\"d1b6d8a2342e2c028c008fdd632f491851247181ca9532dc8cb8a348d7f228b9\"}",
+    "hash": "33508f37c0754b681aaf47bc7b38af010bfb556e216be5a5433cacf72d9dedbd"
+  },
+  {
+    "sequence": 38,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"containment\":{\"admitted\":true,\"missing\":[\"descendants\"],\"observed\":false},\"execution\":\"starting\",\"login_keychain_access\":false,\"notice\":null,\"run_id\":\"run_dmjv6iyim8y000023tk0000000\"}",
+    "hash": "0c250c23142297b29fb32f12ea330054e08c25fe6b6d0fffb7d9738201d93e7f"
+  },
+  {
+    "sequence": 39,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"running\"}",
+    "hash": "90ae22045fc7b209601554e9a1872f0575ef45151516fa6539b12862d4980e18"
+  },
+  {
+    "sequence": 40,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"elapsed_ms\":31,\"execution\":\"running\"}",
+    "hash": "48df81bd44a7af60737c48efeca98122e421fed9d32ac9a998cfdb8c5da53250"
+  },
+  {
+    "sequence": 41,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"execution\":\"exited:1\"}",
+    "hash": "f3fbeab466a435635e3ea65a11feb9c0d78954cf66974de8d4c7e53406947c46"
+  },
+  {
+    "sequence": 42,
+    "kind": "attempt.state_changed",
+    "subject": "att_dmjv6jf63rcw00023tk0000007",
+    "payload_version": 1,
+    "payload": "{\"cleanup\":\"reclaimed\"}",
+    "hash": "d3bae6d35a3da211561b60fc00e0474d181d70959fa7d53a863bb28c2c07ba8a"
+  },
+  {
+    "sequence": 43,
+    "kind": "gate.acceptance",
+    "subject": "run_dmjv6iyim8y000023tk0000000",
+    "payload_version": 1,
+    "payload": "{\"decision\":{\"lines\":[{\"check\":{\"admitted_reductions\":[\"descendants\"],\"candidate_tree\":null,\"detail\":\"all recorded attempt containment shortfalls admitted\",\"evidence_ids\":[\"ledger:29\",\"ledger:38\"],\"status\":\"PASS\"},\"requirement\":\"all attempt containment admitted\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"provisional spec; explicitly allowed by policy\",\"evidence_ids\":[\"frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c\"],\"status\":\"PASS\"},\"requirement\":\"spec approval status\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"frozen digest and approval receipt verified\",\"evidence_ids\":[\"frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c\"],\"status\":\"PASS\"},\"requirement\":\"spec digest unchanged\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"traceability complete\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"developer attempt failed, was denied protected writes, or produced no preserved candidate\",\"evidence_ids\":[\"developer-failed-base.json:blake3:607206228d0c4279ce60836f51eb419d1bef195a3a0f9b5b724699baa5f85bd8\"],\"status\":\"FAIL\"},\"requirement\":\"deterministic checks\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"private QA all passed on FINAL tree\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"domain test review no blocking\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"staged review approved\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"characterization honoured\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"evidence preserved\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"qa_isolation full or policy-accepted\"}],\"provisional\":true,\"reduced_assurance_approval\":false,\"status\":\"FAIL\"},\"final_tree\":null,\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"spec_id\":\"spec_demo\"}",
+    "hash": "4b69c0472552e0b66bbb2a90cb29aa5debbd58c0f14ebc9b0004e56fad029af1"
+  },
+  {
+    "sequence": 44,
+    "kind": "gate.acceptance",
+    "subject": "run_dmjv6iyim8y000023tk0000000",
+    "payload_version": 1,
+    "payload": "{\"decision\":{\"lines\":[{\"check\":{\"admitted_reductions\":[\"descendants\"],\"candidate_tree\":null,\"detail\":\"all recorded attempt containment shortfalls admitted\",\"evidence_ids\":[\"ledger:29\",\"ledger:38\"],\"status\":\"PASS\"},\"requirement\":\"all attempt containment admitted\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"provisional spec; explicitly allowed by policy\",\"evidence_ids\":[\"frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c\"],\"status\":\"PASS\"},\"requirement\":\"spec approval status\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"frozen digest and approval receipt verified\",\"evidence_ids\":[\"frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c\"],\"status\":\"PASS\"},\"requirement\":\"spec digest unchanged\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"traceability complete\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"developer attempt failed, was denied protected writes, or produced no preserved candidate\",\"evidence_ids\":[\"developer-failed-base.json:blake3:607206228d0c4279ce60836f51eb419d1bef195a3a0f9b5b724699baa5f85bd8\"],\"status\":\"FAIL\"},\"requirement\":\"deterministic checks\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"private QA all passed on FINAL tree\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"domain test review no blocking\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"staged review approved\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"characterization honoured\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"evidence preserved\"},{\"check\":{\"candidate_tree\":null,\"detail\":\"stage has not produced evidence\",\"evidence_ids\":[],\"status\":\"INCONCLUSIVE\"},\"requirement\":\"qa_isolation full or policy-accepted\"}],\"provisional\":true,\"reduced_assurance_approval\":false,\"status\":\"FAIL\"},\"final_tree\":null,\"report\":\"report.md\",\"report_evidence_id\":\"report.md:blake3:ab71a80f8e5e9cb0c172db2f6b62b76892ef1c024338ce8fbb3c09d5101d4ae8\",\"result_branch\":null,\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"spec_id\":\"spec_demo\"}",
+    "hash": "13b314264fce53bd5c1e4501d6c153da89134e7dbd41e9ebcf1c01cdecfadbca"
+  },
+  {
+    "sequence": 45,
+    "kind": "gate.decided",
+    "subject": "run_dmjv6iyim8y000023tk0000000",
+    "payload_version": 1,
+    "payload": "{\"acceptance_status\":\"FAIL\",\"decision\":\"Refuse\",\"goal\":\"spec_demo\",\"reason\":\"FAIL (PROVISIONAL SPEC) (reduced: descendants); traceability complete: stage has not produced evidence; deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate; private QA all passed on FINAL tree: stage has not produced evidence; domain test review no blocking: stage has not produced evidence; staged review approved: stage has not produced evidence; characterization honoured: stage has not produced evidence; evidence preserved: stage has not produced evidence; qa_isolation full or policy-accepted: stage has not produced evidence\",\"result_branch\":null,\"run_id\":\"run_dmjv6iyim8y000023tk0000000\"}",
+    "hash": "e3d7c2aa3b31d9d21f75faaa6eb53cdce1c3e2e128e1747f22d9b7f55bcf7168"
+  }
+]

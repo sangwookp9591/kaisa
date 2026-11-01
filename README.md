@@ -77,10 +77,24 @@ uses only scripted fake agents; unavailable provider usage and cost are shown as
 
 ---
 
-Versioned requirements are available through `kaisa spec draft --file requirements.txt`,
-`kaisa spec show <id>`, `kaisa spec list`, and terminal-confirmed
-`kaisa spec approve <id> [--version <n>]`. See the [specification flow](docs/user-flows.md#versioned-specifications-current-cli)
-for approval assurance limits and the opt-in `allow_provisional_spec` policy.
+## Spec-driven workflow
+
+```sh
+kaisa spec draft --file requirements.txt
+kaisa spec show <id>
+kaisa spec approve <id>                 # terminal review and digest confirmation
+kaisa build --spec <id>
+kaisa spec report <run>
+```
+
+Spec builds characterize untested legacy behavior before development, author private
+acceptance and adversarial tests, review test quality and the candidate, and publish
+only after the orchestrator's final-tree gate passes. Provisional approval requires
+`kaisa policy set allow_provisional_spec true` and
+`kaisa spec approve <id> --provisional`; it never counts as human approval.
+See the [offline fake-agent demo](examples/spec-demo/),
+[recorded results](docs/evidence/spec-demo/traceability.md), and
+[platform and trust limits](docs/evidence/limitations.md).
 
 ## ✨ Why Kaisa
 
@@ -89,7 +103,7 @@ for approval assurance limits and the opt-in `allow_provisional_spec` policy.
 | 🧹 | You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
 | 🛡️ | Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
 | ✅ | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
-| 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
+| 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context; explicit DAG plans run verified tasks in parallel |
 | 📊 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
 
 <a id="kaisa-vs-ruflo-and-orca"></a>
@@ -549,13 +563,12 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
   next `kaisa` start; a still-running agent is ended, not reattached.
 - **Captured output, not a PTY.** Agents run with captured stdio. `kaisa wrap`, attach and steer do not
   exist.
-- **Small ledger.** The SQLite ledger has four tables (`events`, `attempts`, `context_packs`,
-  `outbox`); everything else is folded from events. The outbox is built and tested but not on the run
+- **Event-sourced ledger.** SQLite stores immutable specs, attempts, context packs and events; most state is folded from events. The outbox is built and tested but not on the run
   path. There is no single OS-level ledger writer.
 - **Index and impact sets** are built but a run does not use them. Unpinned Claude verified goals record measured routing decisions; task impact signals remain approximate. Explicit agent/model launches keep their selections.
 - **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
   off" label yet.
-- **Messages are English only.** There is no `ko`/`en` message catalog yet.
+- **Localization is partial.** The TUI selects Korean or English labels; engine codes, recorded text and most CLI output retain their original language.
 - **Missions** run explicit JSON DAGs through `--plan`; decomposition into tasks is supplied by the user. Dispatch uses deterministic waves, so a slow admitted sibling delays the next wave. Failure drains admitted siblings under their existing process deadlines; there is no interactive cancellation command.
 - **Trusted checks** are derived from the repository's working tree when the run starts, not from the
   base revision.
@@ -573,9 +586,9 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 - Packaged, signed releases per OS (FR-01), so installing does not need a Rust toolchain.
 - `kaisa review` to approve a verified candidate and see exactly what approving will do.
 - Provider failover (for example Claude to GPT when a quota runs out), budgets per run, user and team.
-- A full-screen TUI and `kaisa console` in the browser; `/kaisa` from inside your agent.
+- `kaisa console` in the browser (the terminal TUI and `/kaisa` MCP goal launcher are implemented).
 - Team policy packs, approval delegation and an audit log.
-- Korean and English UI.
+- Complete Korean and English coverage beyond the existing TUI labels.
 
 ## 💻 Platforms
 

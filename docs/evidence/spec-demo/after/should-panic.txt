@@ -1,0 +1,7 @@
+Command: ["/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa", "--agent-program", "/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa-fake-agent", "--agent-arg", "--fake-write", "--agent-arg", "src/lib.rs", "--agent-arg", "--fake-content", "--agent-arg", "pub fn accept(_: &str) -> bool { true }\n#[test] #[should_panic] fn value() { assert_eq!(accept(\"\"), false); }\n", "--reviewer-arg", "--fake-review-require", "--reviewer-arg", "src/lib.rs", "--check-program", "/Users/psw/.cargo/bin/cargo", "--check-arg", "test", "--check-arg", "--offline", "fix failing acceptance tests"]
+▶ fix failing acceptance tests
+att_dmjv7gk2nbg00000rh40000002 exited with code 0; work preserved on kaisa/att_dmjv7gk2nbg00000rh40000002 at 74aa83131512; context pack 5dc7baa13ccb; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+att_dmjv7h0wt2s00000rh40000006 exited with code 0; no changes to preserve; context pack e5ee67c757a6; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+waiting for you: weakened_tests: src/lib.rs: #[should_panic added (0 -> 1)
+
+CLI exit: 3

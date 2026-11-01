@@ -4,7 +4,7 @@
 |---|---|
 | Status | v0.6.1 — **M0 and M1 partly implemented.** A goal runs end to end, but several designed parts are not on the run path and some differ from this text; §17 lists them, and [`tasks/M0.md`](tasks/M0.md) and [`tasks/M1.md`](tasks/M1.md) mark each with ◐. This document stays the target design. Open: T16.0 (confined Claude Code on Linux and Windows) |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
-| Date | 2026-10-30 (status updated 2026-10-31) |
+| Date | 2026-10-30 (spec workflow evidence updated 2026-11-01) |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
 | Core language | Rust (stable 1.99.1, edition 2024) |
 | Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) · [`research/ruflo-control.md`](research/ruflo-control.md) (how ruflo enforces, or only records, its capabilities) |
@@ -72,6 +72,65 @@ preservation) is unchanged: it is the execution path every new capability depend
   - project-settings risk refusal, the context-footprint budget and the deterministic tier 0;
   - no self-promotion of learned changes.
 - **Milestones reordered.** Minimum safety moves into M0. Knowledge, best-of-N, the desktop app and remote work are deferred.
+
+---
+
+## Implemented specification workflow (WP7 evidence update)
+
+This section describes the implemented path; the older milestone text below remains
+a target design. The [workflow design](design/spec-driven-workflow.md) and
+[recorded macOS regressions](evidence/isolation.md) define the current evidence boundary.
+
+| Artifact / decision | Owner | Enforced boundary |
+|---|---|---|
+| Original requirements and criterion IDs | Kaisa + human | Source splitting is deterministic; agent proposals cannot reassign source text |
+| Approved specification | Human, or explicit provisional policy | Versioned private store; digest checked again before delivery |
+| Implementation and development tests | Developer | Attempt worktree, broker write set, platform sandbox |
+| Legacy baseline | Characterization agent / Kaisa | Baseline executes on base tree before developer admission |
+| Acceptance / adversarial tests | Separate QA authors | Read-only context repositories; private suites created after development |
+| Test quality | Deterministic lint + domain test reviewer | Spec/test context; blocking findings enter the gate |
+| Review | Staged reviewer | Ordered structured stages and ledger-bound evidence |
+| Delivery and result branch | Kaisa | Pure acceptance gate; branch publication only after PASS |
+
+Flow: requirements → read-only draft → missing-criteria validation → terminal or
+labelled provisional approval → freeze → legacy characterization → developer →
+frozen candidate → acceptance and blind QA → trusted private runner → domain test
+review → staged review → final-tree acceptance gate → result branch only on PASS.
+A bounded revision gets observable failures, not private suite source; every revision
+reruns both suites on its final tree. The demo intentionally disables revisions.
+
+The gate lines are `all attempt containment admitted`, `spec approval status`,
+`spec digest unchanged`, `traceability complete`, `deterministic checks`,
+`private QA all passed on FINAL tree`, `domain test review no blocking`,
+`staged review approved`, `characterization honoured`, `evidence preserved`, and
+`qa_isolation full or policy-accepted`. A failed line cannot be repaired by a reviewer
+approval; missing receipts remain INCONCLUSIVE. Their recorded decisions are in
+[evidence/spec-demo/traceability.md](evidence/spec-demo/traceability.md).
+
+| Platform | Isolation mechanisms | Labelled / unverified limits |
+|---|---|---|
+| macOS | Seatbelt state/read/write denial, separate context repos, immutable private inputs, process groups and descendant observation | `descendants` reduction; runtime tests here only; candidate-influenceable in-process QA |
+| Linux | Landlock filesystem grants, seccomp/network controls where available, separate contexts and private inputs | Capability probing and explicit reduced admission; native runtime not verified by WP7 |
+| Windows | Restricted process / filesystem policy and separate contexts where available | Native runtime not verified by WP7; human spec approval refused |
+
+Spec digests and temporal separation are not a same-user security boundary against an
+unconfined actor rewriting private state. Lexical detectors and in-process output
+checks are bounded defenses. See [all labelled limits](evidence/limitations.md).
+
+Explicit mission DAGs use deterministic ready waves bounded by `max_parallel`, reject
+unordered overlapping write sets, integrate dependencies, and verify the final merged
+result. Shared Git worktree commands and listings take an in-process mutex plus a
+common-directory advisory lock. Slow siblings delay the next wave; admitted failures
+drain under existing deadlines. Best-of-N compares verified alternatives and delivers
+one. Regression evidence: mission tests listed in [isolation.md](evidence/isolation.md).
+
+Measured routing is wired into unpinned Claude verified goals. It selects eligible
+role/grade/model/effort cells using completed, delivered task episodes, known cost and
+latency, minimum samples, deterministic exploration and escalation. Explicit fake or
+model launches bypass selection; cold-start order is a proxy, not measured pricing.
+Legacy rows without route identity are unattributable. The scoring contract is in
+[ADR-0032](adr/0032-addendum-measured-routing.md); the regressions rerun for this update
+are included in [isolation.md](evidence/isolation.md). No real model cost was measured.
 
 ---
 

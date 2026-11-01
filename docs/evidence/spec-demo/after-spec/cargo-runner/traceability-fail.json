@@ -1,0 +1,20 @@
+{
+  "run_id": "run_dmjv6iyim8y000023tk0000000",
+  "final_tree": null,
+  "requirements": [
+    {
+      "requirement_id": "R1",
+      "text": "Reject empty inputs.",
+      "criteria": [
+        {
+          "criterion_id": "AC-1",
+          "private_tests": [],
+          "development_tests": []
+        }
+      ]
+    }
+  ],
+  "gaps": [
+    "AC-1 has no private acceptance test on the final tree"
+  ]
+}

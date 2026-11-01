@@ -1,0 +1,7 @@
+Command: ["/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa", "--agent-program", "/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/debug/kaisa-fake-agent", "--agent-arg", "--fake-write", "--agent-arg", "src/lib.rs", "--agent-arg", "--fake-content", "--agent-arg", "pub fn accept(_: &str) -> bool { true }\n#[test] fn value() { let value = accept(\"\"); assert_eq!(value, value); }\n", "--reviewer-arg", "--fake-review-require", "--reviewer-arg", "src/lib.rs", "--check-program", "/Users/psw/.cargo/bin/cargo", "--check-arg", "test", "--check-arg", "--offline", "fix failing acceptance tests"]
+▶ fix failing acceptance tests
+att_dmjv7ibusflk0000vul0000002 exited with code 0; work preserved on kaisa/att_dmjv7ibusflk0000vul0000002 at 981df6fdc65c; context pack 5dc7baa13ccb; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+att_dmjv7iu8la1k0000vul0000006 exited with code 0; no changes to preserve; context pack 69c0f15e6766; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+waiting for you: weakened_tests: src/lib.rs: tautological assertions added (0 -> 1)
+
+CLI exit: 3

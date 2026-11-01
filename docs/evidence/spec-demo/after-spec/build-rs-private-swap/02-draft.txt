@@ -1,0 +1,29 @@
+spec agent containment: reduced ([DescendantContainment])
+spec_demo v1 digest=aa114d00524200c9e3bd21784f88d7b7b1c1157f8454c214cc900d6a43ad497c provisional draft (NOT human-approved) frozen=false
+{
+  "id": "spec_demo",
+  "version": 1,
+  "title": "Reject empty inputs",
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "Reject empty inputs."
+    }
+  ],
+  "criteria": [
+    {
+      "id": "AC-1",
+      "requirement_ids": [
+        "R1"
+      ],
+      "given": "empty input",
+      "when": "accept is called",
+      "then": "false",
+      "kind": "Normal",
+      "correction": true
+    }
+  ],
+  "ambiguities": [],
+  "invariants": [],
+  "error_behaviour": []
+}

@@ -1,0 +1,9 @@
+Command: ["/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/before-target/debug/kaisa", "--agent-program", "/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/before-target/debug/kaisa-fake-agent", "--agent-arg", "--fake-write", "--agent-arg", ".cargo/config", "--agent-arg", "--fake-content", "--agent-arg", "[alias]\nprobe = \"test\"\n", "--reviewer-arg", "--fake-review-require", "--reviewer-arg", ".cargo/config", "--check-program", "/Users/psw/.cargo/bin/cargo", "--check-arg", "test", "--check-arg", "--offline", "fix failing acceptance tests"]
+▶ fix failing acceptance tests
+att_dmjv7jcrrqe80000z7w0000002 exited with code 0; work preserved on kaisa/att_dmjv7jcrrqe80000z7w0000002 at adce9a1d3481; context pack f2ccdbc2fc23; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+att_dmjv7jsauom00000z7w0000006 exited with code 0; no changes to preserve; context pack 77c283bb6939; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+not delivered: 1 problem(s) remain after the revisions allowed
+- failing check: /Users/psw/.cargo/bin/cargo test --offline
+Next: run kaisa again with these findings as guidance, or inspect the preserved branches above and continue manually.
+
+CLI exit: 4

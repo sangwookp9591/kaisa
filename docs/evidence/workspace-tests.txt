@@ -1,0 +1,1472 @@
+   Compiling libc v0.2.191
+   Compiling thiserror v1.0.69
+   Compiling cfg_aliases v0.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling anyhow v1.0.104
+   Compiling downcast-rs v1.2.1
+   Compiling kaisa-workspace v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-workspace)
+   Compiling kaisa-supervisor v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-supervisor)
+   Compiling kaisa-domain v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-domain)
+   Compiling nix v0.28.0
+   Compiling kaisa-protocol v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-protocol)
+   Compiling kaisa-fake-agent v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-fake-agent)
+   Compiling kaisa-egress v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-egress)
+   Compiling kaisa-sys v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-sys)
+   Compiling errno v0.3.14
+   Compiling parking_lot_core v0.9.12
+   Compiling mio v1.2.4
+   Compiling filedescriptor v0.8.3
+   Compiling signal-hook-registry v1.4.8
+   Compiling rustix v1.1.6
+   Compiling serial2 v0.2.39
+   Compiling signal-hook v0.3.18
+   Compiling parking_lot v0.12.5
+   Compiling kaisa-context v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-context)
+   Compiling kaisa-keeper v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-keeper)
+   Compiling kaisa-mcp v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-mcp)
+   Compiling kaisa-ledger v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-ledger)
+   Compiling signal-hook-mio v0.2.5
+   Compiling crossterm v0.29.0
+   Compiling kaisa-agents v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-agents)
+   Compiling portable-pty v0.9.0
+   Compiling ratatui-crossterm v0.1.2
+   Compiling kaisa-daemon v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-daemon)
+   Compiling ratatui v0.30.2
+   Compiling kaisa-cli v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/crates/kaisa-cli)
+   Compiling kaisa v0.0.0 (/Users/psw/orca/workspaces/kaisa/kaisa-wp7/bin/kaisa)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.18s
+     Running unittests src/main.rs (target/debug/deps/kaisa-9e36d747bf9454bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_attempt_ownership.rs (target/debug/deps/cli_attempt_ownership-9bccea08a6701be9)
+
+running 8 tests
+test a_legacy_worktree_removed_by_the_user_is_reclaimed_once_and_its_branch_is_untouched ... ok
+test a_dead_owners_attempt_is_preserved_by_only_one_of_two_recoverers ... ok
+test an_externally_ended_agent_keeps_its_written_file_on_the_attempt_branch ... ok
+test a_dead_owners_lock_held_by_its_agent_is_recovered_instead_of_silently_skipped ... ok
+test a_legacy_attempt_without_an_owner_lock_is_kept_while_its_agent_is_live ... ok
+test a_nonexistent_observed_agent_is_failed_to_start_and_reclaimed_before_the_next_goal ... ok
+test a_nonexistent_unconfined_agent_is_failed_to_start_and_reclaimed_before_the_next_goal ... ok
+test a_second_goal_skips_the_live_owner_and_the_first_preserves_its_written_file ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+
+     Running tests/cli_goal.rs (target/debug/deps/cli_goal-cd63455d786066cb)
+
+running 34 tests
+test a_cli_agent_that_does_not_run_is_not_registered ... ok
+test a_decision_covering_only_part_of_what_is_missing_does_not_admit_the_run ... ok
+test a_personal_agent_is_added_from_the_cli_without_an_admin ... ok
+test a_claude_default_cannot_spawn_a_scripted_or_local_model_process ... ok
+test a_reduced_attempt_followed_by_a_check_infrastructure_error_keeps_its_label ... ok
+test a_run_missing_containment_without_a_decision_waits_for_a_person_and_lists_what_is_missing ... ok
+test a_repository_with_root_attributes_allows_exec_but_keeps_attributes_read_only ... ok
+test a_codex_goal_is_reported_as_observed ... ok
+test a_codex_goal_records_the_default_policy_that_admitted_it_reduced ... ok
+test a_decision_accepting_what_is_missing_runs_reduced_and_records_why ... ok
+test a_run_below_the_repository_root_names_the_repository_it_uses ... ok
+test an_expired_decision_does_not_admit_a_reduced_run ... ok
+test a_claude_reduced_developer_keeps_the_local_first_pass_confined ... ok
+test an_unknown_agent_is_a_usage_error ... ok
+test an_unknown_capability_in_a_decision_is_a_usage_error ... ok
+test a_malformed_local_first_pass_leaves_the_decision_to_the_full_reviewer ... ok
+test a_light_task_runs_on_the_registered_local_model ... ok
+test an_unreachable_model_server_is_not_registered ... ok
+test an_agent_denied_a_tool_explains_why_it_produced_no_successful_change ... ok
+test watch_in_an_empty_state_directory_creates_no_ledger ... ok
+test kaisa_with_a_goal_prints_where_the_preserved_work_is ... ok
+test an_attempt_abandoned_by_a_killed_kaisa_is_recovered_on_the_next_run ... ok
+test a_run_uses_the_personal_policy ... ok
+test a_trial_run_is_labelled ... ok
+test a_decision_expiring_inside_the_launcher_refuses_spawn ... ok
+test watch_shows_each_attempts_state_from_the_ledger ... ok
+test words_the_docs_name_as_commands_and_unknown_options_never_start_a_run ... ok
+test watch_shows_recorded_usage_per_attempt ... ok
+test kaisa_without_evidence_delivers_nothing_and_exits_four ... ok
+test watching_a_closed_ledger_leaves_the_state_directory_and_database_unchanged ... ok
+test kaisa_with_a_verified_goal_reports_verified_and_exits_zero ... ok
+test watching_from_a_read_only_state_directory_still_shows_the_attempts ... ok
+test a_running_decision_ends_at_expiry_and_cannot_launch_a_followup_attempt ... ok
+test no_resource_is_orphaned_after_random_kills ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.63s
+
+     Running tests/cli_onboarding.rs (target/debug/deps/cli_onboarding-c3052985926081bc)
+
+running 17 tests
+test home_with_delivered_and_waiting_goals_reads_the_latest_gate_without_writing ... ok
+test doctor_in_a_clean_rust_repository_reports_checks_and_leaves_repo_home_and_state_untouched ... ok
+test doctor_outside_a_repository_fails_with_a_concrete_next_step ... ok
+test home_without_a_ledger_welcomes_the_user_without_creating_state ... ok
+test an_empty_profile_uses_tests_detected_after_init ... ok
+test init_adds_the_kaisa_slash_command_and_prints_the_user_scope_registration ... ok
+test init_leaves_a_different_existing_slash_command_alone_and_says_so ... ok
+test doctor_without_tests_or_with_risky_settings_fails_and_names_the_problem ... ok
+test init_without_a_terminal_only_previews_and_yes_creates_an_idempotent_profile ... ok
+test a_candidate_rewriting_a_script_named_by_explicit_checks_stops_for_a_person ... ok
+test terminal_init_waits_for_confirmation_and_only_enter_applies_the_preview ... ok
+test doctor_does_not_execute_git_clean_filters_or_fsmonitor_hooks ... ok
+test valid_explicit_checks_survive_a_malformed_package_manifest_with_a_warning ... ok
+test a_candidate_editing_kaisa_toml_stops_for_a_person ... ok
+test a_goal_uses_the_configured_test_without_a_check_program_override ... ok
+test a_candidate_rewriting_a_script_named_by_package_tests_stops_for_a_person ... ok
+test hung_version_probes_return_a_did_not_answer_diagnosis_within_a_deadline ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.79s
+
+     Running tests/cli_policy.rs (target/debug/deps/cli_policy-66eefb59ccf0c0df)
+
+running 1 test
+test an_older_policy_with_a_gate_switched_off_is_explained_on_stderr_for_show_and_set ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/cli_tui.rs (target/debug/deps/cli_tui-cc269baf249a2214)
+
+running 4 tests
+test an_empty_home_prints_one_frame_and_never_initializes_the_ledger ... ok
+test unknown_tui_options_fail_with_usage_and_never_start_an_agent ... ok
+test the_korean_catalog_translates_labels_and_preserves_recorded_goal_text ... ok
+test plain_and_non_tty_output_show_the_same_complete_frame_without_writing_state ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.55s
+
+     Running tests/fake_agent.rs (target/debug/deps/fake_agent-b684443fa7fd8b90)
+
+running 1 test
+kaisa-fake-agent: the bridge refused to write src/billing/notes.md
+test the_fake_agent_changes_a_file_only_through_the_bridge ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/goal.rs (target/debug/deps/goal-606b4faf1d6ecb8e)
+
+running 11 tests
+test an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run ... ok
+test an_observed_agent_writes_directly_and_is_reported_as_observed ... ok
+test a_brokered_agent_process_cannot_write_the_worktree_directly ... ok
+test a_confined_agent_reaches_the_network_only_through_its_egress_broker ... ok
+test a_local_model_drives_a_confined_attempt_through_the_broker ... ok
+test a_confined_claude_adapter_records_its_login_keychain_exception_in_the_ledger ... ok
+test a_goal_runs_to_a_preserved_result_with_a_scripted_agent ... ok
+test an_agent_that_crashes_after_writing_loses_no_work_and_leaves_no_bridge_behind ... ok
+test a_second_session_needs_no_re_explanation ... ok
+test a_lesson_from_repository_a_never_enters_repository_bs_pack ... ok
+test exhausted_revisions_record_the_loop_and_exit_four_without_teaching_a_lesson ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/mcp_production_build.rs (target/debug/deps/mcp_production_build-867d173e9bab7a34)
+
+running 2 tests
+test a_production_runner_ignores_hook_arguments_planted_in_goal_metadata ... ok
+test a_production_server_ignores_the_hook_and_cannot_swap_agent_reviewer_or_checks ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.77s
+
+     Running tests/mcp_serve.rs (target/debug/deps/mcp_serve-f00f46c28660ca65)
+
+running 9 tests
+test a_handle_cannot_name_a_path_or_a_goal_that_does_not_exist ... ok
+test the_server_greets_and_lists_exactly_three_small_tools ... ok
+test a_directory_that_is_not_a_git_repository_is_refused_with_the_reason ... ok
+test goal_data_is_private_even_when_the_run_fails_before_any_agent_starts ... ok
+test a_goal_without_passing_evidence_is_reported_not_delivered_with_the_reason ... ok
+test a_goal_that_looks_like_options_is_goal_text_and_never_an_option ... ok
+test a_goal_survives_the_session_that_started_it ... ok
+test a_goal_runs_in_the_background_to_verified_and_the_result_only_names_the_merge ... ok
+test several_goals_run_at_once_with_their_own_handles ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.29s
+
+     Running tests/mission.rs (target/debug/deps/mission-24d78a87c617b850)
+
+running 18 tests
+test an_observed_task_writing_outside_its_declared_set_reports_a_blocking_file_conflict ... ok
+test cancellation::sigint_stops_candidate_trees ... ok
+test cancellation::sigint_stops_parallel_mission_trees ... ok
+test cancellation::sigterm_stops_candidate_trees ... ok
+test cancellation::sigterm_stops_parallel_mission_trees ... ok
+test a_rejected_task_review_blocks_mission_delivery_before_integration ... ok
+test an_explicitly_disabled_per_task_gate_still_requires_integrated_checks_and_review ... ok
+test a_two_task_mission_runs_both_attempts_in_dependency_order ... ok
+test a_plan_file_runs_verified_dependencies_through_the_cli_and_status_reads_the_result ... ok
+test integrated_check_failure_blocks_delivery_even_when_each_task_passed_alone ... ok
+test a_diamond_dependent_waits_for_both_parents_and_inherits_both_results ... ok
+test status_and_the_tui_show_live_mission_task_ids_from_the_ledger ... ok
+test independent_ready_agents_overlap_but_never_exceed_the_slot_limit ... ok
+test a_finished_task_leaves_status_and_tui_before_its_slow_sibling ... ok
+test best_of_many_delivers_one_comparatively_verified_candidate_and_none_when_all_fail ... ok
+test the_candidates_flag_prints_exactly_one_verified_result_or_refuses_all_candidates ... ok
+test stop_policy_blocks_new_siblings_while_continue_independent_runs_them ... ok
+test repeating_a_plan_replays_the_same_deterministic_start_order ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.05s
+
+     Running tests/spec_flow.rs (target/debug/deps/spec_flow-3df2f43118d22361)
+
+running 29 tests
+test a_requirement_without_criteria_is_reported_before_any_developer_attempt ... ok
+test build_and_report_cli_reuse_goal_options_and_show_provisional_policy_refusal ... ok
+test editing_a_preserved_report_is_rejected_by_its_gate_ledger_digest ... ok
+test a_developer_attempt_to_write_private_spec_state_is_refused_without_changing_it ... ok
+test a_developer_edit_to_a_repo_criterion_fails_and_preserves_the_approved_spec ... ok
+test malformed_private_qa_is_attributed_to_the_private_qa_gate_line ... ok
+test production_does_not_admit_a_developer_when_legacy_baseline_authoring_fails ... ok
+test a_post_development_spec_store_rewrite_fails_the_integrity_gate ... ok
+test adversarial_coverage_cannot_fill_an_acceptance_criterion_gap ... ok
+test a_development_mapping_to_an_unknown_criterion_blocks_acceptance ... ok
+test failing_private_qa_blocks_delivery_even_when_developer_tests_and_reviewer_pass ... ok
+test an_approving_reviewer_cannot_override_a_lint_blocking_test ... ok
+test passing_final_evidence_publishes_only_a_provisional_result_after_the_gate ... ok
+test policy_accepted_reduced_human_approval_keeps_its_label_after_delivery ... ok
+test build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction ... ok
+test a_revision_reruns_both_sealed_private_suites_on_the_new_final_tree ... ok
+test production_flags_a_required_correction_that_preserves_the_old_behaviour ... ok
+test provisional_specs_without_policy_refuse_before_development_and_never_claim_human_approval ... ok
+test reduced_human_approval_waits_by_default_and_the_cli_retains_the_label ... ok
+test production_reports_characterization_as_not_applicable_when_base_has_tests ... ok
+test production_refused_comparison_is_a_fail_with_an_explicit_ordering_reason ... ok
+test production_legacy_baseline_precedes_real_developer_admission_and_blocks_unexplained_change ... ok
+test production_observed_developer_labels_every_missing_capability ... ok
+test production_rejects_an_explanation_only_blocking_downgrade ... ok
+test production_staged_approval_cannot_override_a_failed_deterministic_line ... ok
+test reduced_qa_isolation_without_policy_waits_and_never_publishes_a_result ... ok
+test production_staged_reviewer_escalates_with_ledger_evidence_and_blocks_delivery ... ok
+test production_happy_path_passes_with_traceability_and_review_only_stage_three_context ... ok
+test production_review_evidence_is_only_this_run_and_final_tree ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.45s
+
+     Running tests/staged_review.rs (target/debug/deps/staged_review-838b5a6ce86ff754)
+
+running 1 test
+test a_scripted_staged_reviewer_gets_ordered_context_and_its_write_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/team.rs (target/debug/deps/team-16a39be8debe08cf)
+
+running 32 tests
+test a_repository_that_widens_agent_authority_needs_a_person ... ok
+test a_candidate_that_widens_agent_settings_needs_a_person_before_any_reviewer_starts ... ok
+test a_claude_result_without_a_verdict_is_never_delivered ... ok
+test a_large_candidate_diff_is_cut_with_a_recorded_pack_notice_and_recovery_command ... ok
+test a_reviewer_answering_in_claude_stream_json_gets_its_approval_delivered ... ok
+test a_first_pass_pack_contains_the_same_diff_and_check_evidence_as_full_review ... ok
+test a_reviewer_of_a_security_sensitive_change_never_explores ... ok
+test a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalates ... ok
+test a_blocking_finding_is_fixed_by_revision_without_a_person ... ok
+test a_reviewer_that_exits_unsuccessfully_after_success_is_refused ... ok
+test a_failed_or_truncated_first_pass_is_refused_before_full_review ... ok
+test a_first_pass_blocking_finding_revises_without_the_full_review ... ok
+test a_reviewers_recorded_pack_contains_the_candidate_diff_and_exact_check_results ... ok
+test a_run_records_the_policy_it_ran_under ... ok
+test a_first_pass_approval_still_needs_the_full_review ... ok
+test a_secret_in_check_output_is_replaced_with_an_omission_note_in_the_review_pack ... ok
+test a_team_run_delivers_only_a_verified_candidate ... ok
+test an_observed_change_outside_the_write_set_needs_a_person ... ok
+test a_team_run_gives_its_agents_the_egress_broker ... ok
+test a_truncated_reviewer_transcript_is_refused_and_its_metadata_preserves_the_loss ... ok
+test a_revision_pack_places_the_blocking_review_finding_in_findings ... ok
+test adding_a_tautological_assertion_exits_three_despite_review_approval ... ok
+test adding_a_test_delivers_with_exit_zero ... ok
+test adding_ignore_exits_three_despite_review_approval ... ok
+test adding_pass_with_no_tests_to_the_test_script_exits_three_as_a_weakened_test ... ok
+test deleting_a_doctest_exits_three_despite_review_approval ... ok
+test deleting_a_rust_unit_test_exits_three_despite_review_approval ... ok
+test delivered_advice_is_bounded_and_precedes_the_result_retrieval_line ... ok
+test editing_only_a_ci_pipeline_with_a_non_ascii_name_exits_three_naming_the_file ... ok
+test refactoring_without_losing_tests_delivers_with_exit_zero ... ok
+test swallowing_failures_in_a_multiline_makefile_recipe_exits_three_as_a_weakened_test ... ok
+test editing_only_the_ci_pipeline_exits_three_naming_the_file_despite_review_approval ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.00s
+
+     Running tests/test_review.rs (target/debug/deps/test_review-8d9102494e24e9ae)
+
+running 2 tests
+test a_review_repository_that_holds_anything_but_the_readme_is_refused_before_an_agent_starts ... ok
+test the_reviewer_is_given_the_spec_the_tests_and_the_findings_and_cannot_write ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/verify.rs (target/debug/deps/verify-8cb0d89a4ac26b36)
+
+running 8 tests
+test trusted_checks_run_on_a_clean_checkout_not_the_agents_worktree ... ok
+test a_check_that_changes_candidate_sources_refuses_all_evidence_before_the_next_check ... ok
+test a_passing_check_is_recorded_against_the_candidate_tree ... ok
+test a_check_cannot_write_the_original_repository_or_other_private_state ... ok
+test a_check_can_write_its_private_tmpdir_and_create_new_build_output ... ok
+test a_check_cannot_overwrite_its_root_git_controls ... ok
+test a_candidate_changed_after_review_needs_new_evidence ... ok
+test the_cli_refuses_a_source_changing_check_and_tells_the_user_to_fix_its_definition ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_agents-84cbba8bc1327246)
+
+running 56 tests
+test capability_tests::only_the_claude_adapter_requests_login_keychain_access ... ok
+test codex::tests::a_codex_attempt_is_labelled_observed ... ok
+test codex::tests::a_model_name_cannot_smuggle_a_flag ... ok
+test codex::tests::a_reasoning_effort_cannot_smuggle_a_flag ... ok
+test codex::tests::a_valid_launch_sets_the_model_and_effort_without_extra_flags ... ok
+test claude::tests::a_brokered_launch_preapproves_only_kaisas_mcp_tools ... ok
+test claude::tests::optional_claude_backends_receive_their_declared_authentication_inputs ... ok
+test claude::tests::the_claude_command_disables_every_built_in_tool ... ok
+test codex::tests::an_effort_outside_the_known_levels_is_refused ... ok
+test claude::tests::the_claude_environment_includes_its_credentials_and_excludes_other_provider_keys ... ok
+test codex::tests::codex_receives_current_auth_names_and_explicit_custom_provider_inputs ... ok
+test codex::tests::the_codex_environment_includes_its_credentials_and_excludes_other_provider_keys ... ok
+test claude::tests::the_first_message_is_the_rendered_context_pack ... ok
+test codex::tests::the_codex_launch_never_disables_its_sandbox ... ok
+test codex::tests::the_prompt_is_read_from_standard_input ... ok
+test local_loop::tests::a_chat_failure_stops_the_loop_and_counts_the_attempt ... ok
+test local_loop::tests::a_reply_in_a_fenced_block_is_parsed ... ok
+test local_loop::tests::a_tool_call_reply_is_parsed ... ok
+test local_loop::tests::a_long_tool_result_is_cut_before_it_reaches_the_model ... ok
+test local_loop::tests::a_tool_outside_the_allowed_list_is_invalid ... ok
+test local_loop::tests::a_tool_error_is_returned_to_the_model ... ok
+test local_loop::tests::a_zero_turn_budget_calls_neither_callback ... ok
+test local_loop::tests::an_invalid_reply_is_corrected_not_executed ... ok
+test local_loop::tests::an_unlisted_broker_tool_is_not_executed ... ok
+test local_loop::tests::malformed_actions_are_invalid ... ok
+test local_loop::tests::the_last_embedded_object_is_parsed_with_nested_arguments ... ok
+test local_loop::tests::the_loop_runs_a_tool_and_stops_when_done ... ok
+test local_loop::tests::the_loop_stops_at_its_turn_limit ... ok
+test openai_local::tests::a_remote_or_encrypted_endpoint_is_refused ... ok
+test transcript::tests::a_codex_review_answers_with_its_last_agent_message ... ok
+test transcript::tests::a_codex_turn_that_never_completed_has_no_final_answer ... ok
+test openai_local::tests::a_server_error_is_reported_with_its_status ... ok
+test openai_local::tests::an_oversized_reply_is_refused ... ok
+test openai_local::tests::a_local_model_attempt_uses_the_configured_endpoint ... ok
+test openai_local::tests::a_chunked_reply_is_read_whole ... ok
+test transcript::tests::a_failed_codex_turn_has_no_final_answer ... ok
+test transcript::tests::a_plain_answer_keeps_indentation_so_a_quote_cannot_become_a_verdict ... ok
+test transcript::tests::a_plain_transcript_preserves_the_complete_final_verdict_region ... ok
+test transcript::tests::a_failed_codex_turn_cannot_be_revived_by_a_late_completion ... ok
+test usage::tests::a_claude_result_event_gives_its_tokens_and_cost ... ok
+test usage::tests::a_codex_token_event_gives_its_tokens_without_a_cost ... ok
+test usage::tests::a_final_result_without_tokens_does_not_reuse_stale_usage ... ok
+test usage::tests::a_transcript_without_usage_gives_none ... ok
+test transcript::tests::a_claude_review_in_prose_answers_with_that_prose ... ok
+test usage::tests::a_missing_or_invalid_cost_preserves_valid_tokens ... ok
+test transcript::tests::a_new_codex_turn_or_thread_cannot_reuse_a_previous_approval ... ok
+test transcript::tests::a_claude_stream_json_review_answers_with_its_result_text ... ok
+test usage::tests::cached_input_counts_as_input ... ok
+test transcript::tests::a_claude_review_without_a_result_event_has_no_final_answer ... ok
+test usage::tests::non_json_lines_do_not_hide_a_result ... ok
+test usage::tests::overflowing_cached_input_gives_none ... ok
+test usage::tests::the_last_codex_turn_wins ... ok
+test usage::tests::the_last_result_event_wins ... ok
+test transcript::tests::a_transcript_with_both_agents_events_has_no_final_answer ... ok
+test usage::tests::malformed_token_numbers_give_none ... ok
+test transcript::tests::a_failed_claude_run_has_no_final_answer ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_cli-4f9ff0622f9d0793)
+
+running 85 tests
+test delivery::tests::kaisa_reports_a_verified_result_with_exit_zero ... ok
+test delivery::tests::a_reduced_delivery_is_still_success_but_says_so ... ok
+test delivery::tests::a_refused_candidate_exits_as_failed ... ok
+test delivery::tests::a_decision_waiting_for_a_person_exits_three_and_says_why ... ok
+test claude_code::tests::the_slash_command_starts_a_goal_and_forbids_merging ... ok
+test goal::tests::a_quoted_goal_that_starts_with_dashes_is_text_and_a_double_dash_ends_the_options ... ok
+test goal::tests::a_decision_needs_both_what_it_accepts_and_when_it_ends ... ok
+test goal::tests::a_goal_of_several_unquoted_words_and_a_quoted_sentence_both_parse ... ok
+test goal::tests::a_confined_claude_trial_has_no_default_policy_to_fall_back_on ... ok
+test goal::tests::a_scripted_agent_has_no_default_policy_to_fall_back_on ... ok
+test goal::tests::an_unknown_option_is_refused_by_name ... ok
+test goal::tests::an_option_shaped_or_unsafe_model_pin_is_rejected_before_launch ... ok
+test goal::tests::the_confine_claude_switch_is_parsed ... ok
+test goal::tests::the_codex_developer_launch_is_valid ... ok
+test init::tests::an_integration_path_outside_the_repository_is_refused_before_writing ... ok
+test goal::tests::claude_by_default_is_admitted_on_the_documented_default_policy ... ok
+test claude_code::tests::an_existing_different_command_is_never_overwritten ... ok
+test mcp_serve::tests::handles_cannot_name_a_path ... ok
+test mcp_serve::tests::only_a_kaisa_result_branch_becomes_a_merge_command ... ok
+test mcp_serve::tests::the_catalog_stays_far_below_the_catalog_token_budget ... ok
+test claude_code::tests::the_project_registration_is_created_when_there_is_no_file ... ok
+test goal::tests::build_reports_the_specific_parse_error_before_usage ... ok
+test claude_code::tests::the_project_registration_is_merged_beside_the_teams_own_servers ... ok
+test mcp_serve::tests::a_run_waiting_for_a_person_says_so_and_points_to_the_terminal ... ok
+test claude_code::tests::a_registration_that_is_already_there_is_unchanged_and_a_different_one_is_a_conflict ... ok
+test mcp_serve::tests::exit_status_and_verdict_must_agree_for_a_run_to_count_as_verified ... ok
+test goal::tests::explicit_agent_and_model_options_remain_pinned_in_the_launch ... ok
+test policy::tests::an_invalid_policy_is_not_saved ... ok
+test policy::tests::a_malformed_policy_file_is_an_error_not_the_default ... ok
+test init::tests::planned_integration_files_merge_preserve_settings_and_back_up_before_replacing ... ok
+test policy::tests::an_older_policy_file_that_switched_the_person_gate_off_is_refused_not_obeyed ... ok
+test policy::tests::the_policy_command_explains_an_older_file_that_switched_the_gate_off ... ok
+test policy::tests::reduced_approval_acceptance_defaults_off_and_can_be_explicitly_saved ... ok
+test routing::tests::an_absent_ledger_reports_unknown_measurements_without_creating_state ... ok
+test policy::tests::turning_off_the_person_gate_is_refused_with_a_message_naming_the_key ... ok
+test policy::tests::without_a_policy_file_the_personal_default_applies ... ok
+test policy::tests::turning_confinement_off_warns_that_runs_are_reduced ... ok
+test policy::tests::scheduler_keys_round_trip_and_invalid_values_never_replace_the_policy ... ok
+test policy::tests::a_policy_change_is_kept_for_the_next_run ... ok
+test tests::a_goal_starting_with_a_reserved_verb_is_told_to_quote_the_goal ... ok
+test tests::an_unimplemented_command_fails_honestly_instead_of_pretending_to_work ... ok
+test tests::an_unknown_option_among_the_goal_words_is_a_usage_error_too ... ok
+test tests::an_unknown_option_is_a_usage_error_naming_it_and_not_goal_text ... ok
+test tests::asking_for_the_version_prints_the_workspace_version_and_succeeds ... ok
+test tests::every_documented_but_unimplemented_verb_answers_not_implemented_instead_of_starting_a_run ... ok
+test policy::tests::routing_policy_keys_round_trip_and_invalid_windows_are_rejected ... ok
+test tests::explicit_help_shows_the_three_daily_verbs ... ok
+test tests::the_help_lists_the_commands_that_work_without_calling_them_planned ... ok
+test tests::the_refusal_table_covers_exactly_the_reserved_verbs ... ok
+test tui::tests::a_goal_prompt_starts_only_on_enter_and_ctrl_c_always_quits ... ok
+test routing::tests::recorded_explanations_and_unknown_cost_cells_are_printed_without_rerouting ... ok
+test spec::tests::nonterminal_cli_approval_fails_without_creating_an_approval_receipt ... ok
+test spec::tests::multiple_unapproved_versions_require_an_explicit_selection ... ok
+test spec::tests::live_attempts_block_even_a_double_forked_approver_without_an_attempt_marker ... ok
+test tui::tests::altgr_characters_are_accepted_as_literal_goal_text ... ok
+test tui::tests::an_error_or_unwind_runs_the_terminal_restore_guard_exactly_once ... ok
+test spec::tests::provisional_cli_approval_requires_policy_and_never_displays_or_stores_human_approval ... ok
+test tui::tests::catalog_translations_preserve_placeholders_and_user_goal_text ... ok
+test tui::tests::details_help_and_unsupported_actions_never_emit_engine_mutations ... ok
+test tui::tests::a_missing_ledger_and_tiny_terminal_render_without_creating_state ... ok
+test spec::tests::an_unconfined_attempt_after_drafting_reduces_later_human_approval_assurance ... ok
+test tui::tests::korean_locale_prefixes_and_posix_precedence_select_the_documented_language ... ok
+test tui::tests::more_than_three_waiting_goals_show_the_hidden_count_and_the_filter_lists_every_goal ... ok
+test tui::tests::multiline_paste_stays_literal_until_a_typed_enter_submits_the_whole_goal ... ok
+test tui::tests::a_submitted_background_process_survives_dropping_the_ui_child_handle ... ok
+test tui::tests::new_goal_arguments_are_literal_and_reserved_words_cannot_become_commands ... ok
+test spec::tests::a_real_pty_accepts_only_a_persons_correct_digest_and_rejects_agent_markers ... ok
+test spec::tests::a_fake_spec_agent_drafts_from_source_and_reports_missing_acceptance_ids ... ok
+test tui::tests::untrusted_transcripts_cannot_emit_terminal_control_sequences ... ok
+test verified::tests::a_cli_agent_is_never_a_first_pass_route ... ok
+test verified::tests::a_registered_local_model_takes_first_pass_review_and_never_code_edits ... ok
+test verified::tests::a_t1_local_model_is_not_light_work ... ok
+test verified::tests::claude_needs_its_provider_and_session_files ... ok
+test verified::tests::no_first_pass_runs_without_a_t0_local_model ... ok
+test verified::tests::nothing_else_in_the_home_directory_is_writable ... ok
+test verified::tests::policy_hosts_follow_the_provider_without_duplicates ... ok
+test tui::tests::the_first_submitted_goal_creates_private_state_and_log_even_when_spawn_fails ... ok
+test tui::tests::an_unlinked_fake_attempt_keeps_its_goal_usage_and_unknown_gate_when_its_transcript_is_missing ... ok
+test tui::tests::a_recorded_home_renders_needs_you_first_and_the_attempt_tree_with_evidence ... ok
+test tui::tests::a_refresh_cycle_leaves_database_bytes_and_every_state_directory_entry_unchanged ... ok
+test tui::tests::a_spec_result_receipt_exposes_its_published_branch_only_after_delivery ... ok
+test tui::tests::filters_search_and_navigation_keep_selection_on_visible_rows ... ok
+test tui::tests::needs_you_is_ordered_by_the_recorded_wait_instead_of_the_start_of_the_goal ... ok
+test tui::tests::polling_that_reorders_runs_keeps_the_same_attempt_selected ... ok
+test tui::tests::hostile_ledger_fields_are_sanitised_in_details_plain_and_every_visible_frame ... ok
+
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.70s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_context-f4830cbdf4d95b25)
+
+running 67 tests
+test detect::tests::a_long_instruction_file_is_cut_to_its_excerpt_limit ... ok
+test detect::tests::a_cargo_workspace_is_detected_as_rust_with_cargo_commands ... ok
+test detect::tests::a_pyproject_with_pytest_is_detected_as_python ... ok
+test detect::tests::a_project_without_a_test_script_has_no_test_command ... ok
+test detect::tests::a_pnpm_project_uses_its_test_and_lint_scripts ... ok
+test detect::tests::a_go_module_is_detected_as_go ... ok
+test detect::tests::a_repository_with_rust_and_node_keeps_both_command_sets ... ok
+test detect::tests::the_npm_init_placeholder_is_not_a_test_command ... ok
+test detect::tests::instruction_files_are_quoted_and_never_become_commands ... ok
+test detect::tests::a_rust_member_below_a_cargo_workspace_root_is_not_detected_twice ... ok
+test confirm::tests::a_command_that_is_not_installed_stays_unconfirmed ... ok
+cargo 1.99.1 (5f94df478 2026-08-27)
+test confirm::tests::a_command_that_succeeds_is_confirmed ... ok
+error: no such command: `kaisa-no-such-subcommand`
+
+help: view all installed commands with `cargo --list`
+help: find a package to install `kaisa-no-such-subcommand` with `cargo search cargo-kaisa-no-such-subcommand`
+test confirm::tests::a_command_that_fails_stays_unconfirmed ... ok
+test impact::tests::a_missing_blob_is_skipped_without_losing_the_next_readable_blob ... ok
+test impact::tests::a_change_impacts_the_files_that_import_it ... ok
+test impact::tests::an_unreadable_revision_is_an_error_not_a_smaller_impact_set ... ok
+test impact::tests::the_impact_set_is_sorted_and_contains_the_change_itself ... ok
+test pack::tests::a_cut_section_is_listed_in_the_pack ... ok
+test pack::tests::a_pack_is_addressed_by_the_digest_of_its_bytes ... ok
+test pack::tests::a_pack_within_budget_keeps_every_section ... ok
+test pack::tests::a_reviewer_pack_carries_the_candidate_diff_not_the_whole_tree ... ok
+test pack::tests::a_revision_pack_carries_the_findings_it_must_fix ... ok
+test pack::tests::a_spec_larger_than_the_budget_is_refused_with_a_split_suggestion ... ok
+test pack::tests::an_oversized_pack_drops_the_profile_before_the_spec ... ok
+test pack::tests::changing_the_spec_changes_the_pack_bytes ... ok
+test pack::tests::every_role_has_a_budget_and_a_reviewer_reads_less_than_a_planner ... ok
+test pack::tests::instruction_excerpts_are_rendered_as_quoted_data ... ok
+test pack::tests::the_same_inputs_give_the_same_pack_bytes ... ok
+test retrieve::tests::a_lesson_scoped_to_the_tasks_files_ranks_above_an_equal_unscoped_one ... ok
+test retrieve::tests::a_lesson_with_no_shared_term_is_never_returned ... ok
+test retrieve::tests::a_path_prefix_inside_a_directory_name_does_not_boost_a_lesson ... ok
+test retrieve::tests::a_rare_query_term_ranks_above_an_equally_frequent_common_term ... ok
+test retrieve::tests::a_shorter_lesson_ranks_above_a_longer_one_with_the_same_term_frequency ... ok
+test retrieve::tests::empty_inputs_and_zero_limits_return_no_hits ... ok
+test retrieve::tests::identifier_parts_match_across_naming_styles ... ok
+test retrieve::tests::replacing_a_lesson_removes_its_old_terms_and_scope ... ok
+test retrieve::tests::the_lesson_about_this_module_is_retrieved_for_a_task_on_it ... ok
+test retrieve::tests::the_same_query_always_ranks_the_same_way ... ok
+test impact::tests::a_file_that_only_mentions_the_name_inside_a_longer_word_is_not_impacted ... ok
+test test_lint::tests::a_manifest_row_for_a_missing_test_is_reported_as_unknown ... ok
+test test_lint::tests::a_discarded_error_predicate_does_not_cover_an_error_criterion ... ok
+test test_lint::tests::a_node_assertion_against_a_bare_literal_is_flagged ... ok
+test test_lint::tests::a_test_without_any_assertion_is_blocking_and_should_panic_counts_as_one ... ok
+test test_lint::tests::a_test_that_delegates_to_a_local_asserting_helper_is_not_reported_as_asserting_nothing ... ok
+test test_lint::tests::a_unicode_identifier_in_a_comparison_is_linted_without_panicking ... ok
+test test_lint::tests::an_error_criterion_needs_an_error_assertion_in_its_test ... ok
+test test_lint::tests::comments_and_string_contents_never_count_as_tests_or_assertions ... ok
+test test_lint::tests::criteria_without_tests_and_tests_for_unknown_criteria_are_reported ... ok
+test test_lint::tests::each_uninformative_name_is_generic_and_each_sentence_name_is_not ... ok
+test test_lint::tests::generic_rust_and_node_names_are_blocking_findings_with_their_line ... ok
+test test_lint::tests::magic_numbers_and_strings_in_assertions_are_flagged_but_named_values_are_not ... ok
+test test_lint::tests::good_domain_tests_in_both_languages_produce_no_findings ... ok
+test test_lint::tests::nested_node_subtests_are_cases_of_their_own_with_their_own_assertions ... ok
+test test_lint::tests::severities_are_configurable_and_a_rule_can_be_switched_off ... ok
+test test_lint::tests::short_names_and_names_without_an_outcome_are_advisory ... ok
+test test_lint::tests::trivially_true_assertions_are_blocking_in_both_languages ... ok
+test test_lint::tests::truthiness_only_assertions_are_flagged_for_a_value_criterion_but_not_for_an_unmapped_test ... ok
+test test_lint::tests::two_equal_call_expressions_are_a_determinism_check_not_a_tautology ... ok
+test test_lint::tests::multibyte_names_strings_and_comments_never_panic_the_lint_in_either_language ... ok
+test impact::tests::a_deleted_module_still_impacts_its_importers_and_neighbors ... ok
+test impact::tests::a_requested_revision_uses_its_blobs_instead_of_the_worktree_or_stale_index ... ok
+test impact::tests::oversized_and_non_utf8_blobs_are_not_scanned_for_references ... ok
+test index::tests::a_revision_that_looks_like_an_option_is_refused_as_a_name ... ok
+test index::tests::a_changed_file_is_reindexed_with_its_new_digest ... ok
+test index::tests::an_unchanged_file_is_not_reindexed ... ok
+test index::tests::a_deleted_file_leaves_the_index ... ok
+test impact::tests::the_impact_set_of_a_large_repository_uses_one_git_process ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_daemon-af91f5fac1f5de1c)
+
+running 181 tests
+test acceptance::tests::private_qa_from_an_earlier_tree_cannot_accept_the_final_candidate ... ok
+test acceptance::tests::missing_isolation_acceptance_waits_and_failed_qa_still_dominates ... ok
+test acceptance::tests::reviewer_approval_cannot_override_a_failed_deterministic_requirement ... ok
+test acceptance::tests::provisional_acceptance_keeps_its_label_and_all_requirement_lines ... ok
+test acceptance::tests::fully_confined_reviewer_cannot_hide_a_reduced_developer_on_any_platform ... ok
+test acceptance::tests::containment_labels_union_distinct_attempts_and_deduplicate_shortfalls ... ok
+test acceptance::tests::every_role_and_revision_contributes_its_own_containment_shortfall ... ok
+test characterize::tests::common_rust_function_names_do_not_cover_unrelated_legacy_code ... ok
+test characterize::tests::new_file_hints_are_skipped_without_losing_existing_legacy_areas ... ok
+test characterize::tests::node_coverage_requires_a_static_import_and_ignores_commented_imports ... ok
+test characterize::tests::duplicate_fields_and_missing_edge_cases_are_rejected ... ok
+test characterize::tests::correction_proposals_must_name_an_explicit_correction_criterion ... ok
+test characterize::tests::rust_coverage_accepts_target_qualified_and_same_file_tests ... ok
+test characterize::tests::rust_coverage_requires_a_reference_inside_a_real_test_body ... ok
+test characterize::tests::empty_baselines_record_skipped_hints_and_still_require_ordered_admission ... ok
+test characterize::tests::only_correct_dispositions_may_carry_a_criterion_id ... ok
+test characterize::tests::public_entry_detection_includes_explicit_rust_binary_paths ... ok
+test gate::tests::a_blocking_finding_sends_the_work_back_with_the_finding ... ok
+test gate::tests::a_candidate_that_changed_its_checks_needs_a_person ... ok
+test gate::tests::a_tampered_candidate_is_never_delivered ... ok
+test gate::tests::an_unconfined_check_delivers_as_reduced ... ok
+test gate::tests::nothing_is_delivered_without_fresh_passing_evidence ... ok
+test gate::tests::passing_evidence_and_an_approval_deliver ... ok
+test gate::tests::weakened_tests_keep_failed_checks_and_current_blocking_findings_visible ... ok
+test goal::tests::a_successful_agent_with_permission_denials_names_the_tools_in_its_summary ... ok
+test goal::tests::an_attempt_on_an_old_landlock_abi_is_labelled_reduced_with_what_it_lacks ... ok
+test goal::tests::an_egress_broker_replaces_every_user_proxy_and_clears_bypass_lists ... ok
+test ids::tests::adjacent_clock_and_counter_fields_cannot_alias_each_other ... ok
+test ids::tests::fresh_and_largest_suffixes_fit_every_domain_id ... ok
+test ids::tests::separate_processes_in_the_same_clock_tick_receive_distinct_suffixes ... ok
+test characterize::tests::source_hints_take_precedence_and_unrelated_rust_tests_do_not_cover_legacy_functions ... ok
+test characterize::tests::same_file_unrelated_calls_do_not_cover_legacy_constructors ... ok
+test integrate::tests::a_task_result_outside_its_own_base_relative_write_set_is_blocked ... ok
+test integrate::tests::a_three_way_dependency_base_contains_every_preserved_parent_result ... ok
+test integrate::tests::divergent_text_changes_return_a_blocking_conflict_with_the_file ... ok
+test learn::tests::only_a_verified_outcome_becomes_a_lesson ... ok
+test learn::tests::secret_observations_are_dropped_and_long_observations_are_bounded ... ok
+test integrate::tests::integration_never_executes_repository_hooks_on_the_host ... ok
+test qa::tests::a_confined_developer_cannot_read_a_planted_private_qa_test ... ok
+test characterize::tests::comparison_refuses_a_developer_admitted_before_the_baseline ... ok
+test qa::tests::a_node_exit_zero_cannot_substitute_the_file_wrapper_for_expected_tests ... ok
+test integrate::tests::repository_merge_drivers_cannot_silently_resolve_an_integration_conflict ... ok
+test characterize::tests::characterization_never_edits_existing_repository_tests ... ok
+test qa::tests::a_qa_answer_with_extra_fields_fences_unknown_criteria_or_unsafe_paths_is_rejected ... ok
+test characterize::tests::untested_legacy_behaviour_is_recorded_before_the_developer_is_admitted ... ok
+test characterize::tests::a_test_that_fails_on_the_base_is_dropped_with_a_note ... ok
+test qa::tests::a_staged_review_bundle_in_private_state_never_enters_blind_qa_context ... ok
+test qa::tests::a_preexisting_build_script_cannot_write_the_external_private_source ... ok
+test characterize::tests::an_unknown_disposition_becomes_a_needs_person_question ... ok
+test qa::tests::a_preexisting_exit_zero_has_no_positive_harness_evidence ... ok
+test characterize::tests::an_unexplained_legacy_behaviour_change_is_blocking ... ok
+test qa::tests::named_results_require_a_single_consistent_summary_and_every_expected_test ... ok
+test qa::tests::a_private_test_that_rewrites_its_installed_copy_cannot_record_a_pass ... ok
+test qa::tests::a_private_test_that_changes_candidate_sources_cannot_produce_passing_evidence ... ok
+test qa::tests::observed_unconfined_and_state_read_gaps_are_always_labelled_reduced ... ok
+test qa::tests::private_qa_cannot_start_while_the_developers_recorded_execution_is_running ... ok
+test qa::tests::an_explicit_rust_bin_is_queried_for_help_in_the_check_sandbox ... ok
+test qa::tests::a_revision_suite_uses_the_revision_attempts_isolation_receipt ... ok
+test qa::tests::review_repro_b_candidate_exit_zero_cannot_pass_a_private_criterion ... ok
+test qa::tests::review_repro_c_candidate_cargo_runner_is_a_blocking_finding ... ok
+test qa::tests::review_repro_e_qa_authors_cannot_read_developer_tests_or_history ... ok
+test characterize::tests::preserving_behaviour_marked_for_correction_is_flagged ... ok
+test qa::tests::source_bearing_panic_messages_are_redacted_even_without_observation_lines ... ok
+test qa::tests::tampering_with_a_private_test_prevents_execution_and_records_no_result ... ok
+test qa_interface::tests::a_public_entry_symlink_cannot_expose_tests_or_files_outside_the_candidate ... ok
+test qa_interface::tests::a_public_interface_excludes_developer_tests_reasoning_transcripts_answers_and_history ... ok
+test qa_interface::tests::binary_documentation_assets_do_not_prevent_extracting_textual_public_docs ... ok
+test qa_interface::tests::custom_rust_library_roots_resolve_public_modules_and_keep_signature_operators ... ok
+test qa_interface::tests::javascript_strings_and_comments_cannot_forge_exported_functions ... ok
+test qa_interface::tests::later_export_lists_and_commonjs_shorthand_retain_only_the_exported_functions_jsdoc ... ok
+test qa_interface::tests::node_exports_survive_automatic_semicolons_and_include_commonjs_names_without_bodies ... ok
+test qa_interface::tests::public_rust_types_traits_and_impl_signatures_preserve_the_callable_contract ... ok
+test recall::tests::legacy_and_other_repository_lessons_are_never_recalled ... ok
+test recover::tests::an_agent_inspection_error_keeps_that_attempt_and_recovery_checks_the_next ... ok
+test qa::tests::review_repro_a_control_buggy_candidate_fails ... ok
+test recover::tests::an_unidentified_lock_holder_gets_a_path_and_instructions_to_end_it_and_rerun ... ok
+test review::tests::a_blocking_verdict_is_parsed_with_the_finding_a_revision_must_fix ... ok
+test review::tests::a_contradictory_verdict_in_an_answer_is_still_refused ... ok
+test review::tests::a_dedicated_marker_inside_an_example_supplies_no_verdict ... ok
+test review::tests::a_developer_approval_quoted_in_a_rejection_supplies_no_verdict ... ok
+test review::tests::a_final_single_line_marker_approves_only_its_complete_json ... ok
+test review::tests::a_malformed_rejection_never_resynchronizes_at_an_inner_approval ... ok
+test review::tests::a_malformed_review_verdict_never_counts_as_approval ... ok
+test review::tests::a_verdict_followed_by_more_text_is_refused ... ok
+test recover::tests::an_agent_inspection_error_under_a_held_lock_keeps_only_that_attempt ... ok
+test review::tests::a_verdict_on_another_candidate_is_refused ... ok
+test review::tests::a_verdict_in_a_code_fence_after_prose_is_found ... ok
+test review::tests::an_answer_without_a_verdict_never_counts_as_approval ... ok
+test review::tests::an_advisory_only_verdict_approves_its_candidate ... ok
+test review::tests::an_approval_with_a_blocking_finding_is_refused ... ok
+test review::tests::an_unfinished_final_verdict_fence_is_malformed ... ok
+test review::tests::quoted_nonfinal_trailing_or_multiple_single_line_markers_never_approve ... ok
+test review::tests::trailing_json_inside_the_final_region_is_malformed ... ok
+test review::tests::two_verdicts_in_one_answer_never_count_as_approval ... ok
+test revision::tests::a_findings_text_cannot_pose_as_instructions ... ok
+test revision::tests::blocking_findings_start_one_revision_attempt ... ok
+test revision::tests::revision_stops_at_its_limit_and_asks_a_person ... ok
+test route::invariant_tests::a_higher_required_grade_uses_the_first_stronger_model_after_a_failed_lower_grade ... ok
+test route::invariant_tests::a_grade_requirement_rejects_weaker_models_even_without_a_floor_or_an_eligible_pin ... ok
+test route::launch_tests::the_spawn_adapter_uses_the_selected_model_and_effort_and_refuses_missing_flags ... ok
+test route::measured_tests::a_cheaper_reliable_model_wins_and_a_cheaper_unreliable_model_loses ... ok
+test route::measured_tests::a_failed_measured_task_escalates_its_next_attempt_before_exploring ... ok
+test route::measured_tests::a_latency_budget_excludes_slow_or_unmeasured_candidates ... ok
+test route::measured_tests::a_recorded_measured_route_contains_the_candidate_table_and_strategy ... ok
+test route::measured_tests::a_user_pin_wins_over_measured_cost_and_exploration ... ok
+test route::measured_tests::an_empty_history_keeps_the_old_cold_start_model_and_effort ... ok
+test route::measured_tests::an_exhausted_delivery_constraint_escalates_model_before_measured_high_effort ... ok
+test route::measured_tests::an_unknown_cost_is_not_cheaper_than_a_complete_usd_receipt ... ok
+test route::measured_tests::exploration_replays_the_seed_and_never_runs_for_security_or_below_grade ... ok
+test route::measured_tests::security_role_never_explores_even_without_caller_signals ... ok
+test route::tests::a_hard_task_escalates_to_a_stronger_model_not_more_effort ... ok
+test route::tests::a_task_is_never_routed_below_what_it_needs ... ok
+test route::tests::the_route_decision_is_recorded_with_its_reasons ... ok
+test route_stats::tests::a_window_discards_old_task_episodes_and_preserves_unknown_latency ... ok
+test route::invariant_tests::multiple_under_sampled_options_replay_each_seed_and_receive_exploration ... ok
+test route_stats::tests::revisions_increase_expected_delivered_cost_and_unknown_usage_never_becomes_zero ... ok
+test route_stats::tests::tokens_remain_a_distinct_cost_unit_when_usd_is_unreported ... ok
+test route_stats::tests::last_completed_episode_controls_window_when_attempts_finish_out_of_order ... ok
+test sandbox::tests::a_sandbox_weaker_than_admitted_shows_what_it_lacks_beyond_the_admission ... ok
+test sandbox::tests::a_seatbelt_sandbox_reports_the_same_descendant_limit_before_and_after_construction ... ok
+test sandbox::tests::an_attempt_not_to_be_confined_expects_to_miss_every_capability ... ok
+test sandbox::tests::an_unconfined_sandbox_is_missing_every_capability ... ok
+test scheduler::tests::a_cycle_is_rejected_before_any_worker_is_admitted ... ok
+test scheduler::tests::a_runtime_ownership_overlap_is_refused_even_after_initial_validation ... ok
+test scheduler::tests::a_task_never_starts_until_all_parents_succeeded ... ok
+test scheduler::tests::an_unknown_dependency_is_rejected_before_any_worker_is_admitted ... ok
+test scheduler::tests::overlapping_actual_write_sets_are_rejected_before_parallel_admission ... ok
+test spec_adapters::tests::an_admitted_descendant_limit_passes_with_its_reduction_label ... ok
+test spec_adapters::tests::an_unadmitted_reduction_is_inconclusive_despite_approval ... ok
+test spec_adapters::tests::fully_confined_staged_approval_passes ... ok
+test spec_agent::tests::a_final_specification_fence_keeps_kaisa_owned_requirements_and_missing_coverage ... ok
+test spec_agent::tests::agent_owned_requirements_or_unknown_requirement_links_are_refused ... ok
+test spec_agent::tests::missing_multiple_quoted_nested_unfinished_or_nonfinal_spec_fences_are_refused ... ok
+test qa::tests::review_repro_f_build_script_swaps_and_restores_the_installed_private_test ... ok
+test qa::tests::a_qa_author_cannot_modify_the_developer_candidate_even_with_a_direct_write_probe ... ok
+test spec_flow::tests::deterministic_revision_feedback_drops_private_paths_before_source_redaction ... ok
+test spec_flow::tests::qa_isolation_keeps_middle_attempt_gaps_after_a_full_final_attempt ... ok
+test spec_flow::tests::reduced_human_approval_requires_policy_and_keeps_its_assurance_label ... ok
+test spec_flow::tests::review_findings_cannot_copy_private_test_source_into_revision_feedback ... ok
+test staged_review::tests::a_judgment_change_without_known_candidate_bound_evidence_is_rejected ... ok
+test staged_review::tests::a_plain_verdict_without_review_stages_cannot_approve_a_spec_bound_candidate ... ok
+test staged_review::tests::an_unsupported_downgrade_does_not_hide_other_invalid_review_output ... ok
+test staged_review::tests::developer_explanations_and_source_locations_cannot_resolve_a_blocking_finding ... ok
+test staged_review::tests::each_context_stage_contains_only_its_assigned_inputs ... ok
+test staged_review::tests::missing_duplicated_and_unordered_stages_are_rejected ... ok
+test staged_review::tests::passing_check_and_qa_results_can_resolve_a_recorded_blocking_concern ... ok
+test staged_review::tests::quoted_nonfinal_duplicate_and_unknown_field_answers_are_rejected ... ok
+test staged_review::tests::silently_dropping_or_downgrading_an_initial_blocker_is_rejected ... ok
+test team::tests::a_claude_result_without_a_verdict_never_counts_as_approval ... ok
+test team::tests::a_finish_record_failure_keeps_the_observed_preservation_summary ... ok
+test team::tests::a_real_claude_review_transcript_delivers_its_approval ... ok
+test team::tests::a_real_claude_verdict_outside_the_schema_never_counts_as_approval ... ok
+test team::tests::a_real_codex_review_transcript_delivers_its_approval ... ok
+test team::tests::a_real_review_of_another_candidate_never_counts_as_approval ... ok
+test team::tests::a_secret_reason_is_omitted_and_a_long_reason_is_bounded ... ok
+test team::tests::check_output_cannot_impersonate_receipts_or_close_its_quotation ... ok
+test test_review::tests::a_complete_review_is_parsed_with_every_part ... ok
+test test_review::tests::a_criterion_judged_not_covered_blocks_and_a_clean_review_does_not ... ok
+test spec_flow::tests::a_nontext_test_source_cannot_silently_escape_deterministic_lint ... ok
+test test_review::tests::a_review_that_skips_duplicates_or_invents_a_criterion_is_refused ... ok
+test test_review::tests::an_existing_directory_is_never_turned_into_the_review_repository ... ok
+test test_review::tests::missing_doubled_quoted_or_non_final_review_fences_never_count ... ok
+test test_review::tests::the_prompt_holds_the_spec_the_labelled_tests_and_the_lint_findings_and_nothing_else ... ok
+test spec_flow::tests::batched_spec_copy_scan_preserves_extensionless_and_unusual_path_copies ... ok
+test qa::tests::private_node_tests_run_with_the_trusted_runner_and_sandboxed_bin_help_enters_only_qa_context ... ok
+test test_review::tests::unknown_fields_bad_vocabulary_and_empty_text_are_refused ... ok
+test verify::output_tests::a_truncated_capture_is_omitted_instead_of_claiming_to_be_the_final_tail ... ok
+test verify::output_tests::a_utf16_secret_in_check_output_omits_the_entire_output ... ok
+test verify::output_tests::long_check_output_keeps_only_a_utf8_tail_within_the_named_limit ... ok
+test test_review::tests::the_review_repository_holds_a_readme_and_no_source ... ok
+test verify::output_tests::a_secret_before_the_visible_tail_omits_the_entire_output ... ok
+test verify::tests::trusted_interpreter_and_make_operands_resolve_to_repository_relative_check_paths ... ok
+test verify::tests::linux_check_grants_exclude_root_git_controls_and_symlinks_but_allow_build_directories ... ok
+test sandbox::tests::a_confined_agent_reads_its_bridge_and_worktree_but_not_daemon_or_other_attempt_secrets ... ok
+test verify::tests::a_trusted_check_cannot_read_state_secrets_but_can_read_its_checkout ... ok
+test test_review::tests::a_repository_that_is_not_the_fresh_readme_only_one_fails_the_attempt_time_check ... ok
+test qa::tests::a_suite_that_omits_a_frozen_criterion_is_explicitly_coverage_blocked ... ok
+test qa::tests::changed_qa_configuration_and_new_library_termination_calls_require_reviewer_evidence ... ok
+test qa::tests::review_repro_d_candidate_observations_cannot_exfiltrate_private_source ... ok
+test qa::tests::preexisting_cargo_runners_and_wrappers_cannot_replace_the_trusted_build_or_execution ... ok
+test qa::tests::independent_qa_records_clean_contexts_and_a_failing_result_for_the_unmet_criterion ... ok
+
+test result: ok. 181 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.86s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_domain-494661d2e94f3e82)
+
+running 132 tests
+test attempt::tests::an_admitted_attempt_can_start_running ... ok
+test attempt::tests::an_attempt_in_unknown_state_cannot_be_restarted_without_proof ... ok
+test attempt::tests::a_running_attempt_cannot_be_preserved_while_its_process_may_still_write ... ok
+test attempt::tests::a_running_attempt_whose_keeper_is_lost_becomes_unknown ... ok
+test attempt::tests::an_exit_record_resolves_an_unknown_attempt ... ok
+test attempt::tests::a_retained_attempt_is_excluded_from_reclamation ... ok
+test attempt::tests::an_exited_attempt_cannot_start_running_again ... ok
+test attempt::tests::a_failing_exit_marks_the_outcome_as_an_agent_failure ... ok
+test attempt::tests::a_zero_exit_completes_the_outcome_but_leaves_verification_not_started ... ok
+test attempt::tests::a_preserved_attempt_can_be_fully_reclaimed ... ok
+test attempt::tests::cleanup_cannot_reclaim_before_preservation_has_a_receipt ... ok
+test authority::tests::a_human_can_resolve_a_gate ... ok
+test attempt_codes::tests::a_malformed_exit_code_is_not_read_as_a_state ... ok
+test authority::tests::a_requester_can_start_a_run_but_never_approve ... ok
+test attempt_codes::tests::every_cleanup_state_round_trips_through_its_code ... ok
+test authority::tests::an_agent_can_never_approve ... ok
+test attempt_codes::tests::every_execution_state_round_trips_through_its_code ... ok
+test catalog::tests::a_personal_agent_is_added_without_an_admin ... ok
+test catalog::tests::a_duplicate_name_is_refused_without_replacing_the_registration ... ok
+test catalog::tests::a_personal_entry_cannot_take_a_built_in_name ... ok
+test catalog::tests::invalid_names_and_missing_models_are_refused ... ok
+test catalog::tests::an_unencrypted_remote_endpoint_is_refused ... ok
+test catalog::tests::loopback_http_and_remote_https_endpoints_are_allowed ... ok
+test catalog::tests::the_cheapest_eligible_model_comes_first ... ok
+test catalog::tests::the_canonical_text_contains_every_field_in_key_order ... ok
+test catalog::tests::model_delimiters_cannot_collide_with_a_different_model_list ... ok
+test catalog::tests::the_canonical_text_does_not_depend_on_insertion_order ... ok
+test containment::tests::a_backwards_wall_clock_expires_a_previously_observed_decision ... ok
+test containment::tests::a_decision_covering_only_part_of_the_gap_refuses_the_run ... ok
+test containment::tests::a_decision_only_needs_to_accept_gaps_beyond_the_known_platform_limits ... ok
+test containment::tests::a_default_policy_admits_a_reduced_run_with_its_missing_list ... ok
+test containment::tests::a_kernel_without_landlock_is_missing_every_capability ... ok
+test containment::tests::a_known_platform_limit_is_admitted_as_reduced_without_a_decision ... ok
+test containment::tests::a_landlock_abi_without_network_rules_does_not_confine_tcp ... ok
+test containment::tests::a_landlock_abi_without_truncation_rules_does_not_confine_writes ... ok
+test containment::tests::a_landlock_sandbox_always_reports_that_kaisa_state_remains_readable ... ok
+test containment::tests::a_landlock_sandbox_reports_descendants_even_with_network_and_write_rules ... ok
+test containment::tests::a_landlock_sandbox_without_the_datagram_filter_does_not_confine_udp ... ok
+test containment::tests::a_missing_capability_refuses_the_run_without_a_decision ... ok
+test containment::tests::a_reduced_run_is_labelled ... ok
+test containment::tests::an_expired_decision_does_not_allow_a_reduced_run ... ok
+test containment::tests::an_extra_missing_capability_cannot_hide_behind_the_platform_limit_policy ... ok
+test containment::tests::an_unknown_capability_code_names_nothing ... ok
+test containment::tests::elapsed_monotonic_time_expires_a_decision_even_when_wall_time_stalls ... ok
+test containment::tests::every_capability_code_reads_back_as_that_capability ... ok
+test containment::tests::no_basis_refuses_a_run_that_is_missing_anything ... ok
+test containment::tests::the_claude_default_refuses_every_other_agent_kind ... ok
+test effect::tests::an_unknown_effect_code_is_not_mapped_to_any_kind ... ok
+test effect::tests::every_effect_kind_is_found_again_by_its_stable_code ... ok
+test effect::tests::no_two_effect_kinds_share_a_stable_code ... ok
+test event::tests::a_stored_sequence_of_zero_is_not_a_valid_position ... ok
+test event::tests::events_that_differ_only_in_subject_have_different_canonical_bytes ... ok
+test event::tests::every_event_kind_is_found_again_by_its_stable_code ... ok
+test event::tests::moving_text_between_subject_and_payload_changes_the_canonical_bytes ... ok
+test event::tests::the_canonical_bytes_of_an_event_are_the_same_on_every_call ... ok
+test event::tests::the_first_sequence_is_followed_by_the_second_sequence ... ok
+test grade::tests::a_route_at_or_above_the_floor_is_allowed ... ok
+test grade::tests::a_route_below_the_floor_is_refused ... ok
+test grade::tests::grades_are_ordered_from_no_model_to_heavy ... ok
+test grader::tests::a_developer_touching_security_paths_requires_the_top_grade ... ok
+test grader::tests::a_security_review_is_never_graded_below_its_floor ... ok
+test grader::tests::a_wide_change_is_graded_above_a_narrow_one ... ok
+test event::tests::no_two_event_kinds_share_a_code ... ok
+test grader::tests::each_role_starts_at_its_required_grade ... ok
+test grader::tests::every_grade_decision_explains_itself ... ok
+test grader::tests::failures_below_the_threshold_or_without_a_revision_keep_the_base_grade ... ok
+test grader::tests::repeated_failures_escalate_one_grade_and_never_beyond_the_top ... ok
+test grader::tests::the_same_task_always_gets_the_same_grade ... ok
+test id::tests::a_mission_id_with_the_mission_prefix_is_accepted ... ok
+test id::tests::a_run_id_is_not_accepted_as_a_mission_id ... ok
+test id::tests::a_run_id_with_a_valid_suffix_round_trips_through_display ... ok
+test id::tests::a_suffix_longer_than_the_maximum_is_rejected_as_bad_length ... ok
+test id::tests::a_suffix_of_exactly_the_maximum_length_is_accepted ... ok
+test id::tests::a_suffix_with_a_dash_is_rejected_as_bad_character ... ok
+test id::tests::a_suffix_with_uppercase_letters_is_rejected_as_bad_character ... ok
+test id::tests::a_task_id_is_rejected_where_a_run_id_is_expected ... ok
+test id::tests::a_task_id_with_letters_and_digits_is_accepted ... ok
+test id::tests::an_attempt_id_without_the_underscore_separator_is_rejected ... ok
+test id::tests::an_empty_suffix_is_rejected_as_bad_length ... ok
+test id::tests::an_intent_id_round_trips_through_display ... ok
+test knowledge::tests::a_digest_of_the_right_shape_is_accepted ... ok
+test knowledge::tests::a_digest_of_the_wrong_length_is_rejected ... ok
+test knowledge::tests::a_digest_with_uppercase_hex_is_rejected ... ok
+test knowledge::tests::every_knowledge_kind_round_trips_through_its_code ... ok
+test plan::tests::a_dependency_outside_the_plan_is_rejected ... ok
+test plan::tests::a_plan_whose_tasks_wait_on_each_other_is_rejected ... ok
+test plan::tests::a_finished_or_running_task_is_never_offered_again ... ok
+test plan::tests::a_plan_with_overlapping_parallel_write_sets_is_rejected ... ok
+test plan::tests::a_task_listed_twice_is_rejected ... ok
+test plan::tests::a_task_waits_until_its_dependencies_are_done ... ok
+test plan::tests::dependent_tasks_may_share_a_write_set ... ok
+test plan::tests::independent_tasks_start_together ... ok
+test plan::tests::tasks_ordered_through_a_middle_task_may_share_a_write_set ... ok
+test plan::tests::two_tasks_touching_the_same_files_never_run_at_once ... ok
+test policy::tests::a_policy_change_mid_run_does_not_affect_the_running_attempt ... ok
+test policy::tests::a_policy_that_lets_tampered_candidates_pass_without_a_person_is_rejected ... ok
+test policy::tests::a_policy_that_lowers_the_security_review_floor_is_rejected ... ok
+test policy::tests::a_policy_with_an_empty_egress_host_is_rejected ... ok
+test policy::tests::a_zero_parallel_limit_is_rejected_before_a_policy_snapshot_exists ... ok
+test policy::tests::an_invalid_policy_cannot_govern_a_run ... ok
+test policy::tests::host_delimiters_cannot_collide_with_a_different_egress_list ... ok
+test policy::tests::the_canonical_text_contains_every_rule_in_key_order ... ok
+test policy::tests::scheduler_policy_changes_are_bound_into_the_canonical_snapshot ... ok
+test policy::tests::the_canonical_text_does_not_depend_on_host_order_or_duplicates ... ok
+test policy::tests::the_personal_default_is_valid_and_confines_agents ... ok
+test repo_path::tests::a_path_that_climbs_out_of_the_repository_is_rejected ... ok
+test repo_path::tests::a_relative_path_inside_the_repository_is_accepted ... ok
+test repo_path::tests::an_absolute_path_is_rejected ... ok
+test repo_path::tests::ordinary_unix_colons_dots_and_spaces_remain_valid_paths ... ok
+test repo_path::tests::windows_separators_are_normalised_to_forward_slashes ... ok
+test repo_path::tests::windows_aliases_of_git_controls_are_rejected_on_every_os ... ok
+test sandbox::tests::a_developer_may_write_only_its_write_set_and_scratch ... ok
+test sandbox::tests::a_reviewer_may_write_nothing ... ok
+test sandbox::tests::every_role_round_trips_through_its_code ... ok
+test spec::tests::a_kaisa_ancestor_is_refused_even_after_descendants_scrub_the_attempt_marker ... ok
+test spec::tests::a_requirement_without_a_criterion_is_reported_by_its_source_id ... ok
+test spec::tests::duplicate_identifiers_and_unknown_links_are_validation_findings ... ok
+test spec::tests::provisional_permission_has_no_human_identity_or_approved_digest ... ok
+test spec::tests::specification_ids_cannot_escape_the_state_directory ... ok
+test spec::tests::an_attempt_marker_or_unknown_ancestry_refuses_human_approval ... ok
+test spec::tests::either_nonterminal_stream_refuses_human_approval ... ok
+test spec::tests::a_wrong_digest_prefix_never_mints_human_approval ... ok
+test spec::tests::a_terminal_confirmation_records_identity_method_time_and_exact_digest ... ok
+test spec::tests::splitting_requirements_preserves_verbatim_lines_and_source_order ... ok
+test write_set::tests::a_directory_overlaps_a_file_inside_it ... ok
+test write_set::tests::a_path_inside_the_write_set_is_permitted ... ok
+test write_set::tests::a_path_outside_the_write_set_is_refused ... ok
+test write_set::tests::a_shared_name_prefix_is_not_an_overlap ... ok
+test write_set::tests::an_empty_write_set_overlaps_nothing ... ok
+test spec::tests::canonical_json_has_sorted_keys_and_changed_content_has_a_new_digest ... ok
+test write_set::tests::the_same_file_in_two_write_sets_overlaps ... ok
+test write_set::tests::write_sets_on_disjoint_directories_do_not_overlap ... ok
+
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/approval_seal.rs (target/debug/deps/approval_seal-8f5c0c085fc63ebe)
+
+running 1 test
+test external_approval_forgery_is_rejected_by_privacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.82s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_egress-5dc7198d7390143b)
+
+running 6 tests
+test address::tests::host_internal_addresses_are_recognised ... ok
+test address::tests::public_addresses_are_not_internal ... ok
+test allow_list::tests::a_suffix_entry_covers_subdomains_but_not_look_alikes ... ok
+test broker::tests::a_domain_off_the_list_is_refused ... ok
+test broker::tests::an_allowed_domain_is_tunnelled ... ok
+test broker::tests::a_name_resolving_to_loopback_is_refused ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/kaisa_fake_agent-26438405ab6681ae)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_keeper-21c39ba53e908917)
+
+running 15 tests
+test exit_record::tests::a_terminated_exit_round_trips_through_its_file_format ... ok
+test exit_record::tests::a_truncated_exit_record_file_is_reported_as_corrupt ... ok
+test exit_record::tests::a_record_with_an_invalid_attempt_id_is_reported_as_malformed ... ok
+test exit_record::tests::a_record_from_an_unknown_format_version_is_rejected ... ok
+test exit_record::tests::a_proven_non_start_round_trips_without_inventing_a_process_exit_code ... ok
+test exit_record::tests::an_exit_record_round_trips_through_its_file_format ... ok
+test run::tests::a_program_that_cannot_be_started_leaves_no_exit_record ... ok
+test durable::tests::a_written_exit_record_reads_back_unchanged ... ok
+test durable::tests::an_existing_exit_record_is_never_overwritten ... ok
+test durable::tests::writing_an_exit_record_leaves_no_temporary_file_behind ... ok
+test durable::tests::the_existing_record_keeps_its_original_contents_after_a_refused_write ... ok
+test run::tests::a_child_that_exits_successfully_leaves_a_success_exit_record ... ok
+test run::tests::a_child_that_fails_leaves_its_failure_code_in_the_exit_record ... ok
+test run::tests::the_exit_record_names_the_attempt_incarnation_and_finish_time ... ok
+test run::tests::the_returned_record_is_the_one_written_to_disk ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-e956e6f6be9582d6)
+
+running 2 tests
+test an_exit_record_on_disk_resolves_an_attempt_the_daemon_lost_track_of ... ok
+test an_exit_record_can_be_read_after_the_keeper_is_gone ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_ledger-0b5859de75b10979)
+
+running 74 tests
+test json::tests::a_line_break_is_escaped_so_the_string_stays_on_one_line ... ok
+test json::tests::quotes_and_backslashes_in_a_windows_path_are_escaped ... ok
+test json::tests::a_bell_character_is_escaped_as_a_unicode_escape ... ok
+test json::tests::korean_text_is_kept_as_readable_text ... ok
+test chain::tests::an_empty_chain_verifies_cleanly ... ok
+test chain::tests::swapping_two_events_breaks_the_chain_at_the_earlier_position ... ok
+test chain::tests::editing_a_recorded_event_breaks_the_chain_at_that_event ... ok
+test chain::tests::removing_an_event_from_the_middle_is_reported_as_a_gap_at_its_position ... ok
+test chain::tests::a_chain_built_from_recorded_events_verifies_cleanly ... ok
+test store::context_packs::tests::a_pack_whose_bytes_do_not_match_its_digest_is_refused ... ok
+test store::knowledge::tests::a_lesson_whose_text_does_not_match_its_digest_is_refused ... ok
+test store::context_packs::tests::recording_the_same_pack_twice_stores_it_once ... ok
+test store::context_packs::tests::a_recorded_pack_can_be_read_back_by_its_digest ... ok
+test store::attempts_tests::an_admitted_attempt_appears_in_the_projection ... ok
+test store::attempts_tests::a_read_only_open_beside_a_live_writer_sees_its_commits_and_creates_no_file ... ok
+test store::attempts_tests::an_attempt_shows_the_digest_of_the_pack_it_started_from ... ok
+test store::attempts_tests::an_attempt_left_running_by_a_crash_is_listed_as_unfinished ... ok
+test store::attempts_tests::a_reclaimed_attempt_is_not_unfinished ... ok
+test store::attempts_tests::the_projection_is_rebuilt_unchanged_after_reopening ... ok
+test store::knowledge::tests::a_promoted_lesson_is_read_back_with_its_receipt ... ok
+test store::knowledge::tests::quarantined_knowledge_is_never_injected ... ok
+test store::outbox_tests::a_completed_intent_is_no_longer_pending ... ok
+test store::outbox_tests::a_rejected_duplicate_intent_leaves_no_extra_event_behind ... ok
+test store::outbox_tests::a_recorded_intent_is_pending ... ok
+test store::outbox_tests::completing_an_intent_records_an_intent_completed_event ... ok
+test store::outbox_tests::completing_an_intent_twice_with_a_different_receipt_is_rejected ... ok
+test store::knowledge::tests::every_injection_is_accountable_to_an_attempt ... ok
+test store::outbox_tests::completing_an_intent_twice_with_the_same_receipt_is_accepted ... ok
+test store::outbox_tests::completing_an_unknown_intent_is_rejected ... ok
+test store::outbox_tests::completing_an_intent_twice_with_the_same_receipt_records_no_second_event ... ok
+test store::outbox_tests::completed_intents_are_not_listed_after_reopening ... ok
+test store::outbox_tests::completing_one_intent_leaves_the_other_intents_pending ... ok
+test store::outbox_tests::pending_intents_are_listed_in_the_order_they_were_recorded ... ok
+test store::outbox_tests::recording_an_intent_whose_id_is_already_used_is_rejected ... ok
+test store::outbox_tests::intents_left_pending_before_a_crash_are_listed_after_reopening ... ok
+test store::outbox_tests::recording_an_intent_also_records_its_event ... ok
+test store::outbox_tests::the_ledger_chain_still_verifies_after_intents_were_recorded_and_completed ... ok
+test store::routing::tests::later_route_does_not_invent_identity_for_completed_legacy_attempt ... ok
+test store::routing::tests::a_successful_process_without_a_delivery_gate_has_unknown_delivery ... ok
+test store::routing::tests::a_failed_verification_updates_the_actual_routed_attempt_and_replays_identically ... ok
+test store::routing::tests::later_route_for_same_task_preserves_each_attempts_original_cell ... ok
+test store::spec::tests::a_forged_human_approval_with_an_empty_receipt_is_invalid ... ok
+test store::tasks::tests::a_failed_task_settles_without_satisfying_its_dependencies ... ok
+test store::spec::tests::default_policy_refuses_provisional_approval_without_recording_it ... ok
+test store::spec::tests::an_orphan_version_file_does_not_block_the_next_draft ... ok
+test store::spec::tests::missing_acceptance_criteria_remain_visible_in_drafts_and_prevent_freeze ... ok
+test store::spec::tests::a_provisional_freeze_is_recorded_and_never_claims_human_approval ... ok
+test store::tasks::tests::one_missions_finish_does_not_hide_another_missions_running_task ... ok
+test store::spec::tests::editing_frozen_specification_bytes_is_detected_as_a_digest_mismatch ... ok
+test store::spec::tests::a_changed_specification_creates_a_new_version_without_inheriting_approval ... ok
+test store::tasks::tests::the_pipeline_advances_from_recorded_events_only ... ok
+test store::tests::a_newly_opened_ledger_uses_write_ahead_logging ... ok
+test store::spec::tests::writable_frozen_bytes_are_invalid_even_when_the_digest_matches ... ok
+test store::tests::an_appended_event_is_linked_to_the_previous_hash ... ok
+test store::tests::an_untouched_store_verifies_cleanly ... ok
+test store::tests::a_row_with_an_unknown_event_kind_is_reported_as_corrupt ... ok
+test store::tests::a_row_with_a_wrong_length_hash_is_reported_as_corrupt ... ok
+test store::tests::a_row_deleted_on_disk_fails_verification_at_its_position ... ok
+test store::tests::a_row_edited_on_disk_fails_verification_at_that_event ... ok
+test store::spec::tests::approving_an_older_pending_version_requires_explicit_selection ... ok
+test store::tests::appending_after_reopening_continues_the_same_chain ... ok
+test store::tests::appending_an_event_increases_the_ledger_length_by_one ... ok
+test store::tests::each_appended_event_gets_the_sequence_after_the_previous_one ... ok
+test store::tests::appending_after_the_last_hash_was_truncated_is_refused ... ok
+test store::tests::opening_a_new_ledger_file_creates_an_empty_ledger ... ok
+test store::tests::opening_an_existing_ledger_keeps_its_events_table ... ok
+test store::tests::events_survive_closing_and_reopening_the_store ... ok
+test store::tests::reading_from_a_later_sequence_skips_earlier_events ... ok
+test store::tests::reading_from_the_first_sequence_returns_every_event_in_order ... ok
+test store::tests::reading_past_the_last_event_returns_nothing ... ok
+test store::tests::concurrent_first_opens_configure_the_same_new_ledger_without_errors ... ok
+test store::tests::the_first_appended_event_gets_the_first_sequence ... ok
+test store::tests::the_first_appended_event_is_linked_to_genesis ... ok
+test store::tests::concurrent_owners_append_every_event_to_one_intact_hash_chain ... ok
+
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_mcp-3ad8e2d95374c539)
+
+running 40 tests
+test attempt::tests::a_source_directory_keeps_its_exec_write_grant ... ok
+test attempt::tests::a_hardlinked_source_file_refuses_the_exec_grant ... ok
+test attempt::tests::an_alias_to_git_controls_refuses_the_exec_grant ... ok
+test attempt::tests::an_alias_outside_the_worktree_refuses_the_exec_grant ... ok
+test attempt::tests::a_root_alias_grant_is_split_into_safe_entries_on_every_backend ... ok
+test attempt::tests::another_attempts_valid_sid_is_refused_and_the_recorded_identity_is_accepted ... ok
+test attempt::tests::a_bridge_whose_broker_is_gone_fails_instead_of_acting_itself ... ok
+test attempt::tests::an_existing_source_file_keeps_its_exec_write_grant ... ok
+test attempt::tests::scratch_that_contains_the_worktree_refuses_exec ... ok
+test attempt::tests::an_unsafe_exec_grant_returns_its_refusal_reason_to_the_caller ... ok
+test attempt::tests::existing_git_control_files_are_excluded_without_disabling_exec ... ok
+test broker::tests::a_dangling_link_inside_the_write_set_refuses_the_write ... ok
+test broker::tests::a_link_inside_the_write_set_to_an_unowned_directory_refuses_the_write ... ok
+test attempt::tests::the_bridge_command_serves_the_attempts_tools ... ok
+test broker::tests::a_symbolic_link_out_of_the_repository_is_not_followed ... ok
+test broker::tests::a_read_outside_the_repository_is_refused ... ok
+test broker::tests::a_link_to_an_owned_directory_writes_and_reads_the_actual_target ... ok
+test broker::tests::a_write_outside_the_write_set_is_refused_as_a_question ... ok
+test broker::tests::a_write_inside_the_write_set_is_applied ... ok
+test broker::tests::an_owned_alias_to_git_controls_is_refused ... ok
+test broker::tests::an_owned_hardlink_to_an_unowned_file_refuses_the_write ... ok
+test broker::tests::git_control_paths_are_refused_even_when_explicitly_owned ... ok
+test broker::tests::an_unconfined_exec_is_refused_before_spawning ... ok
+test broker::tests::unavailable_isolation_refuses_exec_with_its_reason ... ok
+test attempt::tests::an_unknown_state_location_disables_exec_without_failing_the_attempt ... ok
+test endpoint::tests::a_bridge_with_a_forged_token_changes_nothing ... ok
+test server::tests::an_unknown_method_gets_a_json_rpc_error ... ok
+test server::tests::the_bridge_lists_only_the_tools_of_the_attempts_role ... ok
+test endpoint::tests::an_attempt_directory_too_deep_for_a_socket_path_still_gets_a_private_broker ... ok
+test token::tests::a_token_is_never_issued_twice_into_the_same_attempt ... ok
+test endpoint::tests::the_relay_performs_no_file_writes_itself ... ok
+test token::tests::a_token_never_appears_in_debug_output ... ok
+test token::tests::a_bridge_with_the_wrong_token_is_refused ... ok
+test endpoint::tests::a_bridge_with_the_right_token_is_served ... ok
+test token::tests::only_the_user_can_read_a_token_file ... ok
+test attempt::tests::a_source_directory_can_run_exec_and_write_an_owned_file ... ok
+test broker::tests::an_exec_runs_inside_the_sandbox ... ok
+test attempt::tests::a_safe_source_file_can_be_changed_by_the_os_confined_exec ... ok
+test attempt::tests::a_broker_exec_cannot_read_state_or_tokens_but_can_read_its_worktree ... ok
+test attempt::tests::a_root_write_grant_cannot_change_git_controls_under_seatbelt ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_protocol-e68afdc345a3a0ec)
+
+running 18 tests
+test frame::tests::an_empty_stream_reports_a_clean_end ... ok
+test frame::tests::a_frame_larger_than_the_limit_is_rejected ... ok
+test frame::tests::a_frame_containing_a_newline_in_a_string_is_escaped_on_one_line ... ok
+test frame::tests::a_written_frame_ends_with_exactly_one_newline ... ok
+test frame::tests::the_end_of_stream_after_the_last_frame_is_a_clean_end ... ok
+test frame::tests::a_frame_exactly_at_the_limit_is_accepted ... ok
+test frame::tests::a_partial_frame_at_end_of_stream_is_reported_as_truncated ... ok
+test frame::tests::a_written_frame_is_read_back_unchanged ... ok
+test frame::tests::a_line_that_is_not_json_is_reported_as_malformed ... ok
+test frame::tests::two_frames_written_back_to_back_are_read_as_two_messages ... ok
+test hello::tests::a_capability_only_one_side_offered_is_not_supported ... ok
+test hello::tests::a_hello_on_the_control_endpoint_gets_human_authority ... ok
+test hello::tests::a_peer_with_a_different_protocol_version_is_refused ... ok
+test hello::tests::a_written_hello_is_read_back_unchanged ... ok
+test frame::tests::the_reader_stops_reading_once_the_limit_is_exceeded ... ok
+test hello::tests::an_agent_bridge_cannot_claim_human_authority ... ok
+test hello::tests::negotiation_keeps_only_capabilities_both_sides_advertise ... ok
+test hello::tests::peers_with_no_shared_capabilities_still_agree_on_an_empty_session ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_supervisor-cb964133e6707ab4)
+
+running 14 tests
+test lease::tests::a_lease_expires_after_its_deadline ... ok
+test lease::tests::a_lease_is_never_renewed_past_its_hard_limit ... ok
+test lease::tests::a_retained_lease_never_expires ... ok
+test lease::tests::renewing_a_lease_moves_its_expiry_forward ... ok
+test recovery::tests::a_live_attempt_keeps_running_after_a_restart ... ok
+test recovery::tests::an_attempt_with_an_exit_record_is_resolved_after_a_restart ... ok
+test recovery::tests::an_attempt_with_no_record_and_no_process_becomes_unknown ... ok
+test recovery::tests::an_exit_record_still_resolves_an_unknown_attempt ... ok
+test stall::tests::a_stalled_attempt_keeps_its_process ... ok
+test stall::tests::an_expired_lease_on_a_live_attempt_marks_it_stalled ... ok
+test recovery::tests::an_unknown_attempt_is_never_restarted_by_recovery ... ok
+test reclaim::tests::a_retained_attempt_is_not_reclaimed ... ok
+test reclaim::tests::uncovered_changes_block_reclamation ... ok
+test reclaim::tests::an_exited_attempt_is_preserved_before_its_worktree_is_removed ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_sys-5e959f1b718c827d)
+
+running 63 tests
+test identity::tests::a_linux_zombie_owner_is_gone_even_before_its_parent_reaps_it ... ok
+test identity::tests::a_linux_sleeping_owner_keeps_its_start_identity ... ok
+test identity::tests::a_pid_with_no_process_has_no_identity ... ok
+test identity::tests::a_running_process_is_recognised_by_its_identity ... ok
+test identity::tests::an_identity_survives_being_written_down ... ok
+test capture::tests::a_missing_executable_reports_a_proven_non_start ... ok
+test identity::tests::the_same_pid_with_a_different_start_is_another_process ... ok
+test peer::tests::a_client_of_the_same_user_is_accepted ... ok
+test peer::tests::the_peer_check_rejects_another_user ... ok
+test openpty::tests::a_new_unix_terminal_has_the_requested_size ... ok
+test identity::tests::ending_a_recorded_agent_ends_it_and_nothing_else ... ok
+test process::tests::a_group_of_only_exited_members_is_nothing_left_to_kill ... ok
+test capture::tests::an_identity_recording_error_keeps_proof_that_a_process_was_created ... ok
+test process::tests::a_process_that_already_exited_can_still_be_waited_for ... ok
+test process::tests::a_spawned_process_reports_its_exit_code_when_waited_for ... ok
+test capture::tests::an_exec_reads_the_input_it_was_given ... ok
+test capture::tests::an_exec_reports_its_exit_and_output ... ok
+test capture::tests::exec_output_is_cut_at_its_cap ... ok
+test process::tests::the_base_environment_keeps_toolchain_locations_and_excludes_provider_credentials ... ok
+test process::tests::killing_a_running_process_reports_it_as_terminated ... ok
+test capture::tests::an_exec_sees_the_variables_it_was_given ... ok
+test process::tests::user_proxies_and_reviewed_toolchain_inputs_are_in_the_base_environment ... ok
+test process::unix::tests::vanished_and_inaccessible_proc_entries_are_skipped_but_other_errors_surface ... ok
+test pty::tests::a_terminal_size_keeps_its_rows_and_columns ... ok
+test pty::tests::a_terminal_size_with_zero_columns_is_rejected ... ok
+test pty::tests::a_terminal_size_with_zero_rows_is_rejected ... ok
+test random::tests::two_draws_from_the_random_source_differ ... ok
+test process::tests::a_process_that_exits_within_the_time_limit_reports_its_exit ... ok
+test seatbelt::tests::a_path_with_quotes_cannot_break_out_of_the_profile ... ok
+test process::tests::killing_a_process_that_already_exited_is_not_an_error ... ok
+
+running 1 test
+test seatbelt::tests::enforced::a_sandboxed_agent_can_reach_its_broker ... ok
+/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-sys-grandchild-13717-ThreadId(35).pid: line 1: 13742 Killed: 9               sleep 30
+
+running 1 test
+
+running 1 test
+test seatbelt::tests::enforced::a_login_keychain_policy_keeps_real_keychain_services_reachable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
+test process::tests::unix_tree::killing_the_tree_also_ends_a_grandchild ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_can_write_inside_its_write_set ... ok
+test seatbelt::tests::enforced::a_login_keychain_policy_keeps_real_keychain_services_reachable ... ok
+test seatbelt::tests::enforced::an_overridden_home_still_denies_the_account_keychain_directory ... ok
+/bin/bash: connect: Operation not permitted
+/bin/bash: /dev/tcp/127.0.0.1/58683: Operation not permitted
+test seatbelt::tests::enforced::a_sandboxed_agent_cannot_open_a_direct_connection ... ok
+/bin/sh: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-outside-13717/src/billing/invoice.rs: Operation not permitted
+test seatbelt::tests::enforced::a_sandboxed_agent_cannot_write_outside_its_write_set ... ok
+test seatbelt::tests::the_seatbelt_profile_denies_by_default ... ok
+test state_dir::tests::the_control_endpoint_lives_in_the_users_state_directory ... ok
+test state_dir::tests::the_state_directory_is_private_to_its_user ... ok
+test process::tests::unix_tree::a_failed_stop_still_discovers_children_and_leaves_group_cleanup_available ... ok
+test process::tests::unix_tree::killing_the_tree_ends_a_grandchild_that_started_a_new_session ... ok
+ls: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-ancestor-listing-13717/state: Operation not permitted
+cat: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-state-reads-13717/state/kaisa.db: Operation not permitted
+test terminal::tests::an_agent_in_a_terminal_sees_a_terminal_on_its_standard_input ... ok
+test seatbelt::tests::enforced::a_confined_keychain_query_is_denied_before_item_lookup ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.03s
+
+test seatbelt::tests::enforced::a_confined_keychain_query_is_denied_before_item_lookup ... ok
+ls: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-ancestor-listing-13717/state/attempts: Operation not permitted
+cat: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-state-reads-13717/state/attempts/other/bridge.token: Operation not permitted
+test terminal::tests::what_an_agent_prints_can_be_read_from_the_terminal ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_reaches_its_tool_broker_socket_and_no_other ... ok
+test windows_command_line::tests::a_plain_argument_is_passed_without_quotes ... ok
+test windows_command_line::tests::a_program_path_containing_a_quote_is_rejected ... ok
+test windows_command_line::tests::a_program_path_with_a_space_is_quoted ... ok
+test windows_command_line::tests::a_quote_inside_an_argument_is_escaped ... ok
+test windows_command_line::tests::an_argument_with_a_space_is_quoted ... ok
+test windows_command_line::tests::an_empty_argument_stays_an_empty_argument ... ok
+test windows_command_line::tests::backslashes_before_a_closing_quote_are_doubled ... ok
+test windows_command_line::tests::backslashes_not_followed_by_a_quote_are_kept_as_they_are ... ok
+test terminal::tests::what_is_typed_into_the_terminal_reaches_the_agent ... ok
+test terminal::tests::killing_the_tree_of_an_agent_in_a_terminal_also_ends_a_grandchild ... ok
+ls: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-ancestor-listing-13717/state/attempts/own: Operation not permitted
+cat: /private/var/folders/vm/2j4w6z7x4r9c54828njz5n9m0000gn/T/kaisa-seatbelt-state-reads-13717/state/attempts/own/private.log: Operation not permitted
+test seatbelt::tests::enforced::readable_bridge_ancestors_allow_metadata_but_deny_directory_listings ... ok
+test terminal::tests::the_last_output_of_an_agent_is_not_lost_when_the_terminal_closes ... ok
+test terminal::tests::an_agent_sees_the_new_size_after_the_terminal_is_resized ... ok
+test process::tests::a_process_that_outlives_the_time_limit_is_reported_as_still_running ... ok
+planted secret##
+# Host Database
+#
+# localhost is used to configure the loopback interface
+# when the system is booting.  Do not change this entry.
+##
+127.0.0.1	localhost
+255.255.255.255	broadcasthost
+::1             localhost
+127.0.0.1       app.devtracker.co.kr
+127.0.0.1       api.devtracker.co.kr
+~                                    
+test seatbelt::tests::enforced::an_unreadable_state_directory_hides_secrets_but_keeps_exact_bridge_files_readable ... ok
+test capture::tests::captured_and_owned_children_receive_only_base_and_explicit_environment ... ok
+test capture::tests::an_exec_past_its_deadline_is_ended ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/pty_conformance.rs (target/debug/deps/pty_conformance-c829432511077c64)
+
+running 10 tests
+test portable_pty_wezterm::a_backend_delivers_typed_input ... ignored, PTY library comparison (ADR 0005): run with `-- --ignored`
+test portable_pty_wezterm::a_backend_keeps_output_written_just_before_exit ... ignored, PTY library comparison (ADR 0005): run with `-- --ignored`
+test portable_pty_wezterm::a_backend_reports_a_resize_to_the_agent ... ignored, PTY library comparison (ADR 0005): run with `-- --ignored`
+test portable_pty_wezterm::a_backend_shows_what_the_agent_prints ... ignored, PTY library comparison (ADR 0005): run with `-- --ignored`
+test portable_pty_wezterm::unicode_text_survives_the_round_trip_through_the_terminal ... ignored, PTY library comparison (ADR 0005): run with `-- --ignored`
+test kaisa::a_backend_reports_a_resize_to_the_agent ... ok
+test kaisa::unicode_text_survives_the_round_trip_through_the_terminal ... ok
+test kaisa::a_backend_delivers_typed_input ... ok
+test kaisa::a_backend_shows_what_the_agent_prints ... ok
+test kaisa::a_backend_keeps_output_written_just_before_exit ... ok
+
+test result: ok. 5 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running unittests src/lib.rs (target/debug/deps/kaisa_workspace-fd17247661ca950a)
+
+running 128 tests
+test candidate::tests::a_candidate_is_the_preserved_commit_and_its_tree ... ok
+test candidate::tests::a_diff_with_non_ascii_and_newline_paths_keeps_the_patch_and_quotes_the_name ... ok
+test candidate::tests::a_candidate_that_rewrites_its_test_script_is_named_as_changing_check_definitions ... ok
+test candidate::tests::a_deleted_path_is_listed ... ok
+test candidate::tests::a_changed_candidate_has_a_different_tree ... ok
+test candidate::tests::a_check_checkout_holds_the_candidate_and_nothing_left_in_the_agents_worktree ... ok
+test candidate::tests::a_changed_path_is_listed ... ok
+test candidate::tests::a_name_that_is_not_a_commit_is_not_a_candidate ... ok
+test candidate::tests::a_path_with_a_newline_is_reported_exactly ... ok
+test candidate::tests::a_rename_lists_both_the_old_and_the_new_path ... ok
+test candidate::tests::a_legacy_cargo_config_without_extension_is_a_check_definition ... ok
+test candidate::tests::a_ci_file_whose_name_git_would_quote_is_still_a_check_definition ... ok
+test candidate::tests::a_production_method_named_test_is_not_a_test_invocation ... ok
+test candidate::tests::a_should_panic_added_to_one_test_is_not_hidden_by_a_new_ordinary_test ... ok
+test candidate::tests::a_swallowed_failure_in_a_non_test_recipe_is_not_a_weakened_signal ... ok
+test candidate::tests::a_renamed_catch_unwind_that_discards_the_result_is_reported_but_an_asserted_one_is_not ... ok
+test candidate::tests::a_should_panic_follows_the_test_body_through_a_rename ... ok
+test candidate::tests::a_test_script_that_keeps_failing_builds_or_swallows_an_unrelated_command_is_not_weakening ... ok
+test candidate::tests::an_unchanged_path_is_not_listed ... ok
+test candidate::tests::a_production_options_object_with_todo_is_not_a_test_option ... ok
+test candidate::tests::adding_should_panic_to_an_existing_rust_test_is_reported_but_a_new_panic_test_is_not ... ok
+test candidate::tests::deleting_an_empty_test_file_is_reported_as_test_file_deletion ... ok
+test candidate::tests::a_swallowed_failure_in_a_multiline_test_recipe_is_a_weakened_signal ... ok
+test candidate::tests::changing_test_or_assertion_syntax_without_losing_coverage_is_not_weakening ... ok
+test candidate::tests::nul_delimited_paths_keep_their_exact_bytes ... ok
+test candidate::tests::a_catch_unwind_result_is_swallowed_unless_something_reads_it ... ok
+test candidate::tests::adding_pass_with_no_tests_or_a_swallowed_exit_to_a_test_script_is_a_weakened_signal ... ok
+test candidate::tests::a_candidate_that_only_edits_ci_configuration_is_named_as_changing_check_definitions ... ok
+test candidate::tests::repeating_a_call_to_check_determinism_is_not_a_self_comparison_but_a_plain_name_is ... ok
+test candidate::tests::files_that_only_look_like_ci_configuration_are_not_check_definitions ... ok
+test candidate::tests::wrapping_rust_test_assertions_in_catch_unwind_is_reported ... ok
+test git::tests::a_bound_git_command_ignores_a_pointer_changed_after_validation ... ok
+test candidate::tests::gating_rust_tests_or_test_modules_behind_a_cfg_is_reported ... ok
+test git::tests::a_failing_git_command_reports_its_arguments_and_stderr ... ok
+test git::tests::a_fixture_repository_starts_on_main ... ok
+test candidate::tests::options_on_an_aliased_or_imported_test_runner_are_still_test_options ... ok
+test git::tests::extended_windows_git_paths_use_ordinary_drive_and_unc_arguments ... ok
+test inventory::tests::a_path_that_only_shares_a_prefix_with_a_build_directory_is_kept ... ok
+test inventory::tests::conflicted_files_are_included_in_the_preservation_inventory ... ok
+test inventory::tests::ignored_build_output_is_left_out_of_the_inventory ... ok
+test inventory::tests::ignored_files_outside_the_build_policy_are_kept_as_user_data ... ok
+test inventory::tests::tracked_changes_are_included_in_the_preservation_inventory ... ok
+test inventory::tests::untracked_files_are_included_in_the_preservation_inventory ... ok
+test git::tests::an_uncreatable_hooks_directory_refuses_preservation_with_the_reason ... ok
+test git::tests::a_preservation_hooks_directory_is_empty_and_removed_after_its_owner_drops ... ok
+test candidate::tests::self_comparing_assertions_are_reported_in_rust_and_node ... ok
+test candidate::tests::deleting_node_tests_that_assert_with_node_assert_is_reported ... ok
+test preserve::tests::a_file_with_a_private_key_is_never_committed ... ok
+test preserve::tests::a_flagged_file_blocks_reclamation ... ok
+test candidate::tests::node_assertions_through_a_renamed_import_are_counted_and_checked ... ok
+test preserve::tests::a_deletion_without_new_files_is_committed_whether_staged_or_unstaged ... ok
+test preserve::tests::a_lossily_decoded_status_path_is_flagged_without_losing_clean_work ... ok
+test preserve::tests::a_repointed_git_file_refuses_inventory_and_preservation_even_after_recovery ... ok
+test preserve::tests::a_gitlink_with_hostile_nested_filters_is_unscannable_without_executing_them ... ok
+test preserve::tests::a_staged_rename_and_deletion_keep_the_old_paths_out_of_the_commit ... ok
+test candidate::tests::deleting_or_disabling_coverage_in_each_language_is_reported_with_the_file ... ok
+test preserve::tests::a_worktree_with_nothing_to_preserve_needs_no_commit ... ok
+test preserve::tests::an_existing_head_path_with_changed_contents_has_no_content_coverage ... ok
+test preserve::tests::an_already_staged_private_key_is_removed_from_the_preservation_index ... ok
+test preserve::tests::an_empty_gitlink_directory_never_receives_blob_coverage ... ok
+test preserve::tests::an_ignored_directory_with_a_private_key_commits_only_scanned_clean_files ... ok
+test preserve::tests::an_ignored_directory_with_only_clean_files_has_full_receipt_coverage ... ok
+test preserve::tests::attributes_without_a_user_defined_filter_preserve_the_original_bytes ... ok
+test candidate::tests::table_merges_helper_extraction_and_production_assertion_removal_are_allowed ... ok
+test preserve::tests::an_ignored_nested_repository_is_flagged_and_blocks_reclamation ... ok
+test preserve::tests::pgp_and_utf16_private_keys_are_excluded_from_preservation ... ok
+test preserve::tests::a_user_configured_attribute_filter_is_allowed_to_execute ... ok
+test preserve::tests::trusted_global_configuration_child ... ignored, only run by the parent test with isolated global/system Git settings
+test preserve::tests::preservation_with_repository_hooks_never_runs_commit_or_index_hooks ... ok
+test preserve::tests::preserving_commits_the_changes_to_the_attempt_branch ... ok
+test qa_store::tests::a_manifest_changed_to_match_a_tampered_test_still_fails_its_pinned_digest ... ok
+test qa_store::tests::a_recorded_private_suite_is_outside_worktrees_and_its_files_are_read_only ... ok
+test qa_store::tests::a_tampered_private_test_is_rejected_before_its_contents_can_run ... ok
+test receipt::tests::a_deletion_covered_by_the_receipt_is_allowed ... ok
+test receipt::tests::a_deletion_not_covered_by_the_receipt_is_refused ... ok
+test receipt::tests::an_empty_worktree_can_be_deleted_with_an_empty_receipt ... ok
+test receipt::tests::disposable_build_output_needs_no_receipt_coverage ... ok
+test secrets::tests::a_pem_private_key_is_flagged ... ok
+test secrets::tests::an_api_key_in_a_config_file_is_flagged ... ok
+test secrets::tests::common_credential_filenames_and_token_shapes_are_flagged ... ok
+test secrets::tests::ordinary_source_code_is_not_flagged ... ok
+test preserve::tests::standalone_aws_stripe_and_named_keystores_are_flagged_even_when_staged ... ok
+test preserve::tests::global_excludes_autocrlf_and_filters_survive_in_an_isolated_process ... ok
+test preserve::tests::the_receipt_covers_every_committed_path ... ok
+test preserve::tests::preservation_with_fsmonitor_and_signing_programs_never_executes_them ... ok
+test settings_risk::tests::a_codex_config_that_disables_approvals_is_flagged ... ok
+test candidate::tests::skip_and_todo_options_and_variants_on_node_tests_are_reported ... ok
+test settings_risk::tests::a_repository_mcp_server_is_flagged ... ok
+test settings_risk::tests::a_repository_setting_that_widens_agent_authority_is_flagged ... ok
+test settings_risk::tests::a_settings_file_that_only_narrows_authority_is_not_flagged ... ok
+test settings_risk::tests::a_symlinked_settings_file_is_reported_and_never_followed ... ok
+test settings_risk::tests::claude_settings_that_decline_repository_mcp_servers_are_not_flagged ... ok
+test settings_risk::tests::escaped_and_multiline_codex_values_cannot_hide_an_approval_bypass ... ok
+test source::tests::a_clean_tree_needs_no_source_choice ... ok
+test source::tests::a_dirty_tree_defaults_to_committed_only ... ok
+test source::tests::a_tree_with_only_ignored_files_is_clean ... ok
+test source::tests::the_preview_lists_every_uncommitted_entry_but_not_ignored_ones ... ok
+test status::tests::a_conflicted_entry_is_parsed_as_conflicted ... ok
+test status::tests::a_malformed_record_is_reported_with_its_text ... ok
+test status::tests::a_path_with_spaces_is_kept_whole ... ok
+test status::tests::a_renamed_entry_is_parsed_as_tracked_under_its_new_path ... ok
+test status::tests::an_ignored_entry_is_parsed_as_ignored ... ok
+test status::tests::an_ordinary_changed_entry_is_parsed_as_tracked ... ok
+test status::tests::an_untracked_entry_is_parsed_as_untracked ... ok
+test status::tests::branch_header_lines_are_skipped ... ok
+test settings_risk::tests::nested_settings_are_sorted_and_excerpts_are_bounded ... ok
+test settings_risk::tests::oversized_or_malformed_settings_are_reported_as_unscannable_never_skipped ... ok
+test worktree::tests::a_directory_git_does_not_list_is_not_an_attempts_worktree ... ok
+test settings_risk::tests::claude_settings_that_auto_approve_repository_mcp_servers_are_flagged ... ok
+test preserve::tests::working_tree_encoding_files_are_flagged_before_git_decodes_a_secret ... ok
+test worktree::tests::a_created_worktree_is_checked_out_on_its_new_branch ... ok
+test settings_risk::tests::approving_only_kaisas_own_server_is_not_flagged_but_any_other_name_is ... ok
+test worktree::tests::a_fresh_worktree_has_an_empty_inventory ... ok
+test preserve::tests::user_owned_includes_and_worktree_configuration_keep_their_filters ... ok
+test worktree::tests::a_new_file_in_a_worktree_appears_in_its_inventory ... ok
+test worktree::tests::a_refused_removal_leaves_the_worktree_and_its_files_in_place ... ok
+test worktree::tests::a_worktree_created_from_main_starts_at_mains_commit ... ok
+test worktree::tests::an_attempts_worktree_can_be_opened_again_after_a_crash ... ok
+test worktree::tests::creating_a_worktree_where_a_directory_already_exists_is_refused ... ok
+test worktree::tests::creating_a_worktree_on_an_existing_branch_name_is_refused ... ok
+test worktree::tests::an_edited_tracked_file_appears_in_its_inventory ... ok
+test worktree::tests::removing_a_worktree_with_uncovered_changes_is_refused ... ok
+test worktree::tests::removing_a_worktree_after_preservation_deletes_its_directory ... ok
+test worktree::tests::ignored_build_output_in_a_worktree_is_disposable ... ok
+test worktree::tests::removing_a_worktree_keeps_its_branch_for_the_preserved_work ... ok
+test settings_risk::tests::kaisas_own_mcp_server_entry_is_not_flagged_but_nothing_like_it_is ... ok
+test candidate::tests::commented_disabled_tautological_and_early_return_tests_are_reported ... ok
+test preserve::tests::a_directory_exceeding_process_argument_limits_is_preserved ... ok
+
+test result: ok. 127 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 13.57s
+
+     Running tests/worktree_metadata.rs (target/debug/deps/worktree_metadata-e5efc49f4a3fd47d)
+
+running 10 tests
+test metadata_process_worker ... ok
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test metadata_process_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.09s
+
+test a_busy_repository_does_not_block_an_unrelated_repository ... ok
+test metadata_process_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.26s
+
+test another_process_waits_for_the_common_directory_lock ... ok
+test qa_worktree_listing_waits_for_an_external_metadata_owner ... ok
+test recovery_branch_listing_waits_for_metadata_and_recognises_unavailable_worktrees ... ok
+
+running 1 test
+test metadata_process_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.13s
+
+test an_external_metadata_lock_blocks_both_removal_paths ... ok
+test internal_worktree_bookkeeping_never_executes_repository_hooks ... ok
+test an_external_metadata_lock_blocks_both_checkout_apis ... ok
+test metadata_process_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.20s
+
+test metadata_process_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 10.16s
+
+test mixed_two_process_worktree_stress ... ok
+test mixed_two_thread_worktree_stress ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.24s
+
+   Doc-tests kaisa_agents
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_context
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_daemon
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_domain
+
+running 2 tests
+test crates/kaisa-domain/src/spec.rs - spec::approval::confirm_on_process_terminal (line 347) - compile fail ... ok
+test crates/kaisa-domain/src/spec.rs - spec::approval::HumanApproval (line 371) - compile fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+   Doc-tests kaisa_egress
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_keeper
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_mcp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_supervisor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kaisa_workspace
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

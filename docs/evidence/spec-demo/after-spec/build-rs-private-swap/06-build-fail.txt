@@ -1,0 +1,13 @@
+▶ spec_demo
+FAIL (PROVISIONAL SPEC) (reduced: descendants)
+Run: run_dmjv6qbkdm3400002pq0000000
+Inconclusive: traceability complete: stage has not produced evidence
+Fail: deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate
+Inconclusive: private QA all passed on FINAL tree: stage has not produced evidence
+Inconclusive: domain test review no blocking: stage has not produced evidence
+Inconclusive: staged review approved: stage has not produced evidence
+Inconclusive: characterization honoured: stage has not produced evidence
+Inconclusive: evidence preserved: stage has not produced evidence
+Inconclusive: qa_isolation full or policy-accepted: stage has not produced evidence
+Traceability report: kaisa spec report run_dmjv6qbkdm3400002pq0000000
+not delivered

@@ -1,0 +1,54 @@
+{
+  "pass": [
+    {
+      "attempt": "att_dmjvasp6kn940000czb0000002",
+      "stage": "characterization author"
+    },
+    {
+      "attempt": "att_dmjvat4alrao0000czb0000007",
+      "stage": "developer"
+    },
+    {
+      "attempt": "att_dmjvatlmtt4g0000czb000000b",
+      "stage": "acceptance QA author"
+    },
+    {
+      "attempt": "att_dmjvatnmsxzk0000czb000000c",
+      "stage": "blind QA author"
+    },
+    {
+      "attempt": "att_dmjvauh65bco0000czb000000h",
+      "stage": "domain test reviewer"
+    },
+    {
+      "attempt": "att_dmjvaukhumds0000czb000000i",
+      "stage": "staged reviewer"
+    }
+  ],
+  "fail": [
+    {
+      "attempt": "att_dmjvav3gkie80000igt0000002",
+      "stage": "characterization author"
+    },
+    {
+      "attempt": "att_dmjvavisujhc0000igt0000007",
+      "stage": "developer"
+    },
+    {
+      "attempt": "att_dmjvaw050els0000igt000000b",
+      "stage": "acceptance QA author"
+    },
+    {
+      "attempt": "att_dmjvaw226mr40000igt000000c",
+      "stage": "blind QA author"
+    },
+    {
+      "attempt": "att_dmjvawx7jwqg0000igt000000h",
+      "stage": "domain test reviewer"
+    },
+    {
+      "attempt": "att_dmjvax0c2emw0000igt000000i",
+      "stage": "staged reviewer"
+    }
+  ]
+}
