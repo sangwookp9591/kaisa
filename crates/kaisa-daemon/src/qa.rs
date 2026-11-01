@@ -1836,6 +1836,9 @@ pub(crate) fn harness_test_evidence(
         return false;
     }
     let output = strip_ansi(&String::from_utf8_lossy(&run.output));
+    if expected.is_none() {
+        return completed_test_stream(&output);
+    }
     let complete = match harness {
         TestHarness::Libtest => completed_libtest(&output, expected.map(<[String]>::len)),
         TestHarness::Tap => completed_tap(&output, expected.map(<[String]>::len)),
@@ -1899,6 +1902,157 @@ fn strip_ansi(output: &str) -> String {
         }
     }
     clean
+}
+
+/// Ordinary checks may concatenate different runners. Every closing block must be
+/// consistent, and every visible start must close, even after an earlier pass.
+fn completed_test_stream(output: &str) -> bool {
+    let mut block = String::new();
+    let mut positive = false;
+    let mut libtest_starts = Vec::new();
+    let mut tap_started = false;
+    let mut nextest_started = false;
+    let mut spec_started = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(count) = line.strip_prefix("running ").and_then(|rest| {
+            let (n, unit) = rest.split_once(' ')?;
+            matches!(unit, "test" | "tests")
+                .then(|| n.parse::<u64>().ok())
+                .flatten()
+        }) {
+            libtest_starts.push(count);
+        }
+        if line == "TAP version 13" {
+            if tap_started {
+                return false;
+            }
+            tap_started = true;
+        }
+        if trimmed.starts_with("Starting ") {
+            if nextest_started {
+                return false;
+            }
+            nextest_started = true;
+        }
+        block.push_str(line);
+        block.push('\n');
+        let spec_line = trimmed.strip_prefix("ℹ ").unwrap_or(trimmed);
+        if spec_line.starts_with("tests ") || trimmed.starts_with("✔ ") || trimmed.starts_with("✖ ")
+        {
+            spec_started = true;
+        }
+        let positive_count = |prefix: &str| {
+            block
+                .lines()
+                .find_map(|line| {
+                    let line = line.trim();
+                    line.strip_prefix("ℹ ")
+                        .unwrap_or(line)
+                        .strip_prefix(prefix)
+                        .and_then(|s| s.split_whitespace().next())
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
+                .is_some_and(|n| n > 0)
+        };
+        let (valid, passes) = if line.starts_with("test result: ") {
+            let executed = line.strip_prefix("test result: ok. ").and_then(|s| {
+                s.split(';').take(4).try_fold(0_u64, |sum, field| {
+                    sum.checked_add(field.split_whitespace().next()?.parse::<u64>().ok()?)
+                })
+            });
+            // A completed parent harness also closes inherited output from child
+            // probes it intentionally terminates (for example sandbox tests).
+            let consistent = if libtest_starts.is_empty() {
+                true
+            } else if let Some(index) = libtest_starts.iter().rposition(|n| Some(*n) == executed) {
+                libtest_starts.truncate(index);
+                true
+            } else {
+                false
+            };
+            (
+                consistent && completed_libtest(&block, None),
+                positive_count("test result: ok. "),
+            )
+        } else if line.starts_with("# todo ") {
+            tap_started = false;
+            (completed_tap(&block, None), positive_count("# pass "))
+        } else if spec_line.starts_with("todo ") {
+            spec_started = false;
+            (completed_spec(&block), positive_count("pass "))
+        } else if trimmed.starts_with("Summary ") {
+            nextest_started = false;
+            (
+                completed_nextest(&block),
+                trimmed
+                    .split_once("run: ")
+                    .and_then(|(_, s)| s.split_whitespace().next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .is_some_and(|n| n > 0),
+            )
+        } else {
+            continue;
+        };
+        if !valid {
+            return false;
+        }
+        positive |= passes;
+        block.clear();
+    }
+    positive
+        && libtest_starts.is_empty()
+        && !tap_started
+        && !nextest_started
+        && !spec_started
+        && !block.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("ok ")
+                || line.starts_with("not ok ")
+                || line.starts_with("test ")
+                || line.starts_with("ℹ tests ")
+                || line.starts_with("tests ")
+                || line.starts_with("✔ ")
+                || line.starts_with("✖ ")
+                || line.starts_with("# pass ")
+        })
+}
+
+fn completed_spec(output: &str) -> bool {
+    let mut counts = Vec::new();
+    for key in [
+        "tests",
+        "suites",
+        "pass",
+        "fail",
+        "cancelled",
+        "skipped",
+        "todo",
+    ] {
+        let prefix = format!("{key} ");
+        let mut values = output.lines().filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("ℹ ")
+                .unwrap_or(line)
+                .strip_prefix(&prefix)
+        });
+        let Some(count) = values.next().and_then(|n| n.parse::<u64>().ok()) else {
+            return false;
+        };
+        if values.next().is_some() {
+            return false;
+        }
+        counts.push(count);
+    }
+    let [tests, _, passed, failed, cancelled, skipped, todo] = counts.as_slice() else {
+        return false;
+    };
+    *failed == 0
+        && *cancelled == 0
+        && passed
+            .checked_add(*skipped)
+            .and_then(|n| n.checked_add(*todo))
+            == Some(*tests)
 }
 
 fn completed_libtest(output: &str, expected: Option<usize>) -> bool {
@@ -1977,7 +2131,9 @@ fn completed_libtest(output: &str, expected: Option<usize>) -> bool {
             named_passes = 0;
         }
     }
-    passed_total > 0 && (!private || (running.is_none() && named_passes == 0 && summaries == 1))
+    (!private || passed_total > 0)
+        && summaries > 0
+        && (!private || (running.is_none() && named_passes == 0 && summaries == 1))
 }
 
 fn completed_tap(output: &str, expected: Option<usize>) -> bool {
@@ -2041,7 +2197,7 @@ fn completed_tap(output: &str, expected: Option<usize>) -> bool {
             }
         }
     }
-    passed > 0
+    (!private || passed > 0)
         && failed == 0
         && cancelled == 0
         && tests.checked_add(suites) == Some(observed)
@@ -2089,15 +2245,27 @@ fn completed_nextest(output: &str) -> bool {
         match status {
             "passed" if passed.is_none() => passed = Some(count),
             "skipped" => {}
+            "flaky" if count <= run => {}
             _ if count == 0 => {}
             _ => return false,
         }
     }
-    let named = output
+    let starts = output
         .lines()
-        .filter(|line| line.trim_start().starts_with("PASS "))
-        .count();
-    passed.is_some_and(|passed| passed > 0 && passed == run && u64::try_from(named) == Ok(passed))
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("Starting ")
+                .and_then(|s| s.split_whitespace().next())
+        })
+        .collect::<Vec<_>>();
+    if starts.len() > 1
+        || starts
+            .first()
+            .is_some_and(|n| n.parse::<u64>().ok() != Some(run))
+    {
+        return false;
+    }
+    passed == Some(run)
 }
 
 fn normalized(text: &str) -> String {
@@ -3752,7 +3920,7 @@ mod tests {
             (
                 TestHarness::Libtest,
                 format!("{completed}running 1 test\n{empty}"),
-                true,
+                false,
             ),
             (
                 TestHarness::Libtest,
@@ -3789,7 +3957,7 @@ mod tests {
                 nextest.replace("0 skipped", "1 failed"),
                 false,
             ),
-            (TestHarness::Nextest, format!("{nextest}{nextest}"), false),
+            (TestHarness::Nextest, format!("{nextest}{nextest}"), true),
         ];
         for (harness, output, passes) in cases {
             let run = kaisa_sys::CapturedRun {
@@ -3812,13 +3980,87 @@ mod tests {
             );
         }
     }
+    fn fixa3_evidence(output: &str) -> bool {
+        super::harness_test_evidence(
+            &kaisa_sys::CapturedRun {
+                output: output.as_bytes().to_vec(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            },
+            None,
+            super::TestHarness::Tap,
+        )
+    }
+
+    #[test]
+    fn review_fixa3_node_spec_reporter() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/n-spec-reporter.txt");
+        assert!(fixa3_evidence(output));
+        assert!(fixa3_evidence(&output.replace("ℹ ", "")));
+        assert!(!fixa3_evidence(
+            &output
+                .replace("tests 1", "tests 00")
+                .replace("pass 1", "pass 00")
+        ));
+        for bad in [
+            output.replace("fail 0", "fail 1"),
+            output.replace("cancelled 0", "cancelled 1"),
+            output.replace("pass 1", "pass 0"),
+        ] {
+            assert!(!fixa3_evidence(&bad));
+        }
+    }
+
+    #[test]
+    fn review_fixa3_two_node_runs() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/n-two-node-runs.txt");
+        assert!(fixa3_evidence(output));
+        assert!(!fixa3_evidence(&format!("{output}TAP version 13\n")));
+        assert!(!fixa3_evidence(&output.replacen("# fail 0", "# fail 1", 1)));
+        let spec = include_str!("../tests/fixtures/plain-goal-fixa3/n-spec-reporter.txt");
+        let rust = "running 1 test\ntest works ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n";
+        assert!(fixa3_evidence(&format!("{output}{spec}{rust}")));
+        assert!(!fixa3_evidence(&format!(
+            "{output}{spec}{rust}running 1 test\n"
+        )));
+        assert!(!fixa3_evidence(&format!("{output}ℹ tests 1\n")));
+        let nextest =
+            include_str!("../tests/fixtures/plain-goal-fixa3/nextest-status-level-fail.txt");
+        assert!(!fixa3_evidence(&format!("ℹ tests 1\n{nextest}")));
+        let inherited = include_str!("../tests/fixtures/plain-goal-fixa3/libtest-child-probes.txt");
+        assert!(fixa3_evidence(inherited));
+        assert!(!fixa3_evidence(&format!("{inherited}running 1 test\n")));
+    }
+
+    #[test]
+    fn review_fixa3_nextest_status_level_fail() {
+        let output =
+            include_str!("../tests/fixtures/plain-goal-fixa3/nextest-status-level-fail.txt");
+        assert!(fixa3_evidence(output));
+        assert!(!fixa3_evidence(&output.replace("Starting 3", "Starting 4")));
+        assert!(!fixa3_evidence(&format!(
+            "{output}Starting 1 test across 1 binary\n"
+        )));
+    }
+
+    #[test]
+    fn review_fixa3_nextest_flaky_retry() {
+        let output = include_str!("../tests/fixtures/plain-goal-fixa3/nextest-flaky-retry.txt");
+        assert!(fixa3_evidence(output));
+        assert!(fixa3_evidence(
+            &output.replace("2 passed (1 flaky)", "2 passed, 1 flaky")
+        ));
+        assert!(!fixa3_evidence(&output.replace("0 skipped", "1 failed")));
+        assert!(fixa3_evidence(&format!("{output}{output}")));
+    }
+
     #[test]
     fn review_fixa_libtest_accepts_inherited_stdout_and_color() {
         use super::TestHarness;
         let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
         for output in [
             format!(
-                "running 2 tests\nrunning 1 test\ntest child ... ok\n{summary}test parent ... ok\n{summary}"
+                "running 1 test\nrunning 1 test\ntest child ... ok\n{summary}test parent ... ok\n{summary}"
             ),
             format!("running 1 test\nrunning migrations\ntest accepts ... ok\n{summary}"),
             format!(

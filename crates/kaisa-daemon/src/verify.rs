@@ -195,11 +195,15 @@ pub fn run_trusted_checks(
             let output = String::from_utf8_lossy(&run.output);
             complete
                 && !output.lines().any(|line| {
-                    let Some((_, name)) = line
-                        .trim_start()
+                    let line = line.trim_start();
+                    let name = line
                         .strip_prefix("ok ")
-                        .and_then(|s| s.split_once(" - "))
-                    else {
+                        .and_then(|s| s.split_once(" - ").map(|(_, name)| name))
+                        .or_else(|| {
+                            line.strip_prefix("✔ ")
+                                .map(|s| s.rsplit_once(" (").map_or(s, |(name, _)| name))
+                        });
+                    let Some(name) = name else {
                         return false;
                     };
                     let name = name.split(" #").next().unwrap_or(name);

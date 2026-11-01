@@ -1,10 +1,11 @@
 {
   "baseline_commit": "6871daf",
   "baseline_source": "Retained original reviewer results for the same 57 cases",
-  "after_source": "FIXA2 worktree; original cases and driver, external temporary fixture roots",
+  "after_source": "FIXA3 worktree based on 77c65e3; unchanged 57 original cases and driver, external temporary fixture roots",
   "false_blocks": {
     "before": 16,
-    "after": 4
+    "after": 0,
+    "fixa2": 4
   },
   "known_false_deliveries": {
     "before": [
@@ -33,6 +34,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -47,6 +56,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -73,6 +90,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -87,6 +112,16 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:5"
+        ]
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -117,6 +152,16 @@
         "advisories": [
           "advisory: added process termination at src/main.rs:6"
         ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:6"
+        ]
       }
     },
     {
@@ -131,6 +176,16 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:1"
+        ]
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -161,6 +216,16 @@
         "advisories": [
           "advisory: added process termination at src/lib.rs:2"
         ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
       }
     },
     {
@@ -175,6 +240,16 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -205,6 +280,16 @@
         "advisories": [
           "advisory: added process termination at src/lib.rs:8"
         ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:8"
+        ]
       }
     },
     {
@@ -217,6 +302,12 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [],
@@ -237,6 +328,12 @@
         "outcome": "blocked",
         "validation": [],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
       }
     },
     {
@@ -249,6 +346,12 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [],
@@ -269,6 +372,12 @@
         "outcome": "blocked",
         "validation": [],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
       }
     },
     {
@@ -283,6 +392,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -309,6 +426,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -323,6 +448,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -349,6 +482,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -363,6 +504,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -389,6 +538,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -403,6 +560,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -429,6 +594,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -443,6 +616,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -469,6 +650,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -483,6 +672,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -509,6 +706,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -523,6 +728,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -551,6 +764,16 @@
         "advisories": [
           "advisory: added process termination at src/lib.rs:5"
         ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:5"
+        ]
       }
     },
     {
@@ -565,6 +788,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -591,6 +822,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -611,6 +850,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -625,6 +872,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -645,6 +900,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -671,6 +934,14 @@
           "no positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -685,6 +956,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -711,6 +990,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -725,6 +1012,16 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:6"
+        ]
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -755,6 +1052,16 @@
         "advisories": [
           "advisory: added process termination at src/lib.js:2"
         ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:2"
+        ]
       }
     },
     {
@@ -769,6 +1076,16 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:3"
+        ]
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -797,6 +1114,14 @@
           "no positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -817,6 +1142,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -831,6 +1164,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -851,6 +1192,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [
@@ -877,6 +1226,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -891,6 +1248,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -917,6 +1282,14 @@
           "exit-code only"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
       }
     },
     {
@@ -931,6 +1304,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -957,6 +1338,14 @@
           "exit-code only"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
       }
     },
     {
@@ -971,6 +1360,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -997,6 +1394,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -1009,6 +1414,12 @@
         "advisories": []
       },
       "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 4,
         "outcome": "blocked",
         "validation": [],
@@ -1033,6 +1444,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -1047,6 +1466,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -1075,6 +1502,16 @@
         "advisories": [
           "advisory: added process termination at src/cli.js:32"
         ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:32"
+        ]
       }
     },
     {
@@ -1089,6 +1526,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [
@@ -1115,6 +1560,14 @@
           "positive test evidence"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
       }
     },
     {
@@ -1135,6 +1588,14 @@
           "test command failed"
         ],
         "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "test command failed"
+        ],
+        "advisories": []
       }
     },
     {
@@ -1149,6 +1610,14 @@
         "advisories": []
       },
       "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
         "exit": 0,
         "outcome": "delivered",
         "validation": [

@@ -27,7 +27,7 @@ Independent private acceptance tests remain specific to `build --spec`.
 | catch-unwind | delivered (exit 0) | blocked (ordinary goal) | weakened_tests: src/lib.rs: assertions swallowed by catch_unwind (0 -> 1) | [before](spec-demo/before/catch-unwind.txt), [after](spec-demo/after/catch-unwind.txt) |
 | self-compare | blocked (exit 3) | blocked (ordinary goal) | weakened_tests: src/lib.rs: tautological assertions added (0 -> 1) | [before](spec-demo/before/self-compare.txt), [after](spec-demo/after/self-compare.txt) |
 | legacy-cargo-config | blocked (exit 4) | blocked (ordinary goal) | the candidate changed what its checks run: .cargo/config | [before](spec-demo/before/legacy-cargo-config.txt), [after](spec-demo/after/legacy-cargo-config.txt) |
-| exit-zero | delivered (exit 0) | blocked (ordinary goal, exit 4 after FIXA2; spec build also blocked) | no positive test evidence from `cargo test --offline`: the command exited 0 but reported no executed tests; run at least one test with a supported text reporter and rerun kaisa | [before](spec-demo/before/exit-zero.txt), [earlier ordinary after](spec-demo/after/exit-zero.txt), [plain-goal guard rerun](spec-demo/plain-goal-guards/exit-zero.txt), [spec after](spec-demo/after-spec/exit-zero/06-build-fail.txt) |
+| exit-zero | delivered (exit 0) | blocked (ordinary goal, exit 4 after FIXA3; spec build also blocked) | no positive test evidence from `cargo test --offline`: the command exited 0 but reported no executed tests; run at least one test with a supported text reporter and rerun kaisa | [before](spec-demo/before/exit-zero.txt), [earlier ordinary after](spec-demo/after/exit-zero.txt), [plain-goal guard rerun](spec-demo/plain-goal-guards/exit-zero.txt), [spec after](spec-demo/after-spec/exit-zero/06-build-fail.txt) |
 | cargo-runner | blocked (exit 3) | blocked (spec build) | deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate | [before](spec-demo/before/cargo-runner.txt), [ordinary after](spec-demo/after/cargo-runner.txt), [spec after](spec-demo/after-spec/cargo-runner/06-build-fail.txt) |
 | build-rs-private-swap | blocked (exit 3) | blocked (spec build) | deterministic checks: developer attempt failed, was denied protected writes, or produced no preserved candidate | [before](spec-demo/before/build-rs-private-swap.txt), [ordinary after](spec-demo/after/build-rs-private-swap.txt), [spec after](spec-demo/after-spec/build-rs-private-swap/06-build-fail.txt) |
 
@@ -79,6 +79,12 @@ python3 examples/spec-demo/run.py --attack build-rs-private-swap --output target
 This is a finite adversarial fixture comparison, not a security completeness score.
 Lexical disguises and anticipated in-process output forgery remain documented limits.
 
-The [FIXA2 review rerun](plain-goal-fixa2.md) records the 57 plain-goal cases
-against `6871daf`, including false-block counts, all per-case outcomes, restored
-private summary-count regressions and the remaining output-format limitations.
+The [FIXA2 / FIXA3 review rerun](plain-goal-fixa2.md) records the same 57 plain-goal
+cases against the retained `6871daf` review baseline: false blocks fell from 16
+to 4 after FIXA2 and **0 after FIXA3**. All four remaining formats now deliver
+(Node spec, chained Node runs, nextest suppressed PASS output and flaky retries),
+while the exact exit-zero comparison still blocks with exit **4**. The final
+`scripts/check.sh` exited **0**. Captured-output regressions cover these formats
+and incomplete later runs; nextest fixtures are scripted. The known
+`r-attack-alias-forged-summary` false delivery is unchanged, as documented in
+[limitations.md](limitations.md).

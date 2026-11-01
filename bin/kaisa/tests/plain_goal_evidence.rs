@@ -351,30 +351,40 @@ fn node_and_npm_test_checks_require_completed_named_tests() {
         ("node-pass", NODE_PASS, true),
         ("node-exit", NODE_EXIT, false),
     ] {
-        let project = Project::new(name, LIBRARY);
-        project.write("test.mjs", source);
-        project.write(
-            "package.json",
-            r#"{"scripts":{"test":"node --test --test-reporter=tap test.mjs"}}"#,
-        );
-        project.commit();
-        let evidence = project.checks(&["node", "--test", "--test-reporter=tap", "test.mjs"]);
-        assert_eq!(
-            evidence.iter().all(Evidence::passed),
-            should_pass,
-            "a Node file wrapper cannot substitute for real completed tests: {evidence:?}"
-        );
-        if Command::new("npm")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        {
-            let evidence = project.checks(&["npm", "test"]);
+        for reporter in ["tap", "spec"] {
+            let project = Project::new(&format!("{name}-{reporter}"), LIBRARY);
+            project.write("test.mjs", source);
+            project.write(
+                "package.json",
+                format!(
+                    r#"{{"scripts":{{"test":"node --test --test-reporter={reporter} test.mjs"}}}}"#
+                )
+                .as_str(),
+            );
+            project.commit();
+            let evidence = project.checks(&[
+                "node",
+                "--test",
+                &format!("--test-reporter={reporter}"),
+                "test.mjs",
+            ]);
             assert_eq!(
                 evidence.iter().all(Evidence::passed),
                 should_pass,
-                "npm node:test scripts use the same positive evidence requirement: {evidence:?}"
+                "a Node file wrapper cannot substitute for real completed tests: {evidence:?}"
             );
+            if Command::new("npm")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+            {
+                let evidence = project.checks(&["npm", "test"]);
+                assert_eq!(
+                    evidence.iter().all(Evidence::passed),
+                    should_pass,
+                    "npm node:test scripts use the same positive evidence requirement: {evidence:?}"
+                );
+            }
         }
     }
 }
@@ -386,8 +396,7 @@ fn a_recognised_nextest_command_requires_positive_consistent_completion() {
     const COMPLETED: &str =
         "PASS [0.001s] fixture acceptance\nSummary [0.001s] 1 test run: 1 passed, 0 skipped";
     const EMPTY: &str = "Summary [0.001s] 0 tests run: 0 passed, 0 skipped";
-    const INCONSISTENT: &str =
-        "PASS [0.001s] fixture acceptance\nSummary [0.001s] 2 tests run: 2 passed, 0 skipped";
+    const INCONSISTENT: &str = "Starting 1 test across 1 binary\nPASS [0.001s] fixture acceptance\nSummary [0.001s] 2 tests run: 2 passed, 0 skipped";
     for (name, summary, passes) in [
         ("nextest-pass", COMPLETED, true),
         ("nextest-empty", EMPTY, false),
@@ -408,7 +417,7 @@ fn a_recognised_nextest_command_requires_positive_consistent_completion() {
         assert_eq!(
             evidence.iter().all(Evidence::passed),
             passes,
-            "nextest exit zero must accompany completed named results and a matching summary: {evidence:?}"
+            "nextest exit zero must accompany a matching final summary and start count: {evidence:?}"
         );
         assert!(
             evidence.iter().all(|piece| piece.test_evidence.is_some()),
