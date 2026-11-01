@@ -2,15 +2,16 @@
 //! heuristic, not measured coverage: comments/literals cannot manufacture Rust test references,
 //! and Node coverage requires a static import/require in a test file. Dynamic tests and macros
 //! may be missed. Tests are sealed outside Git; execution reuses private QA's trusted runner.
-//! WP4 must await `baseline` before admitting development, then call `compare` on its frozen
-//! result. A correction mapping permits changing current behaviour; acceptance QA must still
-//! establish the intended replacement behaviour. In-process QA influence limits still apply.
+//! WP4 must await `baseline` before admitting development. `compare` checks the recorded
+//! baseline sequence against run-scoped developer admissions before using its frozen result.
+//! A correction mapping permits changing current behaviour; acceptance QA must still establish
+//! the intended replacement behaviour. In-process QA influence limits still apply.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use kaisa_domain::{EventKind, Finding, RepoPath, Severity};
+use kaisa_domain::{Event, EventKind, Finding, RepoPath, Sequence, Severity};
 use kaisa_ledger::EventStore;
 use kaisa_sys::ProcessSpec;
 use kaisa_workspace::{
@@ -19,7 +20,7 @@ use kaisa_workspace::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::goal::{GoalError, at, record};
+use crate::goal::{GoalError, at};
 use crate::ids::fresh_suffix;
 use crate::qa::{
     QaIsolation, QaResult, QaToolchain, SuiteExecution, author_suite, execute_suite,
@@ -72,12 +73,24 @@ pub struct Baseline {
     results: Vec<QaResult>,
     questions: Vec<String>,
     run_id: String,
+    event_sequence: Sequence,
+    notes: Vec<String>,
 }
 impl Baseline {
     /// Git tree on which all baseline observations were recorded.
     #[must_use]
     pub fn base_tree(&self) -> &str {
         &self.base.tree
+    }
+    /// Sequence of the characterization.baseline receipt in the run ledger.
+    #[must_use]
+    pub fn event_sequence(&self) -> Sequence {
+        self.event_sequence
+    }
+    /// Explanations for hints skipped because they do not exist in the base.
+    #[must_use]
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
     /// Selected legacy areas and deterministic reasons.
     #[must_use]
@@ -96,6 +109,25 @@ impl Baseline {
     }
 }
 
+/// Comparison requires a recorded baseline followed by a developer admission for the same run.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompareError {
+    /// The token does not match this service or the supplied ledger receipt.
+    BaselineMismatch,
+    /// No admission with role=developer and run_id equal to the baseline run exists.
+    MissingDeveloperAdmission,
+    /// At least one developer admission for the run predates the baseline.
+    DeveloperAdmittedBeforeBaseline,
+    /// The ledger could not be read, so ordering cannot be established.
+    LedgerUnavailable(String),
+}
+impl std::fmt::Display for CompareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "characterization comparison refused: {self:?}")
+    }
+}
+impl std::error::Error for CompareError {}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Behaviour {
@@ -108,9 +140,9 @@ struct Behaviour {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum Disposition {
-    Preserve,
+    Preserve {},
     Correct { criterion_id: String },
-    Unknown,
+    Unknown {},
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,7 +238,13 @@ impl LegacyCharacterizer<'_> {
             .map_err(at("preparing characterization"))?;
         let checkout = CandidateCheckout::create(self.repository, &base, &temporary.join("base"))
             .map_err(at("checking out characterization base"))?;
-        let areas = detect_legacy_areas(checkout.path(), input.spec_paths, input.agent_paths)?;
+        let mut notes = Vec::new();
+        let areas = detect_with_notes(
+            checkout.path(),
+            input.spec_paths,
+            input.agent_paths,
+            &mut notes,
+        )?;
         let mut baseline = Baseline {
             base,
             areas,
@@ -215,6 +253,8 @@ impl LegacyCharacterizer<'_> {
             results: Vec::new(),
             questions: Vec::new(),
             run_id: self.run_id.into(),
+            event_sequence: Sequence::FIRST,
+            notes,
         };
         if !baseline.areas.is_empty() {
             let sources =
@@ -281,7 +321,7 @@ impl LegacyCharacterizer<'_> {
             baseline.questions = baseline
                 .behaviours
                 .iter()
-                .filter(|b| matches!(b.disposition, Disposition::Unknown))
+                .filter(|b| matches!(b.disposition, Disposition::Unknown { .. }))
                 .map(|b| {
                     format!(
                         "needs-person: preserve or correct {} ({})?",
@@ -295,21 +335,65 @@ impl LegacyCharacterizer<'_> {
                     .map_err(at("sealing passing characterization tests"))?,
             );
         }
-        self.record_baseline(&baseline)?;
+        baseline.event_sequence = self.record_baseline(&baseline)?;
         drop(checkout);
         std::fs::remove_dir_all(temporary).map_err(at("removing characterization scratch"))?;
         Ok(baseline)
     }
 
-    /// Reruns retained observations and returns blocking unexplained changes or questions.
-    pub fn compare(&self, baseline: &Baseline, candidate: &Candidate) -> Vec<Finding> {
-        let mut findings = Vec::new();
+    /// Checks the recorded baseline and every run-scoped developer admission before executing.
+    /// Admissions must carry `role: "developer"` and this service's `run_id`.
+    /// Even an empty baseline requires a receipt and a later admission. Baseline failures return
+    /// no token, so callers cannot compare after failed authoring/parsing/execution.
+    pub fn compare(
+        &self,
+        baseline: &Baseline,
+        candidate: &Candidate,
+        ledger: &EventStore,
+    ) -> Result<Vec<Finding>, CompareError> {
         if baseline.run_id != self.run_id {
-            return vec![finding(
-                "README.md",
-                "characterization baseline belongs to another run",
-            )];
+            return Err(CompareError::BaselineMismatch);
         }
+        let events = ledger
+            .read_from(Sequence::FIRST)
+            .map_err(|e| CompareError::LedgerUnavailable(e.to_string()))?;
+        let receipt = events
+            .iter()
+            .find(|e| e.recorded.sequence == baseline.event_sequence)
+            .ok_or(CompareError::BaselineMismatch)?;
+        let event = &receipt.recorded.event;
+        let payload: Value =
+            serde_json::from_str(&event.payload).map_err(|_| CompareError::BaselineMismatch)?;
+        if event.kind != EventKind::CharacterizationBaseline
+            || event.subject != baseline.run_id
+            || payload["run_id"] != baseline.run_id
+            || payload["base_tree"] != baseline.base.tree
+            || payload["base_commit"] != baseline.base.commit
+        {
+            return Err(CompareError::BaselineMismatch);
+        }
+        let mut admitted = false;
+        for event in &events {
+            if event.recorded.event.kind != EventKind::AttemptAdmitted {
+                continue;
+            }
+            let payload: Value = serde_json::from_str(&event.recorded.event.payload)
+                .map_err(|e| CompareError::LedgerUnavailable(e.to_string()))?;
+            if payload["role"] == "developer" && payload["run_id"] == baseline.run_id {
+                if event.recorded.sequence <= baseline.event_sequence {
+                    return Err(CompareError::DeveloperAdmittedBeforeBaseline);
+                }
+                admitted = true;
+            }
+        }
+        if !admitted {
+            return Err(CompareError::MissingDeveloperAdmission);
+        }
+        Ok(self.compare_findings(baseline, candidate))
+    }
+
+    fn compare_findings(&self, baseline: &Baseline, candidate: &Candidate) -> Vec<Finding> {
+        let mut findings = Vec::new();
         let Some(suite) = &baseline.suite else {
             return findings;
         };
@@ -340,7 +424,7 @@ impl LegacyCharacterizer<'_> {
                 ));
             }
             match &behaviour.disposition {
-                Disposition::Preserve if !result.passed => findings.push(finding(
+                Disposition::Preserve { .. } if !result.passed => findings.push(finding(
                     &behaviour.path,
                     &format!("unexplained behaviour change: {}", behaviour.test_id),
                 )),
@@ -351,7 +435,7 @@ impl LegacyCharacterizer<'_> {
                         behaviour.test_id
                     ),
                 )),
-                Disposition::Unknown => {
+                Disposition::Unknown { .. } => {
                     if !result.passed {
                         findings.push(finding(&behaviour.path, "unexplained behaviour change"));
                     }
@@ -382,21 +466,21 @@ impl LegacyCharacterizer<'_> {
             isolation:QaIsolation::Reduced("pre-development private characterization; developer isolation must be checked by workflow".into()),
             attempt_id:"characterization" })
     }
-    fn record_baseline(&self, baseline: &Baseline) -> Result<(), GoalError> {
+    fn record_baseline(&self, baseline: &Baseline) -> Result<Sequence, GoalError> {
         let mut ledger = EventStore::open(&self.state.join("kaisa.db"))
             .map_err(at("opening characterization ledger"))?;
-        record(
-            &mut ledger,
-            EventKind::CharacterizationBaseline,
-            self.run_id,
-            json!({"run_id":self.run_id,"base_commit":baseline.base.commit,"base_tree":baseline.base.tree,
+        ledger.append(Event {
+            kind: EventKind::CharacterizationBaseline,
+            subject: self.run_id.into(),
+            payload_version: 1,
+            payload: json!({"run_id":self.run_id,"base_commit":baseline.base.commit,"base_tree":baseline.base.tree,
                 "areas":baseline.areas.iter().map(|a| json!({"path":a.path,"reason":a.reason})).collect::<Vec<_>>(),
                 "tests":baseline.results.iter().map(|r| json!({"test_id":r.test_id,"passed":r.passed,
                     "dropped":!r.passed,"note":if r.passed {"current behaviour observed"} else {"fails on base; not a characterization; dropped"},
                     "output_digest":r.output_digest,"base_tree":r.candidate_tree,"confined":r.confined,
                     "private_test_integrity":r.private_test_integrity,"qa_evidence":r.qa_evidence})).collect::<Vec<_>>(),
-                "questions":baseline.questions,"behaviours":baseline.behaviours,"suite_digest":baseline.suite.as_ref().map(QaSuite::manifest_digest),"suite_directory":baseline.suite.as_ref().map(|s| s.directory())}),
-        )
+                "notes":baseline.notes,"questions":baseline.questions,"behaviours":baseline.behaviours,"suite_digest":baseline.suite.as_ref().map(QaSuite::manifest_digest),"suite_directory":baseline.suite.as_ref().map(|s| s.directory())}).to_string(),
+        }).map(|event| event.recorded.sequence).map_err(at("recording characterization baseline"))
     }
 }
 fn finding(path: &str, message: &str) -> Finding {
@@ -409,11 +493,21 @@ fn finding(path: &str, message: &str) -> Finding {
 }
 
 /// Detects likely touched files lacking lexical test references, deterministically. Input must
-/// be a fresh frozen base checkout. Symlinks and escaping hints are rejected, never followed.
+/// be a fresh frozen base checkout. Escaping hints are rejected; symlinks are never followed.
+/// Hints absent from regular base files are skipped (baseline receipts retain the notes).
 pub fn detect_legacy_areas(
     base: &Path,
     spec_paths: &[String],
     agent_paths: &[String],
+) -> Result<Vec<LegacyArea>, GoalError> {
+    detect_with_notes(base, spec_paths, agent_paths, &mut Vec::new())
+}
+
+fn detect_with_notes(
+    base: &Path,
+    spec_paths: &[String],
+    agent_paths: &[String],
+    notes: &mut Vec<String>,
 ) -> Result<Vec<LegacyArea>, GoalError> {
     let output = Command::new("git")
         .args(["ls-files", "-z"])
@@ -467,10 +561,17 @@ pub fn detect_legacy_areas(
     };
     let mut areas = Vec::new();
     for path in selected.into_iter().collect::<BTreeSet<_>>() {
+        if Path::new(&path)
+            .components()
+            .any(|p| !matches!(p, Component::Normal(_)))
+        {
+            return Err(error("unsafe legacy hint"));
+        }
         let Some(source) = files.get(&path) else {
-            return Err(error(format!(
-                "legacy hint is not a regular base file: {path}"
-            )));
+            notes.push(format!(
+                "{origin}: skipped {path}; not a regular file in the base tree"
+            ));
+            continue;
         };
         let extension = Path::new(&path)
             .extension()
@@ -533,10 +634,42 @@ fn rust_covered(path: &str, source: &str, files: &BTreeMap<String, String>) -> b
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
+    let mut qualifiers: BTreeSet<String> = tokens
+        .windows(2)
+        .filter(|w| matches!(w[0].as_str(), "struct" | "enum" | "trait"))
+        .map(|w| w[1].clone())
+        .collect();
+    if module != "lib" && module != "main" && module != "mod" {
+        qualifiers.insert(module.into());
+    }
+    if matches!(module, "lib" | "mod") {
+        let parent = Path::new(path).parent().unwrap_or(Path::new(""));
+        if module == "mod" {
+            if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                qualifiers.insert(name.into());
+            }
+        } else {
+            let manifest = parent.parent().unwrap_or(parent).join("Cargo.toml");
+            if let Some(name) = files
+                .get(&manifest.to_string_lossy().into_owned())
+                .and_then(|text| text.parse::<toml::Value>().ok())
+                .and_then(|value| {
+                    value
+                        .get("lib")
+                        .and_then(|lib| lib.get("name"))
+                        .or_else(|| value.get("package").and_then(|pkg| pkg.get("name")))
+                        .and_then(toml::Value::as_str)
+                        .map(|s| s.replace('-', "_"))
+                })
+            {
+                qualifiers.insert(name);
+            }
+        }
+    }
     files
         .iter()
         .filter(|(p, _)| p.ends_with(".rs"))
-        .any(|(_, text)| {
+        .any(|(test_path, text)| {
             let ts = code_tokens(text, false);
             ts.windows(4)
                 .enumerate()
@@ -558,9 +691,15 @@ fn rust_covered(path: &str, source: &str, files: &BTreeMap<String, String>) -> b
                             depth == 0
                         })
                         .unwrap_or(ts.len());
-                    ts[open..end]
-                        .iter()
-                        .any(|token| token == module || functions.contains(token.as_str()))
+                    let body = &ts[open..end];
+                    (test_path == path
+                        && body.iter().any(|token| functions.contains(token.as_str())))
+                        || body.windows(4).any(|w| {
+                            qualifiers.contains(&w[0])
+                                && w[1] == ":"
+                                && w[2] == ":"
+                                && functions.contains(w[3].as_str())
+                        })
                 })
         })
 }
@@ -792,6 +931,19 @@ mod tests {
             }
         }
         #[cfg(target_os = "macos")]
+        fn admit_developer(&self) -> EventStore {
+            let mut ledger =
+                EventStore::open(&self.state.join("kaisa.db")).expect("developer ledger");
+            record(
+                &mut ledger,
+                EventKind::AttemptAdmitted,
+                "att_developer",
+                json!({"role":"developer","run_id":"run_legacy"}),
+            )
+            .expect("run-scoped developer admission");
+            ledger
+        }
+        #[cfg(target_os = "macos")]
         fn corrected_candidate(&self) -> Candidate {
             std::fs::write(self.repository.join("src/lib.rs"), CORRECTED_SOURCE)
                 .expect("legacy correction");
@@ -864,7 +1016,7 @@ mod tests {
             &mut ledger,
             EventKind::AttemptAdmitted,
             "att_developer",
-            json!({"role":"developer"}),
+            json!({"role":"developer","run_id":"run_legacy"}),
         )
         .expect("developer starts after baseline");
         let events = ledger.read_from(Sequence::FIRST).expect("ordered events");
@@ -893,13 +1045,103 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn comparison_refuses_a_developer_admitted_before_the_baseline() {
+        let fixture = LegacyFixture::untested();
+        let ledger = fixture.admit_developer();
+        let author = fixture.author(json!({"kind":"preserve"}), false);
+        let toolchain = toolchain();
+        let service = fixture.service(&author, &toolchain);
+        let baseline = service
+            .baseline(&input(&fixture.spec()))
+            .expect("valid characterization baseline");
+        assert_eq!(
+            service.compare(&baseline, &fixture.base, &ledger),
+            Err(super::CompareError::DeveloperAdmittedBeforeBaseline)
+        );
+        let ledger = fixture.admit_developer();
+        assert_eq!(
+            service.compare(&baseline, &fixture.base, &ledger),
+            Err(super::CompareError::DeveloperAdmittedBeforeBaseline),
+            "a later admission cannot erase the premature one"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_baselines_record_skipped_hints_and_still_require_ordered_admission() {
+        let fixture = LegacyFixture::untested();
+        let author = fixture.author(json!({"kind":"preserve"}), false);
+        let toolchain = toolchain();
+        let service = fixture.service(&author, &toolchain);
+        let spec = fixture.spec();
+        let baseline = service
+            .baseline(&CharacterizationInput {
+                frozen_spec: &spec,
+                spec_paths: &["src/new_module.rs".into()],
+                agent_paths: &[],
+            })
+            .expect("empty characterization baseline");
+        assert!(baseline.areas().is_empty());
+        assert!(baseline.notes()[0].contains("skipped src/new_module.rs"));
+        let mut ledger =
+            EventStore::open(&fixture.state.join("kaisa.db")).expect("baseline ledger");
+        let events = ledger.read_from(Sequence::FIRST).expect("baseline events");
+        let receipt = events
+            .iter()
+            .find(|e| e.recorded.sequence == baseline.event_sequence())
+            .expect("baseline receipt sequence");
+        assert!(
+            receipt
+                .recorded
+                .event
+                .payload
+                .contains("skipped src/new_module.rs")
+        );
+        assert_eq!(
+            service.compare(&baseline, &fixture.base, &ledger),
+            Err(super::CompareError::MissingDeveloperAdmission)
+        );
+        record(
+            &mut ledger,
+            EventKind::AttemptAdmitted,
+            "att_other_run",
+            json!({"role":"developer","run_id":"other_run"}),
+        )
+        .expect("other-run admission");
+        assert_eq!(
+            service.compare(&baseline, &fixture.base, &ledger),
+            Err(super::CompareError::MissingDeveloperAdmission)
+        );
+        let ledger = fixture.admit_developer();
+        assert!(
+            service
+                .compare(&baseline, &fixture.base, &ledger)
+                .expect("ordered empty baseline comparison")
+                .is_empty()
+        );
+        let unrelated =
+            EventStore::open(&fixture.state.join("other.db")).expect("unrelated ledger");
+        assert_eq!(
+            service.compare(&baseline, &fixture.base, &unrelated),
+            Err(super::CompareError::BaselineMismatch)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn an_unexplained_legacy_behaviour_change_is_blocking() {
         let fixture = LegacyFixture::untested();
         let author = fixture.author(json!({"kind":"preserve"}), false);
         let toolchain = toolchain();
         let service = fixture.service(&author, &toolchain);
         let baseline = service.baseline(&input(&fixture.spec())).expect("baseline");
-        let findings = service.compare(&baseline, &fixture.corrected_candidate());
+        let findings = service
+            .compare(
+                &baseline,
+                &fixture.corrected_candidate(),
+                &fixture.admit_developer(),
+            )
+            .expect("ordered regression comparison");
         assert!(
             findings.iter().any(|f| f.severity == Severity::Blocking
                 && f.message.contains("unexplained behaviour change")),
@@ -917,14 +1159,20 @@ mod tests {
         let baseline = service.baseline(&input(&fixture.spec())).expect("baseline");
         assert!(
             service
-                .compare(&baseline, &fixture.base)
+                .compare(&baseline, &fixture.base, &fixture.admit_developer())
+                .expect("ordered preserved comparison")
                 .iter()
                 .any(|f| f.message.contains("required correction AC-1 preserved")),
             "current behaviour is not automatically correct"
         );
         assert!(
             service
-                .compare(&baseline, &fixture.corrected_candidate())
+                .compare(
+                    &baseline,
+                    &fixture.corrected_candidate(),
+                    &fixture.admit_developer()
+                )
+                .expect("ordered corrected comparison")
                 .is_empty(),
             "an explicit correction may change the characterized outcome"
         );
@@ -1063,7 +1311,8 @@ mod tests {
         );
         assert!(
             service
-                .compare(&baseline, &fixture.base)
+                .compare(&baseline, &fixture.base, &fixture.admit_developer())
+                .expect("ordered unknown comparison")
                 .iter()
                 .any(|f| f.message.contains("needs-person")),
             "unknown intent must not silently permit delivery"
@@ -1073,7 +1322,7 @@ mod tests {
     #[test]
     fn rust_coverage_requires_a_reference_inside_a_real_test_body() {
         let source = "pub fn accepts(input: &str) -> bool { !input.is_empty() }";
-        let mut files = std::collections::BTreeMap::from([("src/lib.rs".into(), source.into()),
+        let mut files = std::collections::BTreeMap::from([("Cargo.toml".into(), "[package]\nname = \"legacy_fixture\"".into()), ("src/lib.rs".into(), source.into()),
             ("tests/legacy.rs".into(), "// #[test] fn fake() { accepts(); }\n#[test] fn unrelated() { let text = \"accepts\"; }".into())]);
         assert!(
             !super::rust_covered("src/lib.rs", source, &files),
@@ -1087,6 +1336,80 @@ mod tests {
             super::rust_covered("src/lib.rs", source, &files),
             "an integration test reference covers the function"
         );
+    }
+
+    #[test]
+    fn new_file_hints_are_skipped_without_losing_existing_legacy_areas() {
+        let fixture = LegacyFixture::untested();
+        let areas = detect_legacy_areas(
+            &fixture.repository,
+            &["src/new_module.rs".into(), "src/lib.rs".into()],
+            &[],
+        )
+        .expect("new files are not legacy");
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn common_rust_function_names_do_not_cover_unrelated_legacy_code() {
+        let fixture = LegacyFixture::untested();
+        std::fs::write(
+            fixture.repository.join("src/lib.rs"),
+            "pub fn new() {} pub fn default() {} pub fn from() {}",
+        )
+        .expect("legacy constructor source");
+        std::fs::write(fixture.repository.join("tests/unrelated.rs"),
+            "#[test] fn other() { let _ = Vec::<u8>::new(); let _ = String::default(); let _ = String::from(\"x\"); }").expect("unrelated constructor test");
+        let areas = detect_legacy_areas(&fixture.repository, &[], &[])
+            .expect("legacy constructor detection");
+        assert_eq!(
+            areas.len(),
+            1,
+            "unrelated constructors do not cover legacy functions"
+        );
+    }
+
+    #[test]
+    fn only_correct_dispositions_may_carry_a_criterion_id() {
+        let fixture = LegacyFixture::untested();
+        let areas = detect_legacy_areas(&fixture.repository, &[], &[]).expect("legacy areas");
+        for kind in ["preserve", "unknown"] {
+            let answer = format!(
+                "```kaisa-characterization\n{}\n```",
+                json!({"tests":[{"test_id":OBSERVATION,"file":"legacy.rs","contents":CURRENT_TEST}],
+                "behaviours":[{"test_id":OBSERVATION,"path":"src/lib.rs","description":"empty accepted","edge_case":true,
+                "disposition":{"kind":kind,"criterion_id":"AC-1"}}]})
+            );
+            assert!(
+                parse(&answer, &fixture.spec(), &areas).is_err(),
+                "{kind} cannot carry correction intent"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_coverage_accepts_target_qualified_and_same_file_tests() {
+        let source = "pub struct Legacy; impl Legacy { pub fn new() -> Self { Self } }";
+        let mut files = std::collections::BTreeMap::from([
+            ("src/legacy.rs".into(), source.into()),
+            (
+                "tests/legacy.rs".into(),
+                "#[test] fn real() { let _ = Legacy::new(); }".into(),
+            ),
+        ]);
+        assert!(super::rust_covered("src/legacy.rs", source, &files));
+        files.insert(
+            "tests/legacy.rs".into(),
+            "#[test] fn real() { legacy::new(); }".into(),
+        );
+        assert!(super::rust_covered("src/legacy.rs", source, &files));
+        files.remove("tests/legacy.rs");
+        files.insert(
+            "src/legacy.rs".into(),
+            format!("{source} #[test] fn local() {{ new(); }}"),
+        );
+        assert!(super::rust_covered("src/legacy.rs", source, &files));
     }
 
     #[test]
