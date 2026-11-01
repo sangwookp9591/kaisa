@@ -888,6 +888,15 @@ fn evaluate_candidate(
     )?;
     let isolation = worst_qa_isolation(developers.iter().map(qa_isolation));
     *stage = EvaluationStage::PrivateQa;
+    // Matching bytes cannot prove that candidate code was denied writes to private inputs.
+    // In particular Windows check execution is unconfined. Refuse this evidence boundary
+    // explicitly rather than turning an unavailable guarantee into a test failure or PASS.
+    if !crate::qa::qa_write_deny_available() {
+        return Err(GoalError {
+            step: "verifying private QA isolation",
+            detail: "private QA write-deny unavailable; digests alone cannot verify private input isolation".into(),
+        });
+    }
     let results: Vec<QaResult> = if suites.is_empty() {
         let spec_json = serde_json::to_value(context.specification).expect("spec JSON");
         let outcome = run_private_qa(&QaRequest {

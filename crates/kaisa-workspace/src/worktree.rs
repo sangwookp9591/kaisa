@@ -181,6 +181,9 @@ pub fn worktree_paths(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
     Ok(String::from_utf8_lossy(&listing)
         .split('\0')
         .filter_map(|field| field.strip_prefix("worktree ").map(PathBuf::from))
+        // Git prints ordinary Windows paths; callers compare canonical identities. Retain
+        // missing registrations too, since recovery must still exclude those checkouts.
+        .map(|path| path.canonicalize().unwrap_or(path))
         .collect())
 }
 

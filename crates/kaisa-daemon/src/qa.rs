@@ -4,8 +4,8 @@
 //! external private inputs, artifact digests and positive named-test harness evidence.
 //! Runtime private-QA write denial and author isolation were exercised only on macOS;
 //! native Linux/Windows guarantees remain unverified (NFR-04/NFR-08). The Linux/Windows
-//! cross-clippy checks in scripts/check.sh are compile-only; this macOS host's Windows
-//! cross-check excludes the SQLite-dependent daemon.
+//! cross-clippy checks in scripts/check.sh cover the full workspace but are compile-only;
+//! they do not validate native SQLite linking or runtime isolation.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -1188,10 +1188,10 @@ fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<S
     ])
 }
 
-fn qa_write_deny_available() -> bool {
+pub(crate) fn qa_write_deny_available() -> bool {
     #[cfg(target_os = "linux")]
     {
-        return kaisa_sys::landlock_abi().is_some_and(|abi| abi >= 3);
+        kaisa_sys::landlock_abi().is_some_and(|abi| abi >= 3)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -2854,6 +2854,7 @@ mod tests {
                     env: vec![
                         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
                     ],
                 },
             )
@@ -2866,6 +2867,7 @@ mod tests {
                     env: vec![
                         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
                     ],
                 },
                 &sandbox.confinement(),

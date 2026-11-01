@@ -342,6 +342,69 @@ fn worker_interval(transcript: &str) -> (u128, u128) {
     };
     (time("fake-start-ns: "), time("fake-end-ns: "))
 }
+
+/// Synchronize the first wave through host-owned releases in each agent's scratch.
+/// A sequential scheduler times out; slow Windows Git startup cannot give a false failure.
+struct FirstWave {
+    peers: std::sync::mpsc::Sender<PathBuf>,
+    launched: std::sync::atomic::AtomicUsize,
+    host: std::thread::JoinHandle<()>,
+}
+impl FirstWave {
+    fn new() -> Self {
+        let (peers, receive) = std::sync::mpsc::channel::<PathBuf>();
+        let host = std::thread::spawn(move || {
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let paths: Vec<_> = (0..PARALLEL_SLOTS)
+                .map(|_| {
+                    receive
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .expect("first-wave launch reaches the rendezvous")
+                })
+                .collect();
+            while !paths
+                .iter()
+                .all(|path| path.with_extension("ready").exists())
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "first-wave processes must overlap"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            for path in paths {
+                std::fs::write(path.with_extension("released"), []).expect("release live peer");
+            }
+        });
+        Self {
+            peers,
+            launched: std::sync::atomic::AtomicUsize::new(0),
+            host,
+        }
+    }
+    fn synchronize(&self, config: &Path, mut process: ProcessSpec) -> ProcessSpec {
+        if self
+            .launched
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            < PARALLEL_SLOTS
+        {
+            let path = config
+                .parent()
+                .expect("attempt directory")
+                .join("scratch/overlap");
+            self.peers.send(path.clone()).expect("rendezvous host");
+            process.args.extend([
+                "--fake-wait-for-release".into(),
+                path.to_string_lossy().into_owned(),
+            ]);
+        }
+        process
+    }
+    fn finish(self) {
+        self.host.join().expect("first-wave rendezvous completed");
+    }
+}
 fn delivered(outcome: &MissionOutcome) -> bool {
     outcome
         .verification
@@ -358,12 +421,15 @@ fn independent_ready_agents_overlap_but_never_exceed_the_slot_limit() {
         a_task("task_c", "src/c.md", &[]),
     ])
     .expect("disjoint plan");
+    let wave = FirstWave::new();
+    let launch = |config: &Path| wave.synchronize(config, a_declared_writer(config));
     let outcome = repository.run(
         &plan,
         &parallel_policy(kaisa_domain::OnFailure::Stop),
-        &a_declared_writer,
+        &launch,
         &[trusted_check("pass")],
     );
+    wave.finish();
     let intervals: Vec<_> = outcome
         .ran
         .iter()
@@ -628,17 +694,21 @@ fn best_of_many_delivers_one_comparatively_verified_candidate_and_none_when_all_
             RepoPath::try_new("src/candidate.md").expect("owned file"),
         ]);
         let checks = [trusted_check(check)];
+        let wave = FirstWave::new();
         let developer = |config: &Path| {
-            fake_spec(
+            wave.synchronize(
                 config,
-                &[
-                    "--fake-write",
-                    "src/candidate.md",
-                    "--fake-content",
-                    "equivalent alternative\n",
-                    "--fake-delay-ms",
-                    WORKER_SLEEP_MS,
-                ],
+                fake_spec(
+                    config,
+                    &[
+                        "--fake-write",
+                        "src/candidate.md",
+                        "--fake-content",
+                        "equivalent alternative\n",
+                        "--fake-delay-ms",
+                        WORKER_SLEEP_MS,
+                    ],
+                ),
             )
         };
         let reviewer =
@@ -662,6 +732,7 @@ fn best_of_many_delivers_one_comparatively_verified_candidate_and_none_when_all_
         };
         let outcome =
             kaisa_daemon::run_candidates(&request, CANDIDATES).expect("candidate infrastructure");
+        wave.finish();
         assert_eq!(
             outcome.candidates.len(),
             CANDIDATES,

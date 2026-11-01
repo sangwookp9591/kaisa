@@ -348,12 +348,36 @@ impl BuildBench {
             "no delivery auto-commit changes the user's branch"
         );
     }
+    /// Windows cannot supply the private-input write-deny guarantee. Tests reaching
+    /// that boundary must prove the exact conservative refusal, never accept any error.
+    fn private_qa_unavailable(&self, outcome: &SpecOutcome) -> bool {
+        if !cfg!(windows)
+            || !outcome.acceptance.lines.iter().any(|line| {
+                line.requirement == "private QA all passed on FINAL tree"
+                    && line.check.detail.contains("private QA write-deny unavailable; digests alone cannot verify private input isolation")
+            })
+        {
+            return false;
+        }
+        assert_eq!(
+            gate_line(outcome, "private QA all passed on FINAL tree").status,
+            AcceptanceStatus::Inconclusive,
+            "{:?}",
+            outcome.acceptance
+        );
+        assert_eq!(outcome.acceptance.status, AcceptanceStatus::Inconclusive);
+        self.assert_not_delivered(outcome);
+        true
+    }
 }
 #[test]
 fn failing_private_qa_blocks_delivery_even_when_developer_tests_and_reviewer_pass() {
     let bench = BuildBench::new("spec-private-failure");
     bench.freeze();
     let outcome = bench.run(LIBRARY, BUGGY_IMPLEMENTATION, true, None);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Fail,
@@ -539,6 +563,9 @@ fn reduced_qa_isolation_without_policy_waits_and_never_publishes_a_result() {
     bench.original_head = git(&bench.repository, &["rev-parse", "HEAD"]);
     bench.freeze();
     let outcome = bench.run_mode("README.md", "", true, None, true);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Inconclusive,
@@ -566,6 +593,9 @@ fn passing_final_evidence_publishes_only_a_provisional_result_after_the_gate() {
         Some("reduced(platform state-read QA boundary not verified)")
     };
     let outcome = bench.run(LIBRARY, VALID_IMPLEMENTATION, true, isolation_policy);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Pass,
@@ -624,6 +654,9 @@ fn a_revision_reruns_both_sealed_private_suites_on_the_new_final_tree() {
         Some("reduced(platform state-read QA boundary not verified)")
     };
     let outcome = bench.run(LIBRARY, BUGGY_IMPLEMENTATION, true, accepted);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Pass,
@@ -700,6 +733,9 @@ fn a_development_mapping_to_an_unknown_criterion_blocks_acceptance() {
         Some("reduced(platform state-read QA boundary not verified)")
     };
     let outcome = bench.run(LIBRARY, VALID_IMPLEMENTATION, true, accepted);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Fail,
@@ -768,6 +804,9 @@ fn a_post_development_spec_store_rewrite_fails_the_integrity_gate() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.attempts.len(),
         1,
@@ -801,6 +840,9 @@ fn adversarial_coverage_cannot_fill_an_acceptance_criterion_gap() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Fail,
@@ -842,6 +884,9 @@ fn malformed_private_qa_is_attributed_to_the_private_qa_gate_line() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     let qa = outcome
         .acceptance
         .lines
@@ -958,6 +1003,9 @@ fn policy_accepted_reduced_human_approval_keeps_its_label_after_delivery() {
         false,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Pass);
     assert!(
         outcome
@@ -1037,6 +1085,9 @@ fn production_legacy_baseline_precedes_real_developer_admission_and_blocks_unexp
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
     let check = gate_line(&outcome, "characterization honoured");
     assert_eq!(check.status, AcceptanceStatus::Fail);
@@ -1081,6 +1132,9 @@ fn production_flags_a_required_correction_that_preserves_the_old_behaviour() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
     let check = gate_line(&outcome, "characterization honoured");
     assert_eq!(check.status, AcceptanceStatus::Fail);
@@ -1104,6 +1158,9 @@ fn production_staged_reviewer_escalates_with_ledger_evidence_and_blocks_delivery
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
     let check = gate_line(&outcome, "staged review approved");
     assert_eq!(check.status, AcceptanceStatus::Fail, "{}", check.detail);
@@ -1133,6 +1190,9 @@ fn production_rejects_an_explanation_only_blocking_downgrade() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
     let check = gate_line(&outcome, "staged review approved");
     assert_eq!(check.status, AcceptanceStatus::Fail);
@@ -1153,6 +1213,9 @@ fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         gate_line(&outcome, "staged review approved").status,
         AcceptanceStatus::Pass
@@ -1176,6 +1239,9 @@ fn production_happy_path_passes_with_traceability_and_review_only_stage_three_co
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Pass,
@@ -1352,6 +1418,9 @@ fn production_refused_comparison_is_a_fail_with_an_explicit_ordering_reason() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     let check = gate_line(&outcome, "characterization honoured");
     assert_eq!(
         check.status,
@@ -1411,17 +1480,6 @@ fn build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction() 
     let domain = bench.bench.base.join("cli-domain.txt");
     std::fs::write(&domain, format!("```kaisa-test-review\n{}\n```", json!({"criteria":[{"id":"AC-1","coverage":"covered","note":"contract asserted"}],"missing_business_cases":[],"missing_state_transitions":[],"weak_assertions":[],"spec_test_mismatches":[]}))).expect("domain fixture");
     let qa = json!({"tests":[{"test_id":"empty-input","criterion_ids":["AC-1"],"file":"empty.rs","contents":"#[test] fn empty_input_is_rejected() { assert_eq!(spec_fixture::accept(\"\"), false); }"}]}).to_string();
-    let qa_file = bench.bench.base.join("cli-qa.json");
-    let characterization_file = bench.bench.base.join("cli-characterization.json");
-    std::fs::write(&qa_file, qa).expect("QA fixture");
-    std::fs::write(
-        &characterization_file,
-        bench
-            .characterization_json
-            .as_ref()
-            .expect("baseline fixture"),
-    )
-    .expect("characterization fixture");
     let mut build = Command::new(BINARY);
     build
         .current_dir(&bench.repository)
@@ -1442,16 +1500,25 @@ fn build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction() 
             "--reviewer-arg",
             "resolve",
         ])
-        .args(["--qa-author-arg", "--fake-qa", "--qa-author-arg"])
-        .arg(&qa_file)
+        // Inline answers do not require the confined Windows author to read a fixture
+        // outside its allowed public/scratch paths.
+        .args(["--qa-author-arg", "--fake-qa", "--qa-author-arg", "-"])
+        .args(["--qa-author-arg", "--fake-qa-json", "--qa-author-arg"])
+        .arg(&qa)
         .args([
             "--qa-author-arg",
-            "--fake-characterization-answer",
+            "--fake-characterization-json",
             "--qa-author-arg",
         ])
-        .arg(&characterization_file)
-        .args(["--qa-blind-arg", "--fake-qa", "--qa-blind-arg"])
-        .arg(&qa_file)
+        .arg(
+            bench
+                .characterization_json
+                .as_ref()
+                .expect("baseline fixture"),
+        )
+        .args(["--qa-blind-arg", "--fake-qa", "--qa-blind-arg", "-"])
+        .args(["--qa-blind-arg", "--fake-qa-json", "--qa-blind-arg"])
+        .arg(&qa)
         .args([
             "--test-reviewer-arg",
             "--fake-test-review-answer",
@@ -1466,6 +1533,17 @@ fn build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction() 
     }
     let output = build.output().expect("build CLI");
     let text = String::from_utf8_lossy(&output.stdout);
+    if cfg!(windows) {
+        assert_eq!(
+            output.status.code(),
+            Some(AcceptanceStatus::Inconclusive.exit_code().into()),
+            "{text}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains("private QA write-deny unavailable; digests alone cannot verify private input isolation"), "{text}");
+        assert!(git(&bench.repository, &["branch", "--list", "kaisa/result/*"]).is_empty());
+        return;
+    }
     assert!(
         output.status.success(),
         "{text}\n{}",
@@ -1507,12 +1585,18 @@ fn production_review_evidence_is_only_this_run_and_final_tree() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&first) {
+        return;
+    }
     let outcome = bench.run(
         LIBRARY,
         BUGGY_IMPLEMENTATION,
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(first.acceptance.status, AcceptanceStatus::Pass);
     assert_eq!(outcome.acceptance.status, AcceptanceStatus::Pass);
     assert_eq!(
@@ -1575,6 +1659,9 @@ fn production_observed_developer_labels_every_missing_capability() {
         Some("reduced(observed developer)"),
         true,
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Pass,
@@ -1625,6 +1712,9 @@ fn production_reports_characterization_as_not_applicable_when_base_has_tests() {
         true,
         platform_isolation_acceptance(),
     );
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Pass,
