@@ -144,6 +144,8 @@ pub struct QaResult {
     pub candidate_tree: String,
     /// Whether the check actually ran with OS confinement.
     pub confined: bool,
+    /// Kaisa prepared a missing Cargo.lock output in its disposable checkout.
+    pub generated_lockfile: bool,
     /// Source changes invalidate evidence even if the test returned zero.
     pub source_unchanged: bool,
     /// OS write denial applied and installed bytes match before and after execution.
@@ -934,6 +936,9 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
         ));
     }
     let readonly = vec![inputs.clone(), manifest.clone()];
+    let generated_lockfile = matches!(toolchain, QaToolchain::Rust { .. })
+        && crate::verify::prepare_cargo_lockfile(checkout.path())
+            .map_err(at("preparing private QA Cargo lockfile output"))?;
     let mut build = None;
     if findings.is_empty()
         && let QaToolchain::Rust { cargo } = toolchain
@@ -946,6 +951,9 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             "--manifest-path".into(),
             manifest.to_string_lossy().into_owned(),
         ];
+        if !generated_lockfile {
+            args.push("--locked".into());
+        }
         args.extend(cargo_configuration_overrides(cargo, &runtime)?);
         for name in &names {
             args.extend(["--test".into(), name.clone()]);
@@ -1116,6 +1124,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             candidate_tree: candidate.tree.clone(),
             confined,
+            generated_lockfile,
             source_unchanged: unchanged,
             private_test_unchanged,
             expected_tests: expected[index].clone(),
@@ -1136,6 +1145,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             &test.test_id,
             json!({"run_id":run_id,"test_id":result.test_id,"kind":result.kind.code(),"criterion_ids":result.criterion_ids,
                 "passed":result.passed,"output_digest":result.output_digest,"candidate_tree":result.candidate_tree,"confined":result.confined,
+                "generated_lockfile":result.generated_lockfile,
                 "source_unchanged":result.source_unchanged,"private_test_unchanged":result.private_test_unchanged,
                 "private_test_integrity":result.private_test_integrity,"qa_evidence":result.qa_evidence,"expected_tests":result.expected_tests,
                 "positive_evidence":result.positive_evidence,"blocking_findings":result.blocking_findings,
@@ -2841,6 +2851,21 @@ mod tests {
         std::fs::create_dir_all(&public).expect("public");
         super::prepare_author_repository(&public, "frozen public context")
             .expect("fresh context repository");
+        // Apple's /usr/bin/git shim consults xcrun's per-user cache (confstr),
+        // independently of TMPDIR. Resolve the real executable before confinement;
+        // keep the author's filesystem grants unchanged.
+        #[cfg(target_os = "macos")]
+        let git_program = std::process::Command::new("/usr/bin/xcrun")
+            .args(["--find", "git"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|path| path.trim().to_owned())
+            .filter(|path| Path::new(path).is_absolute() && Path::new(path).is_file())
+            .unwrap_or_else(|| "/usr/bin/git".into());
+        #[cfg(not(target_os = "macos"))]
+        let git_program = "/usr/bin/git".to_owned();
         let probe = |program: &str, args: Vec<String>| {
             let sandbox = super::author_sandbox(
                 &fixture.state,
@@ -2884,9 +2909,10 @@ mod tests {
             "the author can read its context-only repository"
         );
         let own_history = probe(
-            "/usr/bin/git",
+            &git_program,
             vec!["log".into(), "-1".into(), "--format=%s".into()],
         );
+        assert_eq!(own_history.0, Some(ProcessExit::Code(0)), "{own_history:?}");
         assert_eq!(
             own_history.1.trim(),
             "QA context",
@@ -2908,7 +2934,7 @@ mod tests {
             "QA authors cannot read developer tests by absolute path"
         );
         let log = probe(
-            "/usr/bin/git",
+            &git_program,
             vec![
                 "-C".into(),
                 fixture.repository.to_string_lossy().into_owned(),

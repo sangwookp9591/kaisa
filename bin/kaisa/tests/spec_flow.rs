@@ -374,7 +374,12 @@ impl BuildBench {
 fn failing_private_qa_blocks_delivery_even_when_developer_tests_and_reviewer_pass() {
     let bench = BuildBench::new("spec-private-failure");
     bench.freeze();
-    let outcome = bench.run(LIBRARY, BUGGY_IMPLEMENTATION, true, None);
+    let outcome = bench.run(
+        LIBRARY,
+        BUGGY_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
     if bench.private_qa_unavailable(&outcome) {
         return;
     }
@@ -398,7 +403,12 @@ fn failing_private_qa_blocks_delivery_even_when_developer_tests_and_reviewer_pas
 fn an_approving_reviewer_cannot_override_a_lint_blocking_test() {
     let bench = BuildBench::new("spec-lint-failure");
     bench.freeze();
-    let outcome = bench.run(LIBRARY, WEAK_IMPLEMENTATION, true, None);
+    let outcome = bench.run(
+        LIBRARY,
+        WEAK_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
     assert_eq!(
         outcome.acceptance.status,
         AcceptanceStatus::Fail,
@@ -587,11 +597,7 @@ fn reduced_qa_isolation_without_policy_waits_and_never_publishes_a_result() {
 fn passing_final_evidence_publishes_only_a_provisional_result_after_the_gate() {
     let bench = BuildBench::new("spec-pass-delivery");
     bench.freeze();
-    let isolation_policy = if cfg!(target_os = "macos") {
-        None
-    } else {
-        Some("reduced(platform state-read QA boundary not verified)")
-    };
+    let isolation_policy = platform_isolation_acceptance();
     let outcome = bench.run(LIBRARY, VALID_IMPLEMENTATION, true, isolation_policy);
     if bench.private_qa_unavailable(&outcome) {
         return;
@@ -605,6 +611,16 @@ fn passing_final_evidence_publishes_only_a_provisional_result_after_the_gate() {
     assert!(
         outcome.result_branch.is_some(),
         "PASS publishes the result branch"
+    );
+    assert!(!bench.repository.join("Cargo.lock").exists());
+    assert!(
+        recorded_events(&bench).iter().any(|event| {
+            event.recorded.event.kind == kaisa_domain::EventKind::CheckEvidence
+                && serde_json::from_str::<serde_json::Value>(&event.recorded.event.payload)
+                    .expect("check receipt")["generated_lockfile"]
+                    == true
+        }),
+        "the sandboxed no-lock candidate records its disposable lockfile provenance"
     );
     assert_eq!(
         git(&bench.repository, &["rev-parse", "HEAD"]),
@@ -648,11 +664,7 @@ fn a_revision_reruns_both_sealed_private_suites_on_the_new_final_tree() {
     let mut bench = BuildBench::new("spec-bounded-revision");
     bench.revision_limit = 1;
     bench.freeze();
-    let accepted = if cfg!(target_os = "macos") {
-        None
-    } else {
-        Some("reduced(platform state-read QA boundary not verified)")
-    };
+    let accepted = platform_isolation_acceptance();
     let outcome = bench.run(LIBRARY, BUGGY_IMPLEMENTATION, true, accepted);
     if bench.private_qa_unavailable(&outcome) {
         return;
@@ -727,11 +739,7 @@ fn a_development_mapping_to_an_unknown_criterion_blocks_acceptance() {
             criterion_ids: vec!["AC-unknown".into()],
         });
     bench.freeze();
-    let accepted = if cfg!(target_os = "macos") {
-        None
-    } else {
-        Some("reduced(platform state-read QA boundary not verified)")
-    };
+    let accepted = platform_isolation_acceptance();
     let outcome = bench.run(LIBRARY, VALID_IMPLEMENTATION, true, accepted);
     if bench.private_qa_unavailable(&outcome) {
         return;
@@ -787,11 +795,47 @@ impl kaisa_daemon::spec_flow::Characterize for RewriteFrozenSpec {
     }
 }
 fn platform_isolation_acceptance() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
+    if kaisa_daemon::expected_sandbox_missing(true)
+        .contains(&ContainmentCapability::StateReadIsolation)
+    {
+        Some("reduced(developer state-read isolation unavailable)")
+    } else if cfg!(target_os = "macos") {
         None
     } else {
         Some("reduced(platform state-read QA boundary not verified)")
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn platform_qa_isolation_without_exact_acceptance_remains_inconclusive() {
+    let bench = BuildBench::new("spec-platform-isolation");
+    bench.freeze();
+    let outcome = bench.run(LIBRARY, VALID_IMPLEMENTATION, true, None);
+    if bench.private_qa_unavailable(&outcome) {
+        return;
+    }
+    let isolation = gate_line(&outcome, "qa_isolation full or policy-accepted");
+    assert_eq!(isolation.status, AcceptanceStatus::Inconclusive);
+    assert_eq!(
+        isolation.detail,
+        format!(
+            "qa_isolation: {}; explicit acceptance: None",
+            platform_isolation_acceptance().expect("reduced platform")
+        )
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Inconclusive);
+    assert!(
+        outcome
+            .acceptance
+            .lines
+            .iter()
+            .filter(|line| !line.requirement.starts_with("qa_isolation"))
+            .all(|line| line.check.status == AcceptanceStatus::Pass),
+        "{:?}",
+        outcome.acceptance
+    );
+    bench.assert_not_delivered(&outcome);
 }
 #[test]
 fn a_post_development_spec_store_rewrite_fails_the_integrity_gate() {
@@ -1181,7 +1225,8 @@ fn production_staged_reviewer_escalates_with_ledger_evidence_and_blocks_delivery
 }
 #[test]
 fn production_rejects_an_explanation_only_blocking_downgrade() {
-    let mut bench = production_bench("production-explanation-downgrade", true);
+    // Keep nested characterization/private-QA paths below Windows MAX_PATH.
+    let mut bench = production_bench("prod-explain", true);
     bench.staged_mode = "explanation".into();
     bench.freeze();
     let outcome = bench.run(
@@ -1193,7 +1238,12 @@ fn production_rejects_an_explanation_only_blocking_downgrade() {
     if bench.private_qa_unavailable(&outcome) {
         return;
     }
-    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    assert_eq!(
+        outcome.acceptance.status,
+        AcceptanceStatus::Fail,
+        "{:?}",
+        outcome.acceptance
+    );
     let check = gate_line(&outcome, "staged review approved");
     assert_eq!(check.status, AcceptanceStatus::Fail);
     assert!(
@@ -1205,7 +1255,8 @@ fn production_rejects_an_explanation_only_blocking_downgrade() {
 }
 #[test]
 fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
-    let bench = production_bench("production-staged-vs-deterministic", true);
+    // Keep nested characterization/private-QA paths below Windows MAX_PATH.
+    let bench = production_bench("prod-lint", true);
     bench.freeze();
     let outcome = bench.run(
         LIBRARY,
@@ -1218,7 +1269,9 @@ fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
     }
     assert_eq!(
         gate_line(&outcome, "staged review approved").status,
-        AcceptanceStatus::Pass
+        AcceptanceStatus::Pass,
+        "{:?}",
+        outcome.acceptance
     );
     assert_eq!(
         gate_line(&outcome, "deterministic checks").status,
@@ -1456,6 +1509,22 @@ fn production_does_not_admit_a_developer_when_legacy_baseline_authoring_fails() 
             .contains("every legacy area needs characterization")
     );
     assert!(outcome.attempts.is_empty());
+    for requirement in [
+        "traceability complete",
+        "deterministic checks",
+        "private QA all passed on FINAL tree",
+        "domain test review no blocking",
+        "staged review approved",
+        "evidence preserved",
+        "qa_isolation full or policy-accepted",
+    ] {
+        let check = gate_line(&outcome, requirement);
+        assert_eq!(check.status, AcceptanceStatus::Inconclusive);
+        assert_eq!(
+            check.detail, "stage has not produced evidence",
+            "{requirement}"
+        );
+    }
     assert!(recorded_events(&bench).iter().all(|e| {
         let payload: serde_json::Value =
             serde_json::from_str(&e.recorded.event.payload).expect("payload");

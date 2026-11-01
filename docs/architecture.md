@@ -107,6 +107,26 @@ The gate lines are `all attempt containment admitted`, `spec approval status`,
 approval; missing receipts remain INCONCLUSIVE. Their recorded decisions are in
 [evidence/spec-demo/traceability.md](evidence/spec-demo/traceability.md).
 
+The workflow stops before developer admission when approval or the legacy baseline
+is unavailable. It also stops at a verification stage whose required isolation
+mechanism is unavailable (for example, private-input write denial on Windows).
+Unvisited stages keep `stage has not produced evidence`; they are not fabricated
+passes. A reduced developer QA state-read boundary, by itself, does not stop later
+stages: the final gate reports `qa_isolation` as INCONCLUSIVE unless
+`--accept-qa-isolation` exactly matches the recorded `reduced(...)` label. Linux's
+`reduced(developer state-read isolation unavailable)` differs from the fallback
+`reduced(platform state-read QA boundary not verified)` label.
+
+Rust checks and private QA resolve a missing `Cargo.lock` only in a disposable
+Kaisa checkout. Kaisa prepares that output file before confinement; the Unix
+sandboxes grant existing children, not creation at the checkout root, while
+protecting Git controls and private inputs. Existing lockfiles use `--locked`
+for supported Cargo check commands and private QA. Receipts retain
+`generated_lockfile` when the candidate supplied no lockfile; generated files
+never enter the frozen repository, and tracked-source integrity still applies.
+Previously Seatbelt allowed root file creation while Landlock allowed existing
+children only, so a no-lock package could run on macOS but fail on Linux.
+
 | Platform | Isolation mechanisms | Labelled / unverified limits |
 |---|---|---|
 | macOS | Seatbelt state/read/write denial, separate context repos, immutable private inputs, process groups and descendant observation | `descendants` reduction; runtime tests here only; candidate-influenceable in-process QA |

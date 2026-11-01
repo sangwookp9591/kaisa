@@ -478,7 +478,7 @@ impl LegacyCharacterizer<'_> {
                 "areas":baseline.areas.iter().map(|a| json!({"path":a.path,"reason":a.reason})).collect::<Vec<_>>(),
                 "tests":baseline.results.iter().map(|r| json!({"test_id":r.test_id,"passed":r.passed,
                     "dropped":!r.passed,"note":if r.passed {"current behaviour observed"} else {"fails on base; not a characterization; dropped"},
-                    "output_digest":r.output_digest,"base_tree":r.candidate_tree,"confined":r.confined,
+                    "output_digest":r.output_digest,"generated_lockfile":r.generated_lockfile,"base_tree":r.candidate_tree,"confined":r.confined,
                     "private_test_integrity":r.private_test_integrity,"qa_evidence":r.qa_evidence})).collect::<Vec<_>>(),
                 "notes":baseline.notes,"questions":baseline.questions,"behaviours":baseline.behaviours,"suite_digest":baseline.suite.as_ref().map(QaSuite::manifest_digest),"suite_directory":baseline.suite.as_ref().map(|s| s.directory())}).to_string(),
         }).map(|event| event.recorded.sequence).map_err(at("recording characterization baseline"))

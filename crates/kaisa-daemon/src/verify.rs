@@ -42,6 +42,8 @@ pub struct Evidence {
     pub output_tail: String,
     /// False if the check ran without OS confinement (Windows until checks get a container).
     pub confined: bool,
+    /// Lockfile provenance for a Rust package checked without a candidate Cargo.lock.
+    pub generated_lockfile: bool,
     /// Check-definition files the candidate changed since its base; when any are named, the
     /// check may be testing rules the agent wrote, so a person must accept the result.
     pub definitions_changed: Vec<String>,
@@ -112,6 +114,8 @@ pub fn run_trusted_checks(
     std::fs::create_dir_all(state_directory.join("checks")).map_err(at("preparing checks"))?;
     let checkout = CandidateCheckout::create(repository, candidate, &place)
         .map_err(at("checking out the candidate"))?;
+    let generated_lockfile = prepare_cargo_lockfile(checkout.path())
+        .map_err(at("preparing disposable Cargo lockfile output"))?;
     // Record the gitdir before any check runs: never rediscover it through a pointer a
     // check could have replaced, including on platforms where checks run reduced.
     let sources = CheckedSources::record(checkout.path())
@@ -127,9 +131,27 @@ pub fn run_trusted_checks(
         );
         let temporary = CheckTemporary::create(attempt_directory)
             .map_err(at("preparing the check temporary directory"))?;
+        let mut args = args.to_vec();
+        if !generated_lockfile
+            && directory.join("Cargo.lock").is_file()
+            && Path::new(program)
+                .file_stem()
+                .is_some_and(|name| name == "cargo")
+            && args.first().is_some_and(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "test" | "check" | "build" | "bench" | "clippy"
+                )
+            })
+            && !args
+                .iter()
+                .any(|arg| arg == "--locked" || arg == "--frozen")
+        {
+            args.push("--locked".into());
+        }
         let spec = ProcessSpec {
             program: PathBuf::from(program),
-            args: args.to_vec(),
+            args,
             working_directory: directory,
             env: ["TMPDIR", "TEMP", "TMP"]
                 .into_iter()
@@ -151,12 +173,13 @@ pub fn run_trusted_checks(
             .map_err(at("validating checked candidate sources"))?;
         evidence.push(Evidence {
             candidate_tree: candidate.tree.clone(),
-            check: check.argv.clone(),
+            check: std::iter::once(program.clone()).chain(spec.args).collect(),
             exit: run.exit,
             failure_reason: source_changed.then(|| CHANGED_CHECK_SOURCES.to_owned()),
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             output_tail: review_output_tail(&run),
             confined: sandbox.is_confined(),
+            generated_lockfile,
             definitions_changed: definitions_changed.clone(),
             weakened_tests: weakened_tests.clone(),
         });
@@ -439,16 +462,27 @@ pub(crate) fn check_sandbox_readonly(
     temporary: &Path,
     readonly: &[PathBuf],
 ) -> std::io::Result<CheckSandbox> {
+    let readonly = readonly
+        .iter()
+        .map(|path| path.canonicalize())
+        .collect::<std::io::Result<Vec<_>>>()?;
     #[cfg(not(target_os = "macos"))]
     let _ = state;
-    #[cfg(not(target_os = "linux"))]
-    let writable: Vec<PathBuf> = vec![checkout.canonicalize()?, temporary.canonicalize()?];
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let writable = check_writable(checkout, temporary)?
+        .into_iter()
+        .filter(|path| {
+            !readonly
+                .iter()
+                .any(|protected| path == protected || protected.starts_with(path))
+        })
+        .collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
     {
         let mut policy = kaisa_sys::SeatbeltPolicy {
-            readable: writable.clone(),
+            readable: vec![checkout.canonicalize()?, temporary.canonicalize()?],
             writable,
-            unwritable: readonly.to_vec(),
+            unwritable: readonly.clone(),
             git_control_root: Some(checkout.canonicalize()?),
             ..kaisa_sys::SeatbeltPolicy::default()
         };
@@ -457,14 +491,6 @@ pub(crate) fn check_sandbox_readonly(
     }
     #[cfg(target_os = "linux")]
     {
-        let writable = linux_check_writable(checkout, temporary)?
-            .into_iter()
-            .filter(|path| {
-                !readonly
-                    .iter()
-                    .any(|protected| path == protected || protected.starts_with(path))
-            })
-            .collect::<Vec<_>>();
         Ok(match kaisa_sys::write_ruleset(&writable, None)? {
             Some(ruleset) => CheckSandbox::Landlock(ruleset),
             None => CheckSandbox::Unconfined,
@@ -472,15 +498,33 @@ pub(crate) fn check_sandbox_readonly(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (writable, readonly);
+        let _ = (checkout, temporary, readonly);
         Ok(CheckSandbox::Unconfined)
     }
 }
 
-/// Landlock grants cannot subtract root Git controls from a checkout-wide grant. Grant
-/// existing children instead, and prepare common build directories before confinement.
-#[cfg(any(target_os = "linux", all(test, unix)))]
-fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// Prepare a harness-owned build output in the disposable copy, never the repository.
+/// Root creation stays denied inside both Unix sandboxes. Existing locks, including
+/// symlinks, are never replaced; tracked changes still invalidate CheckedSources.
+pub(crate) fn prepare_cargo_lockfile(checkout: &Path) -> std::io::Result<bool> {
+    if !checkout.join("Cargo.toml").is_file() {
+        return Ok(false);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(checkout.join("Cargo.lock"))
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Landlock cannot subtract root Git controls from a checkout-wide grant. Use the
+/// same existing-child grants on Seatbelt, so missing build outputs work identically.
+#[cfg(any(target_os = "macos", target_os = "linux", all(test, unix)))]
+fn check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Vec<PathBuf>> {
     for output in crate::goal::BUILD_OUTPUT {
         let directory = checkout.join(output);
         if !directory.try_exists()? {
@@ -509,7 +553,7 @@ fn linux_check_writable(checkout: &Path, temporary: &Path) -> std::io::Result<Ve
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::linux_check_writable;
+    use super::check_writable;
 
     /// Interpreter, explicit executable and makefile operands, including quoted shell paths.
     fn script_invocations() -> Vec<(Vec<String>, &'static str, &'static str)> {
@@ -660,7 +704,7 @@ mod tests {
         }
         std::os::unix::fs::symlink(&outside, checkout.join("outside-link"))
             .expect("a candidate symlink to private state");
-        let writable = linux_check_writable(&checkout, &temporary).expect("check grants");
+        let writable = check_writable(&checkout, &temporary).expect("check grants");
         assert!(
             !writable.contains(&checkout.canonicalize().expect("checkout exists"))
                 && !writable.contains(&outside.canonicalize().expect("outside exists"))
@@ -686,6 +730,88 @@ mod tests {
             "build outputs must remain writable without a checkout-wide Landlock grant"
         );
         std::fs::remove_dir_all(base).expect("remove the check fixture");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_missing_cargo_lockfile_is_resolved_only_in_the_disposable_sandbox_copy() {
+        let state = std::env::temp_dir().join(format!("kaisa-lock-{}", crate::ids::fresh_suffix()));
+        let checkout = state.join("checks/candidate");
+        let temporary = state.join("scratch");
+        std::fs::create_dir_all(checkout.join("src")).expect("disposable checkout");
+        std::fs::create_dir_all(&temporary).expect("scratch");
+        let manifest = checkout.join("Cargo.toml");
+        let source = checkout.join("src/lib.rs");
+        std::fs::write(
+            &manifest,
+            "[package]\nname = \"no-lock\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(&source, "pub fn value() -> bool { true }\n").expect("source");
+        let readonly = vec![manifest.clone(), checkout.join("src")];
+        let cargo = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+            .map(|path| path.join("cargo"))
+            .find(|path| path.is_file())
+            .expect("cargo");
+        let run = |spec: &kaisa_sys::ProcessSpec| {
+            let sandbox = super::check_sandbox_readonly(&state, &checkout, &temporary, &readonly)
+                .expect("sandbox");
+            assert!(sandbox.is_confined());
+            kaisa_sys::run_captured(
+                spec,
+                &sandbox.confinement(),
+                &[],
+                std::time::Duration::from_secs(30),
+                4096,
+            )
+            .expect("sandboxed command")
+        };
+        let cargo = kaisa_sys::ProcessSpec {
+            program: cargo,
+            args: vec![
+                "generate-lockfile".into(),
+                "--offline".into(),
+                "--manifest-path".into(),
+                manifest.to_string_lossy().into_owned(),
+            ],
+            working_directory: temporary.clone(),
+            env: vec![(
+                "CARGO_HOME".into(),
+                temporary.join("cargo-home").to_string_lossy().into_owned(),
+            )],
+        };
+        const SUCCESS: Option<kaisa_sys::ProcessExit> = Some(kaisa_sys::ProcessExit::Code(0));
+        assert_ne!(
+            run(&cargo).exit,
+            SUCCESS,
+            "root file creation remains denied"
+        );
+        assert!(super::prepare_cargo_lockfile(&checkout).expect("prepare output"));
+        let resolved = run(&cargo);
+        assert_eq!(
+            resolved.exit,
+            SUCCESS,
+            "{}",
+            String::from_utf8_lossy(&resolved.output)
+        );
+        assert!(
+            std::fs::read_to_string(checkout.join("Cargo.lock"))
+                .expect("generated lock")
+                .contains("[[package]]")
+        );
+        let hostile = kaisa_sys::ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo changed > src/lib.rs".into()],
+            working_directory: checkout.clone(),
+            env: Vec::new(),
+        };
+        assert_ne!(run(&hostile).exit, SUCCESS, "source remains read-only");
+        assert_eq!(
+            std::fs::read_to_string(source).expect("source intact"),
+            "pub fn value() -> bool { true }\n"
+        );
+        assert!(!super::prepare_cargo_lockfile(&checkout).expect("do not replace existing lock"));
+        std::fs::remove_dir_all(state).expect("remove fixture");
     }
 }
 
