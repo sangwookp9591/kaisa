@@ -1141,16 +1141,16 @@ fn a_first_pass_pack_contains_the_same_diff_and_check_evidence_as_full_review() 
     );
 }
 
-#[test]
-fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalates() {
+/// Measured selection followed by escalation, independent of the run's exploration draw.
+fn a_measured_revision_fixture(
+    state: &Path,
+) -> (kaisa_domain::Catalog, kaisa_domain::PolicySnapshot) {
     use kaisa_domain::{AgentEntry, AgentKind, Catalog, CatalogModel, Event, EventKind, Grade};
     use serde_json::json;
 
     const MEASURED_EPISODES: usize = 5;
     const SEED_COST_USD: f64 = 1.0;
-    let bench = Workbench::new("measured-route-revision");
-    let state = bench.base.join("state");
-    std::fs::create_dir_all(&state).expect("isolated state");
+    std::fs::create_dir_all(state).expect("isolated state");
     let mut ledger = kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("ledger");
     for index in 0..MEASURED_EPISODES {
         let task = format!("task_seed{index}");
@@ -1212,6 +1212,63 @@ fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalat
             personal: false,
         })
         .expect("test catalog");
+    let mut policy = a_policy(true).policy().clone();
+    // This scenario requires a measured first attempt, then a model escalation. The
+    // default exploration draw also includes the fresh, time-dependent logical task ID.
+    policy.routing.exploration_bps = 0;
+    (catalog, policy.snapshot().expect("measured routing policy"))
+}
+
+#[test]
+fn the_measured_revision_fixture_selects_measured_history_for_exploration_draws() {
+    use kaisa_daemon::{RoutingRequest, decide_measured_route};
+    use kaisa_domain::{Grade, GradeDecision, RoutingPolicy};
+
+    let bench = Workbench::new("measured-route-draws");
+    let state = bench.base.join("state");
+    let (catalog, policy) = a_measured_revision_fixture(&state);
+    let ledger = kaisa_ledger::EventStore::open_read_only(&state.join("kaisa.db")).expect("ledger");
+    let history = ledger.routing_observations().expect("seed outcomes");
+    let decision = GradeDecision {
+        grade: Grade::T1,
+        floor: None,
+        reasons: Vec::new(),
+    };
+    // Fixed task IDs reproduce both default-policy exploration branches. Real run IDs
+    // depend on the clock and PID, so a fixed policy seed alone cannot pin this fixture.
+    for (task, explored_model) in [("task_fixed3", "sonnet"), ("task_fixed69", "opus")] {
+        let request = RoutingRequest {
+            task,
+            decision: &decision,
+            kind: "Developer",
+            security_sensitive: false,
+            pinned: None,
+        };
+        let control =
+            decide_measured_route(&catalog, &request, &RoutingPolicy::default(), &history)
+                .expect("default exploration route");
+        assert_eq!(
+            (control.model.as_str(), control.strategy),
+            (explored_model, "explore"),
+            "the fixed task reproduces exploration that made the fixture flaky"
+        );
+        let route = decide_measured_route(&catalog, &request, &policy.policy().routing, &history)
+            .expect("measured route");
+        assert_eq!(
+            (route.model.as_str(), route.strategy),
+            ("haiku", "measured"),
+            "the measured-revision fixture must select measured history for every run ID"
+        );
+    }
+}
+
+#[test]
+fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalates() {
+    use serde_json::json;
+
+    let bench = Workbench::new("measured-route-revision");
+    let state = bench.base.join("state");
+    let (catalog, policy) = a_measured_revision_fixture(&state);
     let developer = |mcp: &Path| {
         let mut spec = scripted(mcp, &["--fake-write-next", STEP_PREFIX]);
         spec.args
@@ -1225,7 +1282,6 @@ fn a_measured_developer_failure_is_recorded_and_the_real_revision_launch_escalat
         spec
     };
     let write_set = WriteSet::new(vec![RepoPath::try_new("src").expect("valid")]);
-    let policy = a_policy(true);
     let request = VerifiedRequest {
         repository: &bench.repository(),
         state_directory: &state,
