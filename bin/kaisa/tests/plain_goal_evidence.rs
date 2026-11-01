@@ -406,14 +406,22 @@ fn a_recognised_nextest_command_requires_positive_consistent_completion() {
         let tools = project.root.join("tools");
         std::fs::create_dir_all(&tools).expect("trusted command directory");
         let runner = tools.join("cargo");
+        // macOS /bin/sh here-documents need a temporary file outside the sandbox's
+        // writable paths. Emit the canned harness output without that incidental I/O.
         std::fs::write(
             &runner,
-            format!("#!/bin/sh\ncat <<'HARNESS'\n{summary}\nHARNESS\n"),
+            format!("#!/bin/sh\nprintf '%s\\n' '{summary}'\n"),
         )
         .expect("scripted nextest output");
         std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755))
             .expect("executable runner");
         let evidence = project.checks(&[runner.to_str().expect("runner path"), "nextest", "run"]);
+        assert!(
+            evidence
+                .iter()
+                .all(|piece| piece.exit == Some(kaisa_sys::ProcessExit::Code(0))),
+            "the nextest fixture must finish successfully before evaluating its summary: {evidence:?}"
+        );
         assert_eq!(
             evidence.iter().all(Evidence::passed),
             passes,
