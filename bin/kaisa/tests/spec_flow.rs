@@ -78,7 +78,7 @@ struct BuildBench {
     original_head: String,
     revision_limit: u32,
     development_mappings: Vec<kaisa_domain::spec::TestMapping>,
-    characterize: Box<dyn kaisa_daemon::spec_flow::Characterize>,
+    characterize: Box<dyn kaisa_daemon::spec_flow::Characterize + Sync>,
     blind_json: Option<String>,
     author_json: Option<String>,
     accept_reduced_approval: bool,

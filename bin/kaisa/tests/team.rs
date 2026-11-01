@@ -127,6 +127,7 @@ fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
         min_grade_for_security_review: kaisa_domain::Grade::T3,
         require_person_when_check_definitions_change: true,
         require_person_when_tests_weaken: true,
+        ..kaisa_domain::Policy::personal_default()
     }
     .snapshot()
     .expect("a valid policy")

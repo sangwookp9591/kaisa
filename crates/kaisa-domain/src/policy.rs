@@ -34,6 +34,33 @@ impl Default for RoutingPolicy {
     }
 }
 
+/// What happens to work not yet admitted after a task fails. Already admitted siblings drain
+/// under the existing process-tree supervisor; returning early would orphan their processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnFailure {
+    /// Admit no more tasks, and drain all admitted siblings.
+    Stop,
+    /// Keep admitting tasks whose dependencies succeeded.
+    ContinueIndependent,
+}
+
+impl OnFailure {
+    /// Stable policy value.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::ContinueIndependent => "continue_independent",
+        }
+    }
+}
+
+/// Conservative default concurrency: half the available CPUs, capped at four and at least one.
+#[must_use]
+pub fn default_max_parallel() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() / 2).clamp(1, 4))
+}
+
 /// The user's policy for newly started runs; changes apply to future snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -45,6 +72,12 @@ pub struct Policy {
     pub routing: RoutingPolicy,
     /// How many revisions may follow a failed review.
     pub revision_limit: u32,
+    /// Maximum admitted mission tasks or independent candidates at once.
+    pub max_parallel: usize,
+    /// How unstarted tasks react to a failure; admitted siblings always drain.
+    pub on_failure: OnFailure,
+    /// Run the complete developer/check/review gate for each mission task.
+    pub verify_each_task: bool,
     /// Hosts that agents may reach through the egress broker.
     pub allowed_egress_hosts: Vec<String>,
     /// Whether agents must run under confinement.
@@ -66,6 +99,8 @@ pub enum PolicyError {
     InvalidRoutingPolicy,
     /// Security review was assigned a grade below T3.
     SecurityReviewFloorBelowT3,
+    /// A scheduler cannot run with no execution slots.
+    NoParallelSlots,
     /// The egress allow-list contains an empty host.
     EmptyEgressHost,
     /// Weakened tests were set not to stop for a person.
@@ -78,6 +113,7 @@ impl fmt::Display for PolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRoutingPolicy => f.write_str("routing requires 1 <= min_samples <= window, rates <= 10000, and a positive latency budget"),
+            Self::NoParallelSlots => f.write_str("max_parallel must be positive"),
             Self::SecurityReviewFloorBelowT3 => {
                 f.write_str("security review requires a grade of at least T3")
             }
@@ -107,6 +143,9 @@ impl Policy {
             allow_provisional_spec: false,
             routing: RoutingPolicy::default(),
             revision_limit: 2,
+            max_parallel: default_max_parallel(),
+            on_failure: OnFailure::Stop,
+            verify_each_task: true,
             allowed_egress_hosts: vec!["api.anthropic.com".into(), "api.openai.com".into()],
             confine_agents: true,
             min_grade_for_security_review: Grade::T3,
@@ -129,6 +168,9 @@ impl Policy {
             || self.routing.latency_budget_ms == Some(0)
         {
             return Err(PolicyError::InvalidRoutingPolicy);
+        }
+        if self.max_parallel == 0 {
+            return Err(PolicyError::NoParallelSlots);
         }
         if self.min_grade_for_security_review < Grade::T3 {
             return Err(PolicyError::SecurityReviewFloorBelowT3);
@@ -174,10 +216,12 @@ impl Policy {
             Grade::T3 => "T3",
         };
         format!(
-            "accept_reduced_assurance_approval={}\nallow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\nrouting_exploration_bps={}\nrouting_latency_budget_ms={}\nrouting_min_samples={}\nrouting_seed={}\nrouting_target_delivery_bps={}\nrouting_window={}\n",
+            "accept_reduced_assurance_approval={}\nallow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmax_parallel={}\nmin_grade_for_security_review={grade}\non_failure={}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\nrouting_exploration_bps={}\nrouting_latency_budget_ms={}\nrouting_min_samples={}\nrouting_seed={}\nrouting_target_delivery_bps={}\nrouting_window={}\nverify_each_task={}\n",
             self.accept_reduced_assurance_approval,
             self.allow_provisional_spec,
             self.confine_agents,
+            self.max_parallel,
+            self.on_failure.code(),
             self.require_person_when_check_definitions_change,
             self.require_person_when_tests_weaken,
             self.revision_limit,
@@ -189,6 +233,7 @@ impl Policy {
             self.routing.seed,
             self.routing.target_delivery_bps,
             self.routing.window,
+            self.verify_each_task,
         )
     }
 
@@ -307,16 +352,19 @@ mod tests {
             "allow_provisional_spec=false\n",
             "allowed_egress_hosts=api.anthropic.com,api.openai.com\n",
             "confine_agents=true\n",
+            "max_parallel={parallel}\n",
             "min_grade_for_security_review=T3\n",
+            "on_failure=stop\n",
             "require_person_when_check_definitions_change=true\n",
             "require_person_when_tests_weaken=true\n",
             "revision_limit=2\n",
             "routing_exploration_bps=500\nrouting_latency_budget_ms=none\nrouting_min_samples=5\nrouting_seed=0\nrouting_target_delivery_bps=8000\nrouting_window=100\n",
+            "verify_each_task=true\n",
         );
 
         assert_eq!(
             Policy::personal_default().canonical_text(),
-            expected,
+            expected.replace("{parallel}", &super::default_max_parallel().to_string()),
             "the digest input has a stable spelling for every policy rule"
         );
     }
@@ -431,6 +479,42 @@ mod tests {
             snapshot,
             Err(PolicyError::SecurityReviewFloorBelowT3),
             "a run cannot start under a policy that weakens security review"
+        );
+    }
+    #[test]
+    fn a_zero_parallel_limit_is_rejected_before_a_policy_snapshot_exists() {
+        let mut policy = Policy::personal_default();
+        policy.max_parallel = 0;
+        assert_eq!(
+            policy.snapshot(),
+            Err(PolicyError::NoParallelSlots),
+            "no run can adopt a scheduler with zero slots"
+        );
+    }
+
+    #[test]
+    fn scheduler_policy_changes_are_bound_into_the_canonical_snapshot() {
+        let original = Policy::personal_default();
+        let mut changed = original.clone();
+        changed.max_parallel += 1;
+        assert_ne!(
+            original.canonical_text(),
+            changed.canonical_text(),
+            "parallel admission belongs to the immutable policy"
+        );
+        changed = original.clone();
+        changed.on_failure = super::OnFailure::ContinueIndependent;
+        assert_ne!(
+            original.canonical_text(),
+            changed.canonical_text(),
+            "failure admission belongs to the immutable policy"
+        );
+        changed = original.clone();
+        changed.verify_each_task = false;
+        assert_ne!(
+            original.canonical_text(),
+            changed.canonical_text(),
+            "disabling per-task gates must change the policy identity"
         );
     }
 }

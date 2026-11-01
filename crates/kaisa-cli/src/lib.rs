@@ -15,6 +15,7 @@ mod home;
 mod init;
 mod local_agent;
 mod mcp_serve;
+mod mission;
 mod policy;
 mod routing;
 mod spec;
@@ -87,6 +88,7 @@ Kaisa — run coding agents safely
 Usage:
   kaisa \"<goal>\"           a developer agent works on the goal, your checks and a reviewer judge
                            the result, and only a verified candidate is delivered
+  kaisa status             running mission tasks and attempt states from the ledger
   kaisa watch              attempts, their state, tokens and cost, from the ledger
   kaisa tui [--plain]      terminal home: needs you, goals, attempts and evidence
   kaisa review             approve results       (planned)
@@ -105,6 +107,11 @@ More commands:
   kaisa stats routing      measured routing cells; unknown costs stay labelled
 
 Goal options:
+  --candidates <N>         independent verified attempts; comparative review selects one
+  --plan <file.json>       execute a declared task DAG, then verify its integration
+  --max-parallel <N>       maximum concurrent tasks or candidates (positive integer)
+  --on-failure <policy>    stop or continue_independent; admitted siblings drain
+  --verify-each-task <bool> verify each task before its dependents (default true)
   --agent codex            Codex develops (observed); Claude Code reviews
   --model <id>             pin a model; automatic routing leaves pins unchanged
   --check-program <path> [--check-arg <arg>]...
@@ -138,7 +145,14 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
-        Some("status") => home::run(out, err),
+        Some("status") => {
+            let status = home::run(out, err)?;
+            if status == EXIT_SUCCESS {
+                watch::run(out, err)
+            } else {
+                Ok(status)
+            }
+        }
         Some("watch") => watch::run(out, err),
         Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),

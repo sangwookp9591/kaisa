@@ -20,8 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum GitError {
     /// `git` could not be started (not installed, or not on `PATH`).
     Spawn(std::io::Error),
-    /// Preservation was refused because no private empty hooks directory could be created.
+    /// Git was refused because no private empty hooks directory could be created.
     HooksUnavailable(std::io::Error),
+    /// Shared worktree metadata could not be locked; no mutation was attempted.
+    MetadataLock(std::io::Error),
     /// `git` ran and exited unsuccessfully.
     Failed {
         /// The arguments that were passed to git.
@@ -37,8 +39,9 @@ impl fmt::Display for GitError {
             Self::Spawn(error) => write!(f, "could not start git: {error}"),
             Self::HooksUnavailable(error) => write!(
                 f,
-                "refusing preservation: could not create an empty hooks directory: {error}"
+                "refusing Git operation: could not create an empty hooks directory: {error}"
             ),
+            Self::MetadataLock(error) => write!(f, "could not lock Git worktree metadata: {error}"),
             Self::Failed { args, stderr } => write!(f, "`git {}` failed: {stderr}", args.join(" ")),
         }
     }
@@ -47,7 +50,9 @@ impl fmt::Display for GitError {
 impl std::error::Error for GitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn(error) | Self::HooksUnavailable(error) => Some(error),
+            Self::Spawn(error) | Self::HooksUnavailable(error) | Self::MetadataLock(error) => {
+                Some(error)
+            }
             Self::Failed { .. } => None,
         }
     }
@@ -63,12 +68,44 @@ impl std::error::Error for GitError {
 /// Returns [`GitError::Spawn`] if git cannot be started, or [`GitError::Failed`] if it exits
 /// unsuccessfully.
 pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
-    let output: Output = Command::new("git")
-        .args(args)
-        .current_dir(directory)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(GitError::Spawn)?;
+    run_command(args, || {
+        let mut command = Command::new("git");
+        command
+            .current_dir(directory)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    })
+}
+
+/// Both regular and preservation runners use this boundary. All worktree subcommands
+/// (including add/remove/prune/move/repair and list) participate, so new callers cannot
+/// accidentally bypass serialization. Discovery uses the same pinned Git configuration
+/// as the mutation, and never recurses through the locking runner.
+fn run_command(args: &[&str], command: impl Fn() -> Command) -> Result<Vec<u8>, GitError> {
+    let is_worktree = args.first() == Some(&"worktree");
+    // Hooks can reenter Kaisa while this non-reentrant lock is held. Internal worktree
+    // bookkeeping must never execute them, including when called by the regular runner.
+    let hooks = is_worktree.then(EmptyHooksDirectory::create).transpose()?;
+    let configured = || {
+        let mut command = command();
+        if let Some(hooks) = &hooks {
+            command.args(["-c", &hooks.setting]);
+        }
+        command
+    };
+    let run = || command_output(configured().args(args).output(), args);
+    if is_worktree {
+        let discovery = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let common = command_output(configured().args(discovery).output(), &discovery)?;
+        let common = String::from_utf8_lossy(&common);
+        crate::worktree_lock::with_lock(Path::new(common.trim()), run)
+    } else {
+        run()
+    }
+}
+
+fn command_output(output: std::io::Result<Output>, args: &[&str]) -> Result<Vec<u8>, GitError> {
+    let output = output.map_err(GitError::Spawn)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -81,7 +118,7 @@ pub(crate) fn run_git(directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitErr
 
 static NEXT_HOOKS_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
-/// Owned by one preservation operation, outside the agent's worktree. Never reuse an
+/// Owned by one Git operation, outside the agent's worktree. Never reuse an
 /// existing directory: it may contain hooks. A private parent also holds empty configuration
 /// and transient NUL-delimited pathspec files; Drop removes only owned files and empty directories.
 pub(crate) struct EmptyHooksDirectory {
@@ -171,16 +208,7 @@ pub(crate) fn run_git_for_preservation(
     hooks: &EmptyHooksDirectory,
     args: &[&str],
 ) -> Result<Vec<u8>, GitError> {
-    let mut command = preservation_command(directory, hooks);
-    let output = command.args(args).output().map_err(GitError::Spawn)?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(GitError::Failed {
-            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        })
-    }
+    run_command(args, || preservation_command(directory, hooks))
 }
 
 /// Every preservation command, including configuration discovery, uses this policy.
@@ -397,7 +425,7 @@ mod tests {
             .expect("a file cannot hold a hooks directory");
 
         assert!(
-            refusal.to_string().contains("refusing preservation"),
+            refusal.to_string().contains("refusing Git operation"),
             "creation failure must explicitly refuse preservation rather than enable hooks"
         );
         assert!(

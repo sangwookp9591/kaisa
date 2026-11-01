@@ -18,6 +18,48 @@ use kaisa_sys::{ProcessExit, ProcessSpec};
 const DEFAULT_MODEL: &str = "sonnet";
 const DEFAULT_EFFORT: &str = "medium";
 
+// Installed only for planned missions and best-of-N, so plain goals keep their existing
+// signal behaviour. Handlers only request cancellation; owning workers stop and reap trees.
+fn with_mission_signals<T>(operation: impl FnOnce() -> T) -> io::Result<T> {
+    let signals = MissionSignals::install()?;
+    Ok(signals.cancellation.scope(operation))
+}
+
+struct MissionSignals {
+    cancellation: kaisa_sys::Cancellation,
+    #[cfg(unix)]
+    registrations: Vec<signal_hook::SigId>,
+}
+
+impl MissionSignals {
+    fn install() -> io::Result<Self> {
+        let flag = std::sync::Arc::default();
+        let signals = Self {
+            cancellation: kaisa_sys::Cancellation::from_flag(std::sync::Arc::clone(&flag)),
+            #[cfg(unix)]
+            registrations: Vec::new(),
+        };
+        #[cfg(unix)]
+        let mut signals = signals;
+        #[cfg(unix)]
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signals
+                .registrations
+                .push(signal_hook::flag::register(signal, flag.clone())?);
+        }
+        Ok(signals)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MissionSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
+}
+
 /// The agent to start: Claude Code in brokered mode, or another program given on the command
 /// line (used by tests with a scripted agent).
 struct AgentChoice {
@@ -119,6 +161,11 @@ pub(crate) struct GoalCommand {
     /// `--accept-reduced … --accept-until …`: the person's Decision for a run that cannot be
     /// fully contained (D02).
     accept: AcceptReduced,
+    candidates: usize,
+    plan: Option<PathBuf>,
+    max_parallel: Option<usize>,
+    on_failure: Option<kaisa_domain::OnFailure>,
+    verify_each_task: Option<bool>,
 }
 
 /// Why the words after `kaisa` are not a goal.
@@ -167,6 +214,11 @@ impl GoalCommand {
         let mut check: Option<Vec<String>> = None;
         let mut confine_claude = false;
         let mut accept = AcceptReduced::default();
+        let mut candidates = 1;
+        let mut plan = None;
+        let mut max_parallel = None;
+        let mut on_failure = None;
+        let mut verify_each_task = None;
         let mut words = args.iter();
         while let Some(word) = words.next() {
             match word.as_str() {
@@ -243,6 +295,52 @@ impl GoalCommand {
                         GoalParseError::UnknownFlag("--test-reviewer-arg requires a value".into())
                     })?)
                 }
+                "--candidates" | "--max-parallel" => {
+                    let value = words
+                        .next()
+                        .and_then(|word| word.parse::<usize>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            GoalParseError::UnknownFlag(format!(
+                                "{word} requires a positive integer"
+                            ))
+                        })?;
+                    if word == "--candidates" {
+                        candidates = value;
+                    } else {
+                        max_parallel = Some(value);
+                    }
+                }
+                "--plan" => {
+                    plan = Some(words.next().map(PathBuf::from).ok_or_else(|| {
+                        GoalParseError::UnknownFlag("--plan requires a JSON file".into())
+                    })?)
+                }
+                "--on-failure" => {
+                    on_failure = Some(match words.next().map(String::as_str) {
+                        Some("stop") => kaisa_domain::OnFailure::Stop,
+                        Some("continue_independent") => {
+                            kaisa_domain::OnFailure::ContinueIndependent
+                        }
+                        _ => {
+                            return Err(GoalParseError::UnknownFlag(
+                                "--on-failure requires stop or continue_independent".into(),
+                            ));
+                        }
+                    })
+                }
+                "--verify-each-task" => {
+                    verify_each_task = Some(
+                        words
+                            .next()
+                            .and_then(|word| word.parse().ok())
+                            .ok_or_else(|| {
+                                GoalParseError::UnknownFlag(
+                                    "--verify-each-task requires true or false".into(),
+                                )
+                            })?,
+                    )
+                }
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
@@ -287,6 +385,11 @@ impl GoalCommand {
             check,
             confine_claude,
             accept,
+            candidates,
+            plan,
+            max_parallel,
+            on_failure,
+            verify_each_task,
         })
     }
 
@@ -413,7 +516,16 @@ impl GoalCommand {
         let kaisa: PathBuf = std::env::current_exe()?;
         let checks = crate::verified::trusted_checks(repository, self.check.as_deref());
         // The personal policy (T34); a broken policy file stops the run rather than defaulting.
-        let policy = match crate::policy::load(state).and_then(|policy| {
+        let policy = match crate::policy::load(state).and_then(|mut policy| {
+            if let Some(slots) = self.max_parallel {
+                policy.max_parallel = slots;
+            }
+            if let Some(failure) = self.on_failure {
+                policy.on_failure = failure;
+            }
+            if let Some(verify) = self.verify_each_task {
+                policy.verify_each_task = verify;
+            }
             policy
                 .snapshot()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -508,8 +620,94 @@ impl GoalCommand {
                 .map_or(&[][..], |trial| trial.writable.as_slice()),
             reduced_mode,
         };
+        // Dispatch specification flows first, then missions or multiple candidates, then
+        // the routed or explicitly pinned single goal.
         if let Some((spec_id, version)) = &self.spec {
             return self.run_spec(&request, spec_id, *version, out, err);
+        }
+        if let Some(path) = &self.plan {
+            if !policy.policy().verify_each_task {
+                writeln!(
+                    out,
+                    "per-task checks and review disabled by policy; only the integrated candidate will be verified"
+                )?;
+            }
+            let (plan, instructions) = match crate::mission::load(path) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    writeln!(err, "kaisa: invalid mission plan: {error}")?;
+                    return Ok(crate::EXIT_USAGE);
+                }
+            };
+            return match with_mission_signals(|| {
+                kaisa_daemon::run_mission(&kaisa_daemon::MissionRequest {
+                    repository,
+                    state_directory: state,
+                    plan: &plan,
+                    instructions: &instructions,
+                    launch: &developer,
+                    reviewer: &reviewer,
+                    checks: &checks,
+                    policy: &policy,
+                    kaisa_executable: &kaisa,
+                    confine_agent: request.confine_agent,
+                    observed: request.observed,
+                    egress_hosts: request.egress_hosts,
+                    agent_writable: request.agent_writable,
+                    reduced_mode,
+                })
+            })? {
+                Ok(outcome) => {
+                    for (task, attempt) in &outcome.ran {
+                        writeln!(out, "{task}: {}", attempt.summary())?;
+                    }
+                    if let Some(task) = outcome.stopped_at {
+                        writeln!(
+                            out,
+                            "mission blocked at {task}; pending: {:?}",
+                            outcome.blocked
+                        )?;
+                    }
+                    if let Some(conflict) = outcome.conflict {
+                        writeln!(out, "{conflict}")?;
+                    }
+                    if let Some(verified) = outcome.verification {
+                        let (line, status) = crate::delivery::report_verified_outcome(&verified);
+                        writeln!(out, "integration: {line}")?;
+                        Ok(status)
+                    } else {
+                        Ok(crate::EXIT_RUN_FAILED)
+                    }
+                }
+                Err(error) => report_error(&error, out, err),
+            };
+        }
+        if self.candidates > 1 {
+            return match with_mission_signals(|| {
+                kaisa_daemon::run_candidates(&request, self.candidates)
+            })? {
+                Ok(outcome) => {
+                    if let (Some(index), Some(verified)) = (outcome.selected, outcome.verification)
+                    {
+                        writeln!(
+                            out,
+                            "selected candidate {} of {}",
+                            index + 1,
+                            self.candidates
+                        )?;
+                        let (line, status) = crate::delivery::report_verified_outcome(&verified);
+                        writeln!(out, "{line}")?;
+                        Ok(status)
+                    } else {
+                        writeln!(
+                            out,
+                            "no candidate passed verification and comparative review; nothing delivered"
+                        )?;
+                        Ok(crate::EXIT_RUN_FAILED)
+                    }
+                }
+                Err(error) => report_error(&error, out, err),
+            };
         }
         let result =
             if self.agent.pinned || self.agent.model.is_some() || self.agent.program.is_some() {
@@ -649,6 +847,20 @@ impl GoalCommand {
             writeln!(
                 err,
                 "kaisa: unknown agent {unknown:?}; use --agent claude or --agent codex"
+            )?;
+            return Ok(crate::EXIT_USAGE);
+        }
+        if self.plan.is_some() && self.candidates > 1 {
+            writeln!(
+                err,
+                "kaisa: --plan and --candidates are separate execution modes"
+            )?;
+            return Ok(crate::EXIT_USAGE);
+        }
+        if (self.plan.is_some() || self.candidates > 1) && !self.verified() {
+            writeln!(
+                err,
+                "kaisa: parallel execution requires a reviewer; provide --reviewer-arg for a scripted agent"
             )?;
             return Ok(crate::EXIT_USAGE);
         }

@@ -306,6 +306,45 @@ globs, proposed by the coordinator and checked by Kaisa against the repository i
 - **Pipelines advance on events, not on hints.** When an Attempt settles and passes its gate, the Scheduler starts the dependent Tasks itself. This takes ruflo's `SubagentStop` → `team_on_stop` idea and removes the step where "the lead must spawn the next one".
 - **Retries and failover follow policy.** A start or effect in `Unknown` is never retried automatically.
 
+**Implemented parallel path (WP8).** `scheduler.rs` revalidates the task DAG and actual write
+sets before admission. `max_parallel` defaults to half the available CPUs, capped at four with at
+least one slot. Tasks start in plan order in deterministic waves; a wave drains before the next
+one starts, trading immediate slot refill for reproducible admission order. `on_failure=stop`
+prevents new admission after a failed wave; `continue_independent` releases only branches whose
+parents succeeded. Both let admitted siblings settle under the existing per-attempt process-tree
+supervisor and deadlines, and record failed/blocked task stops. An error never returns while a
+sibling worker remains unjoined. Execution progress is local to the mission, so historical task IDs
+cannot release a new mission's dependencies. Ledger task progress distinguishes failure from
+successful finish and scopes live owners by mission.
+
+`integrate.rs` uses Git's three-way `merge-tree` and preserved commit parents to build dependency
+bases containing every parent result. Integration writes host-owned commits and refs without
+changing the user's checkout. Task changes are rechecked against their own base and write set.
+Textual/structural conflicts and outside writes are typed blocking outcomes with file lists;
+Git union and registered external merge drivers are disabled, and there is no implicit agent resolver. Successfully gated results are merged in deterministic
+admission/dependency order. The final frozen candidate receives trusted checks on fresh checkouts
+and the same independent read-only reviewer and delivery gate as `team.rs`. `verify_each_task=true`
+is the default and runs each writing role through the complete developer/check/review/revision
+pipeline from its merged dependency base. Child task/alternative gates record eligibility, not
+mission delivery, and cannot promote learning before the final gate; an explicit false policy is reported and leaves only
+final integrated verification enabled.
+
+The CLI accepts a human-authored JSON DAG with `--plan` and independent alternatives with
+`--candidates N`. Alternatives have separate worktrees and the normal verified pipeline; their
+write sets describe competing versions, so they are not co-integrated or treated as contributors
+to one DAG. Passing alternatives are compared through the independent reviewer, with bounded
+peer diffs and recorded check command/exit/digest receipts, followed by fresh checks of the selected
+tree. Comparison runs in candidate-index order and the first comparative approval wins; equivalent
+alternatives prefer the lowest index. Exactly one final `mission.verified` receipt is emitted,
+or none. Routes are shared across attempts; automatic provider/model diversity and automatic DAG
+decomposition remain unimplemented.
+
+Ledger events `task.scheduled`, `task.started`, `task.finished`, `task.integrated`,
+`integration.conflict` and `mission.verified` carry wall-clock timestamps; task finish and final
+verification also carry elapsed durations. `status`/`watch` and the TUI read running task IDs
+through the existing ledger data path. These tests use scripted agents; this is not a real-model
+scale benchmark or a claim of full containment on platforms that remain labelled reduced.
+
 **Correctness mechanisms (internal)**
 - **Epoch fencing at every mutation.** Every mutating call carries `(run, coordinator_epoch)` or `(attempt, generation)`. A call with a stale epoch is rejected and recorded.
 - **Outbox (review M2).** A mutation that causes an external effect commits its intent, its event and the projection in **one SQLite transaction**. The effect types are spawn, merge, push, branch delete and file archive. An effect executor then performs the effect and records an **effect receipt**.
@@ -405,6 +444,17 @@ Workers keep running during a coordinator handoff, because the daemon and their 
 - A conformance suite checks that `gix` agrees with `git` on submodules, symlinks, long paths and sparse checkouts (review M9).
 - On Windows, worktrees use `\\?\` paths and `core.longpaths=true`.
 - Shared `.git` metadata is mounted read-only into sandboxes, except for the attempt's own worktree refs.
+- Kaisa serializes Git worktree commands (add, remove, prune, move, repair and listing) by
+  canonical common Git directory. Both workspace Git runners take a repository mutex, then
+  an advisory file lock at `<common-git-dir>/kaisa-worktree.lock`; linked worktrees and
+  independent Kaisa processes share it. The persistent lock file is never unlinked.
+  Lock order is attempt owner lock (when applicable), repository mutex, advisory file lock;
+  the mutex registry is released before waiting. Only one Git worktree command runs in the
+  critical section: no agent/check execution, preservation scans, ledger writes, or owner
+  lock acquisition. Internal worktree commands disable repository hooks with a private empty
+  Kaisa-owned hooks directory, preventing hook execution and reentry into the non-reentrant
+  metadata lock. Recovery, verification, candidates and mission cleanup use these same
+  workspace APIs. Unrelated repositories remain independent.
 
 **Source state (user-flows F31).** Worktrees are created from **committed** state by default.
 - **Dirty tree.** If the user's tree is dirty, the run request records one of three choices:
@@ -1534,14 +1584,14 @@ design above.
 - **Index, impact and route.** The repository index and impact sets are built but a run does not use
   them; packs carry an empty impact set. Model routing is used by a run, but `route.decided` is not
   recorded and the task signals are approximate.
-  `run_mission` is not called from the CLI.
+  Explicit plans now run through `--plan`; automatic goal decomposition is not implemented.
 - **Messages.** English only. There is no `ko`/`en` message catalog and no `--json` yet (§5.11).
 - **Retrieval.** BM25 over lessons only. There is no vector index and no "vector search off" label.
 - **Containment.** See the current-state note in §5.7: platform-limit admission, `state-read`, a
   process-tree walk instead of cgroups, and Claude Code unconfined by default (T16.0).
 - **Exit codes.** 0, 3, 4 and 64 work, with 2 for a reserved command word and 1 for infrastructure or configuration failure. 5 and 6 do not exist. `--agent-program` without `--reviewer-arg` runs no checks or review and can exit 0.
-- **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`, several
-  candidates, the TUI and console.
+- **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`,
+  automatic goal decomposition and console. Candidate alternatives run with `--candidates`.
 
 *Decisions made while building.* Light work (F37) is a first-pass review on a registered T0 local model,
 advisory except for blocking findings. An observed agent (Codex) is checked against its write set after

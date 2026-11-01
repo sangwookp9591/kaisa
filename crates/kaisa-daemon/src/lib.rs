@@ -4,10 +4,12 @@
 //! daemon, its control endpoint and keeper reconnection wrap the same steps later.
 
 pub mod acceptance;
+mod candidates;
 pub mod characterize;
 mod gate;
 mod goal;
 mod ids;
+pub mod integrate;
 mod learn;
 mod mission;
 pub mod qa;
@@ -19,6 +21,7 @@ mod revision;
 mod route;
 mod route_stats;
 mod sandbox;
+pub mod scheduler;
 /// Read-only specification agent and strict final-answer parser.
 pub mod spec_agent;
 pub mod spec_flow;
@@ -29,10 +32,11 @@ mod test_review;
 pub mod traceability;
 mod verify;
 
+pub use candidates::{CandidatesOutcome, run_candidates};
 pub use gate::{Delivery, RevisionReason, decide_delivery};
 pub use goal::{
-    AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, run_goal,
-    whole_repository,
+    AGENT_IDENTITY_FILE, AgentLauncher, GoalError, GoalOutcome, GoalRequest, ParallelAgentLauncher,
+    run_goal, whole_repository,
 };
 pub use learn::learn_from_delivery;
 pub use mission::{MissionOutcome, MissionRequest, run_mission};

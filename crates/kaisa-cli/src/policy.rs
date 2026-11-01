@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use kaisa_domain::{Grade, Policy};
+use kaisa_domain::{Grade, OnFailure, Policy};
 use serde_json::{Value, json};
 
 /// The personal policy file within the state directory.
@@ -16,7 +16,7 @@ static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 /// The command surface and accepted values.
 const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
-keys: accept_reduced_assurance_approval (true|false), allow_provisional_spec (true|false), revision_limit (0..10), confine_agents (true|false),
+keys: accept_reduced_assurance_approval (true|false), allow_provisional_spec (true|false), max_parallel (positive integer), on_failure (stop|continue_independent), verify_each_task (true|false), revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true only; always enforced),
       require_person_when_tests_weaken (true only; always enforced),
@@ -46,6 +46,19 @@ fn policy_from_json(value: &Value) -> Option<Policy> {
             Some(value) => value.as_bool()?,
         },
         routing: routing_from_json(value)?,
+        max_parallel: match value.get("max_parallel") {
+            None => kaisa_domain::default_max_parallel(),
+            Some(value) => usize::try_from(value.as_u64()?).ok()?,
+        },
+        on_failure: match value.get("on_failure").map(Value::as_str) {
+            None | Some(Some("stop")) => OnFailure::Stop,
+            Some(Some("continue_independent")) => OnFailure::ContinueIndependent,
+            _ => return None,
+        },
+        verify_each_task: match value.get("verify_each_task") {
+            None => true,
+            Some(value) => value.as_bool()?,
+        },
         require_person_when_tests_weaken: match value.get("require_person_when_tests_weaken") {
             None => true,
             Some(value) => value.as_bool()?,
@@ -127,6 +140,9 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
         "routing_exploration_bps": policy.routing.exploration_bps,
         "routing_latency_budget_ms": policy.routing.latency_budget_ms,
         "routing_seed": policy.routing.seed,
+        "max_parallel": policy.max_parallel,
+        "on_failure": policy.on_failure.code(),
+        "verify_each_task": policy.verify_each_task,
         "require_person_when_tests_weaken": policy.require_person_when_tests_weaken,
         "allowed_egress_hosts": policy.allowed_egress_hosts,
         "confine_agents": policy.confine_agents,
@@ -177,6 +193,23 @@ fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
             } else {
                 Some(value.parse().map_err(|_| "use milliseconds or none")?)
             }
+        }
+        "max_parallel" => {
+            policy.max_parallel = value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or("max_parallel must be positive")?
+        }
+        "on_failure" => {
+            policy.on_failure = match value {
+                "stop" => OnFailure::Stop,
+                "continue_independent" => OnFailure::ContinueIndependent,
+                _ => return Err("on_failure is stop or continue_independent".into()),
+            }
+        }
+        "verify_each_task" => {
+            policy.verify_each_task = value.parse().map_err(|_| "use true or false")?
         }
         "revision_limit" => {
             policy.revision_limit = value
@@ -641,5 +674,55 @@ mod tests {
             loaded,
             "failed edits do not corrupt saved policy"
         );
+    }
+
+    #[test]
+    fn scheduler_keys_round_trip_and_invalid_values_never_replace_the_policy() {
+        let state = PersonalState::new();
+        for (key, value) in [
+            ("max_parallel", "3"),
+            ("on_failure", "continue_independent"),
+            ("verify_each_task", "false"),
+        ] {
+            let (status, _, diagnostic) = state.command(&["set", key, value]);
+            assert_eq!(
+                status,
+                crate::EXIT_SUCCESS,
+                "valid scheduler key is saved: {diagnostic}"
+            );
+        }
+        let policy = load(&state.0).expect("saved policy");
+        let expected_slots = 3;
+        assert_eq!(
+            policy.max_parallel, expected_slots,
+            "parallel limit persists"
+        );
+        assert_eq!(
+            policy.on_failure,
+            kaisa_domain::OnFailure::ContinueIndependent,
+            "failure policy persists"
+        );
+        assert!(
+            !policy.verify_each_task,
+            "the explicit per-task verification choice persists"
+        );
+        let before = std::fs::read(state.0.join(POLICY_FILE)).expect("saved bytes");
+        for (key, value) in [
+            ("max_parallel", "0"),
+            ("on_failure", "guess"),
+            ("verify_each_task", "maybe"),
+        ] {
+            let (status, _, _) = state.command(&["set", key, value]);
+            assert_eq!(
+                status,
+                crate::EXIT_USAGE,
+                "invalid scheduler values are usage failures"
+            );
+            assert_eq!(
+                std::fs::read(state.0.join(POLICY_FILE)).expect("unchanged file"),
+                before,
+                "invalid configuration never overwrites the active policy"
+            );
+        }
     }
 }

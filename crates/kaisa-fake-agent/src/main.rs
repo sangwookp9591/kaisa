@@ -292,6 +292,31 @@ fn run() -> Result<(), String> {
     if let Some(path) = flag(&args, "--fake-qa") {
         return fake_qa(&path, &args);
     }
+    if flag_present(&args, "--fake-child-sleep") {
+        std::thread::sleep(HANG);
+        return Ok(());
+    }
+    if flag_present(&args, "--fake-spawn-child") {
+        let child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+            .arg("--fake-child-sleep")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        println!("fake-child-pid: {}", child.id());
+    }
+    if let Some(delay) = flag(&args, "--fake-delay-ms") {
+        let delay = delay.parse::<u64>().map_err(|error| error.to_string())?;
+        let timestamp = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        };
+        println!("fake-start-ns: {}", timestamp());
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        println!("fake-end-ns: {}", timestamp());
+    }
     // A read-only hostile holder: models an orphaned agent taking an advisory lock.
     if let Some(path) = flag(&args, "--fake-hold-lock") {
         let lock = std::fs::File::open(path).map_err(|error| error.to_string())?;

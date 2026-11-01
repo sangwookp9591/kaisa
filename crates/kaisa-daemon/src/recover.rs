@@ -15,7 +15,7 @@ use kaisa_keeper::{ExitRecord, exit_record_path, read_exit_record, write_exit_re
 use kaisa_ledger::{AttemptRow, EventStore};
 use kaisa_supervisor::{Reclamation, reclaim};
 use kaisa_sys::ProcessIdentity;
-use kaisa_workspace::{IgnoredPolicy, Worktree, open_worktree};
+use kaisa_workspace::{IgnoredPolicy, Worktree, branch_has_worktree, open_worktree};
 
 use crate::goal::{
     AGENT_IDENTITY_FILE, BUILD_OUTPUT, GoalError, at, record, record_cleanup, record_execution,
@@ -472,21 +472,8 @@ fn recognise_user_removal(
     if !exists.status.success() {
         return Ok(None);
     }
-    let listing = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repository)
-        .output()
-        .map_err(at("listing remaining worktrees"))?;
-    if !listing.status.success() {
-        return Err(at("listing remaining worktrees")(String::from_utf8_lossy(
-            &listing.stderr,
-        )));
-    }
     // A still-registered checkout may be in preparation or only temporarily unavailable.
-    if String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .any(|line| line == format!("branch {reference}"))
-    {
+    if branch_has_worktree(repository, &branch).map_err(at("listing remaining worktrees"))? {
         return Ok(None);
     }
     record(
