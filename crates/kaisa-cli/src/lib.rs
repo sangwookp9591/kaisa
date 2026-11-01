@@ -171,6 +171,9 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
+        Some("status") if args.get(1).is_some_and(|word| !word.starts_with('-')) => {
+            run_goal_args(args, out, err)
+        }
         Some("status") => {
             let status = home::run(out, err)?;
             if status == EXIT_SUCCESS {
@@ -183,6 +186,16 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
+        Some("spec")
+            if args.get(1).is_some_and(|word| {
+                !word.starts_with('-')
+                    && !SPEC_SUBCOMMANDS
+                        .iter()
+                        .any(|command| edit_distance(word, command) <= 1)
+            }) =>
+        {
+            run_goal_args(args, out, err)
+        }
         Some("spec") => spec::run(&args[1..], out, err),
         Some("goal") => run_goal_args(&args[1..], out, err),
         Some("build") => goal::build(&args[1..], out, err),
@@ -208,15 +221,24 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some(word)
             if !word.starts_with('-')
                 && !word.chars().any(char::is_whitespace)
-                && (args.len() == 1 || suggested_command(word).is_some()) =>
+                && (args.len() == 1
+                    || args
+                        .get(1)
+                        .is_some_and(|argument| mistyped_command(word, argument).is_some())) =>
         {
             writeln!(err, "kaisa: unknown command `{word}`.")?;
-            if let Some(command) = suggested_command(word) {
+            let suggestion = if let Some(argument) = args.get(1) {
+                mistyped_command(word, argument)
+            } else {
+                suggested_command(word)
+            };
+            if let Some(command) = suggestion {
                 writeln!(err, "kaisa: did you mean `{command}`?")?;
             }
             writeln!(
                 err,
-                "kaisa: to run goal text explicitly, use `kaisa -- {word}` or `kaisa goal \"{}\"`.",
+                "kaisa: to run goal text explicitly, use `kaisa -- {}` or `kaisa goal \"{}\"`.",
+                args.join(" "),
                 args.join(" ")
             )?;
             Ok(EXIT_USAGE)
@@ -242,6 +264,75 @@ fn run_goal_args(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
             Ok(EXIT_USAGE)
         }
     }
+}
+
+const SPEC_SUBCOMMANDS: &[&str] = &["draft", "show", "list", "approve", "report"];
+const GOAL_FLAGS: &[&str] = &[
+    "--agent",
+    "--model",
+    "--spec",
+    "--version",
+    "--accept-qa-isolation",
+    "--qa-author-arg",
+    "--qa-blind-arg",
+    "--test-reviewer-arg",
+    "--candidates",
+    "--max-parallel",
+    "--plan",
+    "--on-failure",
+    "--verify-each-task",
+    "--agent-program",
+    "--agent-arg",
+    "--reviewer-arg",
+    "--confine-claude",
+    "--accept-reduced",
+    "--accept-until",
+    "--check-program",
+    "--check-arg",
+];
+
+/// Multi-word typos need both a close long command name and command-shaped arguments.
+fn mistyped_command(word: &str, argument: &str) -> Option<&'static str> {
+    IMPLEMENTED_COMMANDS
+        .iter()
+        .chain(PLANNED_COMMANDS.iter())
+        .copied()
+        .find(|command| {
+            command.len() >= 4
+                && edit_distance(word, command) == 1
+                && command_argument(command, argument)
+        })
+}
+
+fn command_argument(command: &str, argument: &str) -> bool {
+    let (subcommands, flags): (&[&str], &[&str]) = match command {
+        "spec" => (SPEC_SUBCOMMANDS, &["--help"]),
+        "agent" => (&["add", "list"], &["--help"]),
+        "policy" => (&["show", "set"], &["--help"]),
+        "route" => (&["explain"], &["--help"]),
+        "stats" => (&["routing"], &["--help"]),
+        "init" => (&[], &["--yes", "--help"]),
+        "build" | "goal" => (&[], GOAL_FLAGS),
+        "local-agent" => (&[], &["--mcp-config", "--endpoint", "--model", "--help"]),
+        "status" | "watch" => (&[], &["--json", "--help"]),
+        "audit" => (&["verify"], &["--help"]),
+        "memory" => (&["forget"], &["--help"]),
+        "admin" => (
+            &[
+                "delegate",
+                "knowledge",
+                "pack",
+                "enroll",
+                "budget",
+                "cost",
+                "template",
+                "agent",
+            ],
+            &["--help"],
+        ),
+        _ => (&[], &["--help"]),
+    };
+    subcommands.contains(&argument) || flags.iter().any(|flag| argument.starts_with(flag))
 }
 
 /// Closest command within two edits (including adjacent transpositions); ties are stable.

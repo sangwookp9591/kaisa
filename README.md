@@ -322,9 +322,19 @@ The scripted `--agent-program` path without `--reviewer-arg` runs no checks and 
 
 A single unknown bare word, such as `kaisa stauts` or `kaisa frobnicate`, exits `64`
 without creating state, a ledger, branches or worktrees. Close command names get a
-“did you mean …?” suggestion. A first word within edit distance two of a known command
-also exits `64` when more words follow (`kaisa spce draft requirements`). Multi-word
-goals still work, quoted or as separate words. To explicitly run a one-word goal or
+“did you mean …?” suggestion (within two edits). For an unknown first word in multi-word
+input, refusal requires both: it is within one edit (including an adjacent transposition)
+of a command with at least four characters, and the second word is an exact subcommand
+of that command or starts with one of its flags. Thus `spce draft x` and
+`staus --json` exit `64`, while `add tests for parser`, `test the parser`, `use rust`
+and `set up ci` run as goals. Short commands such as `ask`, `run` and `tui` never
+trigger multi-word typo detection. Other multi-word goals work quoted or as separate
+words. `status` followed by prose and `spec` followed by prose also run as goals:
+`status of the build is red, fix it` and `spec the api then implement it`.
+Second-word typos are not corrected: `spec draf x` exits `1` with spec usage without a
+suggestion (a spec verb within one edit retains command dispatch); `spce draf x`
+runs as a goal because `draf` is not an exact subcommand. Known commands otherwise
+retain their command dispatch. To explicitly run a one-word goal or
 bypass command detection, use `kaisa -- word` or `kaisa goal "word"`; quotes alone
 do not distinguish a one-word goal from a command.
 

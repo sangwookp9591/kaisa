@@ -111,7 +111,7 @@ fn assert_refused_without_effects(args: &[&str], suggestion: Option<&str>) {
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
             error.contains("unknown command")
-                && error.contains("kaisa --")
+                && error.contains(&format!("kaisa -- {}`", args.join(" ")))
                 && error.contains("kaisa goal"),
             "refusal must explain the explicit goal forms: {error}"
         );
@@ -129,10 +129,15 @@ fn a_typo_of_each_command_is_refused_with_a_suggestion_and_no_state_or_git_chang
     for command in COMMANDS {
         let typo = format!("{command}x");
         assert_refused_without_effects(&[&typo], Some(command));
-        assert_refused_without_effects(&[&typo, "draft", "requirements"], Some(command));
     }
     assert_refused_without_effects(&["stauts"], Some("status"));
     assert_refused_without_effects(&["spce", "draft", "requirements"], Some("spec"));
+    assert_refused_without_effects(&["staus", "--json"], Some("status"));
+    assert_refused_without_effects(&["staus", "--json=true"], Some("status"));
+    assert_refused_without_effects(&["gaol", "--agent", "codex", "x"], Some("goal"));
+    assert_refused_without_effects(&["buid", "--model", "x"], Some("build"));
+    assert_refused_without_effects(&["spce", "show", "requirements"], Some("spec"));
+    assert_refused_without_effects(&["polcy", "set", "revision_limit", "3"], Some("policy"));
 }
 
 #[test]
@@ -194,6 +199,62 @@ fn explicit_goal_forms_and_multi_word_goals_still_run_the_fake_agent() {
             "the fake agent must actually complete an attempt: {output:?}"
         );
     }
+}
+
+#[test]
+fn ordinary_unquoted_goals_are_not_mistaken_for_command_typos() {
+    let fake = fake_agent_beside(Path::new(env!("CARGO_BIN_EXE_kaisa")));
+    for (index, goal) in [
+        "add tests for parser",
+        "test the parser",
+        "use rust",
+        "set up ci",
+        "status of the build is red, fix it",
+        "spec the api then implement it",
+        "spce the api then implement it",
+        "spce draf x",
+        "spcex draft x",
+        "aks draft requirements",
+        "rn draft requirements",
+        "tuii draft requirements",
+        "statuss now",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let bench = Workbench::new(&format!("ordinary-goal-{index}"));
+        let repository = bench.repository("repo");
+        // Keep the goal first: prepending goal options bypasses top-level command detection.
+        let mut args: Vec<_> = goal.split_whitespace().collect();
+        args.extend([
+            "--agent-program",
+            fake.to_str().expect("fake path"),
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            "src/notes.md",
+        ]);
+        let output = invoke(&bench, &repository, &args);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains(&format!("▶ {goal}"))
+                && stdout.contains("work preserved on kaisa/att_"),
+            "ordinary goal must reach and complete the fake agent: {goal}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_spec_subcommand_returns_usage_without_correction() {
+    let bench = Workbench::new("spec-subcommand-typo");
+    let repository = bench.repository("repo");
+    let output = invoke(&bench, &repository, &["spec", "draf", "x"]);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(error.contains("usage: kaisa spec"), "{error}");
+    assert!(!error.contains("did you mean"), "{error}");
+    assert!(!bench.state().join("kaisa.db").exists());
 }
 
 #[test]
