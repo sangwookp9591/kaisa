@@ -311,10 +311,12 @@ mod tests {
             let mut evidence = complete_evidence();
             evidence.deterministic.status = AcceptanceStatus::Fail;
             evidence.deterministic.detail = requirement.into();
+            evidence.qa_isolation = GateCheck::missing("platform isolation not verified");
+            evidence.private_qa = GateCheck::missing("private QA write-deny unavailable");
             assert_eq!(
                 acceptance_gate(&evidence).status,
                 AcceptanceStatus::Fail,
-                "approving review cannot override {requirement}"
+                "approving review or missing isolation cannot override {requirement}"
             );
         }
     }

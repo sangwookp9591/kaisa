@@ -316,7 +316,14 @@ fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
     let characterization_file = characterization
         .then(|| flag(args, "--fake-characterization-answer"))
         .flatten();
-    let response = if let Some(path) = characterization_file {
+    let inline = if characterization {
+        flag(args, "--fake-characterization-json")
+    } else {
+        flag(args, "--fake-qa-json")
+    };
+    let response = if let Some(response) = inline {
+        response
+    } else if let Some(path) = characterization_file {
         std::fs::read_to_string(path).map_err(|e| e.to_string())?
     } else if characterization && std::env::var_os("KAISA_FAKE_CHARACTERIZATION_JSON").is_some() {
         std::env::var("KAISA_FAKE_CHARACTERIZATION_JSON").map_err(|e| e.to_string())?
@@ -383,6 +390,19 @@ fn run() -> Result<(), String> {
                 .map_or(0, |elapsed| elapsed.as_nanos())
         };
         println!("fake-start-ns: {}", timestamp());
+        // Each peer signals inside its own allowed scratch. The test host releases both
+        // only after both processes are alive, independent of Git/process startup latency.
+        if let Some(path) = flag(&args, "--fake-wait-for-release") {
+            let path = std::path::Path::new(&path);
+            std::fs::write(path.with_extension("ready"), []).map_err(|error| error.to_string())?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !path.with_extension("released").exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("timed out waiting for concurrent fake peer".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(delay));
         println!("fake-end-ns: {}", timestamp());
     }

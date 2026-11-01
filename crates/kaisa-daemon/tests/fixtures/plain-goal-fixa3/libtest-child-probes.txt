@@ -1,0 +1,28 @@
+running 63 tests
+test seatbelt::tests::a_path_with_quotes_cannot_break_out_of_the_profile ... ok
+
+running 1 test
+
+running 1 test
+test seatbelt::tests::enforced::a_login_keychain_policy_keeps_real_keychain_services_reachable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
+test seatbelt::tests::enforced::a_login_keychain_policy_keeps_real_keychain_services_reachable ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_can_reach_its_broker ... ok
+
+running 1 test
+test seatbelt::tests::enforced::a_sandboxed_agent_can_write_inside_its_write_set ... ok
+test seatbelt::tests::enforced::an_overridden_home_still_denies_the_account_keychain_directory ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_cannot_open_a_direct_connection ... ok
+test seatbelt::tests::the_seatbelt_profile_denies_by_default ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_cannot_write_outside_its_write_set ... ok
+test seatbelt::tests::enforced::a_sandboxed_agent_reaches_its_tool_broker_socket_and_no_other ... ok
+test seatbelt::tests::enforced::readable_bridge_ancestors_allow_metadata_but_deny_directory_listings ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.11s
+
+test seatbelt::tests::enforced::a_confined_keychain_query_is_denied_before_item_lookup ... ok
+test seatbelt::tests::enforced::an_unreadable_state_directory_hides_secrets_but_keeps_exact_bridge_files_readable ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s

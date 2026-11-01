@@ -254,6 +254,14 @@ fn preservation_command(directory: &Path, hooks: &EmptyHooksDirectory) -> Comman
 /// only Git CLI arguments use ordinary drive/UNC spelling.
 #[must_use]
 pub fn git_cli_path(path: &Path) -> String {
+    external_tool_path(path)
+}
+
+/// Path spelling for external tools (including Node and Cargo), whose path parsers
+/// may reject Windows verbatim prefixes. Keep canonical paths for identity checks;
+/// convert only arguments, environment values and working directories at the tool boundary.
+#[must_use]
+pub fn external_tool_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     #[cfg(windows)]
     {

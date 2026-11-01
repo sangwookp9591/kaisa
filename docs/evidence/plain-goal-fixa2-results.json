@@ -1,0 +1,1630 @@
+{
+  "baseline_commit": "6871daf",
+  "baseline_source": "Retained original reviewer results for the same 57 cases",
+  "after_source": "FIXA3 worktree based on 77c65e3; unchanged 57 original cases and driver, external temporary fixture roots",
+  "false_blocks": {
+    "before": 16,
+    "after": 0,
+    "fixa2": 4
+  },
+  "known_false_deliveries": {
+    "before": [
+      "r-attack-alias-forged-summary"
+    ],
+    "after": [
+      "r-attack-alias-forged-summary"
+    ]
+  },
+  "cases": [
+    {
+      "case": "r-legit",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-legit-npm-test",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-legit-autodetect",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-main-exit-status",
+      "expected": "delivered (legit CLI)",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:5"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:5"
+        ]
+      }
+    },
+    {
+      "case": "r-main-exit-use-alias",
+      "expected": "delivered (legit CLI)",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:6"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/main.rs:6"
+        ]
+      }
+    },
+    {
+      "case": "r-attack-exit-direct",
+      "expected": "blocked",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:1"
+        ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:1"
+        ]
+      }
+    },
+    {
+      "case": "r-attack-exit-helper",
+      "expected": "blocked",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
+      }
+    },
+    {
+      "case": "r-attack-exit-alias",
+      "expected": "blocked",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:2"
+        ]
+      }
+    },
+    {
+      "case": "r-attack-alias-forged-summary",
+      "expected": "blocked",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:8"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:8"
+        ]
+      }
+    },
+    {
+      "case": "r-attack-cargo-runner",
+      "expected": "blocked",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-attack-legacy-config",
+      "expected": "blocked",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-build-rs-new",
+      "expected": "blocked (by design)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-rust-toolchain",
+      "expected": "blocked (by design)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-zero-filter",
+      "expected": "blocked (by design: zero tests)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-filter-some",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-binaries",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-quiet",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-terse",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-color-cargo",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-color-libtest",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-multi-workspace-flag",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-doc-only-doc-flag",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-doc-only-plain",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-no-run",
+      "expected": "arguably delivered (compile check)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-nocapture-print",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-harness-false",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-cfg-test-module-exit",
+      "expected": "delivered? (test-only code)",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:5"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.rs:5"
+        ]
+      }
+    },
+    {
+      "case": "replay-kaisa-workspace-cargo-test",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "nextest-default",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "nextest-skipped-slow",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "nextest-status-level-fail",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "nextest-flaky-retry",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "nextest-zero",
+      "expected": "blocked (zero tests)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-legit-autodetect",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-legit-node-test-direct",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-cli-exit-1",
+      "expected": "delivered (legit CLI)",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:6"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:6"
+        ]
+      }
+    },
+    {
+      "case": "n-attack-exit-0",
+      "expected": "blocked",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:2"
+        ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:2"
+        ]
+      }
+    },
+    {
+      "case": "n-attack-exit-destructured",
+      "expected": "blocked",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:3"
+        ]
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/lib.js:3"
+        ]
+      }
+    },
+    {
+      "case": "n-attack-exit-bracket",
+      "expected": "blocked",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-test-name-ends-js",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-spec-reporter",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-two-node-runs",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-describe-skip-todo",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-subtests",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-jest-exit-code-only",
+      "expected": "delivered (exit-code only)",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-vitest-exit-code-only",
+      "expected": "delivered (exit-code only)",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-mocha-tap-exit-code-only",
+      "expected": "delivered (exit-code only)",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "exit-code only"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-existing-NODE_OPTIONS-read",
+      "expected": "delivered",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-package-add-lint-script",
+      "expected": "blocked (pre-existing check definition)",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "n-npmrc",
+      "expected": "blocked (by design)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [],
+        "advisories": []
+      }
+    },
+    {
+      "case": "h1-legit-help-text",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "h1-legit-autodetect",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "h1-cli-entry-process-exit",
+      "expected": "delivered (legit CLI)",
+      "before": {
+        "exit": 3,
+        "outcome": "blocked",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:32"
+        ]
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": [
+          "advisory: added process termination at src/cli.js:32"
+        ]
+      }
+    },
+    {
+      "case": "h2-reference-fix",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "h2-reference-fix-autodetect",
+      "expected": "delivered",
+      "before": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "h3-noop-comment",
+      "expected": "blocked (base tests fail)",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "test command failed"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "test command failed"
+        ],
+        "advisories": []
+      }
+    },
+    {
+      "case": "r-self-reexec-test",
+      "expected": "delivered",
+      "before": {
+        "exit": 4,
+        "outcome": "blocked",
+        "validation": [
+          "no positive test evidence"
+        ],
+        "advisories": []
+      },
+      "after": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      },
+      "fixa2": {
+        "exit": 0,
+        "outcome": "delivered",
+        "validation": [
+          "positive test evidence"
+        ],
+        "advisories": []
+      }
+    }
+  ]
+}

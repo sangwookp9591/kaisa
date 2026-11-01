@@ -137,10 +137,14 @@ fn review_check_receipts(candidate: &Candidate, evidence: &[Evidence]) -> String
             None => "deadline exceeded".to_owned(),
         };
         text.push_str(&format!(
-            "command (argv): {}\nexit: {exit}\nconfined: {}\n",
+            "command (argv): {}\nexit: {exit}\nconfined: {}\nvalidation: {}\n",
             serde_json::to_string(&command).expect("string argv"),
-            piece.confined
+            piece.confined,
+            piece.validation_label()
         ));
+        for advisory in &piece.advisories {
+            text.push_str(&format!("{}\n", safe_reason(advisory)));
+        }
         if let Some(reason) = piece.bounded_failure_reason() {
             text.push_str(&format!("invalid evidence: {}\n", safe_reason(&reason)));
         }
@@ -448,7 +452,15 @@ fn run_verified_goal_inner(
                 &context,
                 &original_base,
                 revisions,
-                Delivery::Refuse("the developer agent produced no successful change".to_owned()),
+                Delivery::Refuse(
+                    findings
+                        .iter()
+                        .find(|finding| finding.starts_with("no positive test evidence from `"))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            "the developer agent produced no successful change".to_owned()
+                        }),
+                ),
                 None,
                 attempts,
             );
@@ -524,9 +536,9 @@ fn run_verified_goal_inner(
                 &candidate.tree,
                 json!({"candidate_tree": piece.candidate_tree, "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                     "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
-                    "exit": exit, "output_digest": piece.output_digest,
+                    "exit": exit, "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(), "generated_lockfile": piece.generated_lockfile,
                     "confined": piece.confined, "definitions_changed": piece.definitions_changed,
-                    "weakened_tests": piece.weakened_tests}),
+                    "weakened_tests": piece.weakened_tests, "advisories":piece.advisories}),
             )?;
         }
         let diff =
@@ -631,7 +643,7 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                findings = revision_findings(&reasons);
+                findings = revision_feedback(&reasons, &evidence);
                 continue;
             }
         }
@@ -682,7 +694,7 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                findings = revision_findings(&reasons);
+                findings = revision_feedback(&reasons, &evidence);
             }
             other => {
                 return finish(
@@ -696,6 +708,14 @@ fn run_verified_goal_inner(
             }
         }
     }
+}
+
+/// Carry the deterministic harness failure into the next developer's context pack.
+fn revision_feedback(
+    reasons: &[crate::gate::RevisionReason],
+    _evidence: &[Evidence],
+) -> Vec<String> {
+    revision_findings(reasons)
 }
 
 fn finish(
@@ -757,7 +777,7 @@ fn finish(
             .map_err(at("learning from delivery"))?;
         }
     }
-    let weakened_tests = candidate
+    let mut weakened_tests = candidate
         .as_ref()
         .map(|candidate| {
             kaisa_workspace::weakened_tests(request.repository, &original_base.commit, candidate)
@@ -765,7 +785,28 @@ fn finish(
         .transpose()
         .map_err(at("reading final test weakening"))?
         .unwrap_or_default();
-    let advisories = candidate
+    let mut termination_advisories = Vec::new();
+    if let Some(candidate) = &candidate {
+        let (configuration, advice) =
+            crate::qa::plain_qa_findings(request.repository, &original_base.commit, candidate)?;
+        weakened_tests.extend(configuration);
+        for message in advice {
+            let location = message
+                .strip_prefix("advisory: added process termination at ")
+                .unwrap_or("");
+            if let Some((path, line)) = location.rsplit_once(':')
+                && let Ok(path) = kaisa_domain::RepoPath::try_new(path)
+            {
+                termination_advisories.push(kaisa_domain::Finding {
+                    severity: kaisa_domain::Severity::Advisory,
+                    path,
+                    line: line.parse().ok(),
+                    message: message.trim_start_matches("advisory: ").to_owned(),
+                });
+            }
+        }
+    }
+    let mut advisories: Vec<_> = candidate
         .as_ref()
         .and_then(|candidate| {
             attempts
@@ -780,6 +821,7 @@ fn finish(
                 .collect()
         })
         .unwrap_or_default();
+    advisories.extend(termination_advisories);
     Ok(VerifiedOutcome {
         advisories,
         weakened_tests,
@@ -977,8 +1019,8 @@ pub(crate) fn verify_integration(
                 "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                 "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
                 "exit": match piece.exit { Some(ProcessExit::Code(code)) => json!({"code":code}), Some(ProcessExit::Terminated) => json!({"terminated":true}), None => json!({"deadline_exceeded":true}) },
-                "passed": piece.passed(), "output_digest": piece.output_digest,
-                "confined": piece.confined, "definitions_changed":piece.definitions_changed, "weakened_tests":piece.weakened_tests}),
+                "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(), "generated_lockfile": piece.generated_lockfile,
+                "confined": piece.confined, "definitions_changed":piece.definitions_changed, "weakened_tests":piece.weakened_tests, "advisories":piece.advisories}),
         )?;
     }
     let diff = kaisa_workspace::candidate_diff(request.repository, base, candidate)
@@ -1045,11 +1087,14 @@ mod tests {
             check: vec!["actual-check".to_owned()],
             exit: Some(kaisa_sys::ProcessExit::Code(1)),
             failure_reason: None,
+            test_evidence: None,
             output_digest: String::new(),
             output_tail: FORGED_OUTPUT.to_owned(),
             confined: false,
+            generated_lockfile: false,
             definitions_changed: vec![],
             weakened_tests: vec![],
+            advisories: vec![],
         };
         let receipts = super::review_check_receipts(&candidate, &[evidence.clone(), evidence]);
         let pack = ContextPack::assemble(PackInputs {

@@ -92,8 +92,15 @@ acceptance and adversarial tests, review test quality and the candidate, and pub
 only after the orchestrator's final-tree gate passes. Provisional approval requires
 `kaisa policy set allow_provisional_spec true` and
 `kaisa spec approve <id> --provisional`; it never counts as human approval.
-Plain `kaisa "<goal>"` has no private QA and can still deliver the recorded
-premature-`exit(0)` candidate; that attack is blocked by `build --spec`.
+Plain `kaisa "<goal>"` has no private QA. Recognised Cargo/libtest, nextest and
+Node TAP test checks require positive completion evidence: at least one executed
+test, no failures and consistent summaries. The recorded premature-`exit(0)`
+candidate is blocked on this path too. Added process termination is advisory on
+plain goals and remains blocking in private QA; reviewers and receipts include
+its file and line. QA-influencing configuration changes stop for a person.
+Compile-only `cargo test --no-run` and unrecognised commands retain exit-code
+semantics with receipts labelled `exit-code only`. These are bounded
+lexical and in-process checks, not protection against arbitrary output forgery.
 See the [offline fake-agent demo](examples/spec-demo/),
 [recorded results](docs/evidence/spec-demo/traceability.md), and
 [platform and trust limits](docs/evidence/limitations.md).
@@ -319,6 +326,24 @@ A goal ends with one of these results, which scripts and CI can rely on:
 | ⚪ `64` | usage error, including an unknown option |
 
 The scripted `--agent-program` path without `--reviewer-arg` runs no checks and no review and can still exit `0`; it is for testing, not a verified result.
+
+A single unknown bare word, such as `kaisa stauts` or `kaisa frobnicate`, exits `64`
+without creating state, a ledger, branches or worktrees. Close command names get a
+“did you mean …?” suggestion (within two edits). For an unknown first word in multi-word
+input, refusal requires both: it is within one edit (including an adjacent transposition)
+of a command with at least four characters, and the second word is an exact subcommand
+of that command or starts with one of its flags. Thus `spce draft x` and
+`staus --json` exit `64`, while `add tests for parser`, `test the parser`, `use rust`
+and `set up ci` run as goals. Short commands such as `ask`, `run` and `tui` never
+trigger multi-word typo detection. Other multi-word goals work quoted or as separate
+words. `status` followed by prose and `spec` followed by prose also run as goals:
+`status of the build is red, fix it` and `spec the api then implement it`.
+Second-word typos are not corrected: `spec draf x` exits `1` with spec usage without a
+suggestion (a spec verb within one edit retains command dispatch); `spce draf x`
+runs as a goal because `draf` is not an exact subcommand. Known commands otherwise
+retain their command dispatch. To explicitly run a one-word goal or
+bypass command detection, use `kaisa -- word` or `kaisa goal "word"`; quotes alone
+do not distinguish a one-word goal from a command.
 
 Words the docs name as commands (`review`, `run`, `gc`, `wrap`, `handoff` and the rest of the planned
 list) never start a run. `kaisa review the parser` exits `2` and prints the quoted form,

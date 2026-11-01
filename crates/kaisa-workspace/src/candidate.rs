@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use crate::git::{GitError, git_text, run_git};
+use crate::git::{GitError, git_cli_path, git_text, run_git};
 
 /// A frozen candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +130,8 @@ fn is_check_definition(path: &str) -> bool {
     let directories = &parts[..parts.len() - 1];
     // Cargo's legacy extension-less config (`.cargo/config`) is read next to `config.toml`.
     // `config.yml` only names a pipeline inside `.circleci/`; elsewhere it is ordinary data.
-    (file == "config" && directories.last() == Some(&".cargo"))
+    (file.starts_with("config") && directories.last() == Some(&".cargo"))
+        || file.starts_with("rust-toolchain")
         || CI_CONFIG_FILES.contains(&file)
         || (file == "config.yml" && directories.last() == Some(&".circleci"))
         || directories
@@ -1727,7 +1728,7 @@ impl CandidateCheckout {
     ///
     /// Returns [`GitError`] if git cannot create the checkout.
     pub fn create(repository: &Path, candidate: &Candidate, path: &Path) -> Result<Self, GitError> {
-        let path_text: String = path.to_string_lossy().into_owned();
+        let path_text = git_cli_path(path);
         run_git(
             repository,
             &[
@@ -1756,7 +1757,7 @@ impl Drop for CandidateCheckout {
     fn drop(&mut self) {
         // A check checkout holds nothing to preserve: it is the candidate itself, which stays
         // in its commit. Whatever checks wrote there is scratch.
-        let path_text: String = self.path.to_string_lossy().into_owned();
+        let path_text = git_cli_path(&self.path);
         let _ = run_git(
             &self.repository,
             &["worktree", "remove", "--force", &path_text],
@@ -1848,7 +1849,15 @@ mod tests {
         std::fs::write(repository.path().join("uncommitted.txt"), "agent leftovers")
             .expect("writable");
         let candidate: Candidate = freeze_candidate(repository.path(), "HEAD").expect("frozen");
-        let place = repository.sibling("check-41a");
+        // QA scratch parents are canonicalized: on Windows this carries a verbatim
+        // prefix, which Git's worktree add/remove arguments must not receive.
+        let place = repository
+            .sibling("check-41a")
+            .parent()
+            .expect("scratch parent")
+            .canonicalize()
+            .expect("canonical scratch parent")
+            .join("check-41a");
 
         let checkout =
             CandidateCheckout::create(repository.path(), &candidate, &place).expect("checked out");
@@ -1867,6 +1876,13 @@ mod tests {
         assert!(
             !place.exists(),
             "the checkout is discarded once the checks are done"
+        );
+        let listing = super::git_text(repository.path(), &["worktree", "list", "--porcelain"])
+            .expect("registered worktrees");
+        assert_eq!(
+            listing.matches("worktree ").count(),
+            1,
+            "drop unregisters the checkout, including canonical Windows paths"
         );
     }
 
