@@ -381,6 +381,8 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
 /// Additional context supplied by verification, never inferred from agent-written text.
 #[derive(Default)]
 pub(crate) struct AttemptContext<'a> {
+    /// Enclosing specification run, recorded at admission before any agent executes.
+    pub spec_run_id: Option<&'a str>,
     pub route: Option<&'a crate::RouteDecision>,
     pub findings: &'a [String],
     pub diff: &'a str,
@@ -485,6 +487,8 @@ fn run_goal_inner(
         attempt.as_str(),
         json!({
             "task": task.as_str(),
+            "role": request.role.code(),
+            "run_id": context.spec_run_id,
             "containment": {
                 "admission": admission.code(),
                 "missing": admission.missing().iter().map(|capability| capability.code()).collect::<Vec<_>>(),

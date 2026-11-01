@@ -8,7 +8,8 @@ use kaisa_context::{Confirmation, DetectedCommand, Language, Purpose};
 use kaisa_daemon::acceptance::AcceptanceStatus;
 use kaisa_daemon::qa::QaToolchain;
 use kaisa_daemon::spec_flow::{
-    ExistingReviewer, NoCharacterization, SpecOutcome, SpecRequest, run_spec_goal, spec_report,
+    AgentStagedReview, ExistingReviewer, LedgerCharacterize, NoCharacterization, SpecOutcome,
+    SpecRequest, run_spec_goal, spec_report,
 };
 use kaisa_daemon::{VerifiedRequest, whole_repository};
 use kaisa_domain::{
@@ -82,6 +83,10 @@ struct BuildBench {
     blind_json: Option<String>,
     author_json: Option<String>,
     accept_reduced_approval: bool,
+    production_hooks: bool,
+    characterization_json: Option<String>,
+    staged_mode: String,
+    poison_admission: bool,
 }
 impl BuildBench {
     fn new(name: &str) -> Self {
@@ -129,6 +134,10 @@ impl BuildBench {
             blind_json: None,
             author_json: None,
             accept_reduced_approval: false,
+            production_hooks: false,
+            characterization_json: None,
+            staged_mode: "approve".into(),
+            poison_admission: false,
         }
     }
     fn freeze(&self) {
@@ -189,6 +198,8 @@ impl BuildBench {
                     config.display().to_string(),
                     "--fake-write".into(),
                     target.into(),
+                    "--fake-final-answer".into(),
+                    "REVIEW_ONLY_DEVELOPER_DECISIONS".into(),
                     "--fake-content".into(),
                     if self.revision_limit > 0
                         && launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0
@@ -204,12 +215,21 @@ impl BuildBench {
         };
         let reviewer = |config: &Path| ProcessSpec {
             program: fake.clone(),
-            args: vec![
-                "--mcp-config".into(),
-                config.display().to_string(),
-                "--fake-review-require".into(),
-                LIBRARY.into(),
-            ],
+            args: if self.production_hooks {
+                vec![
+                    "--mcp-config".into(),
+                    config.display().to_string(),
+                    "--fake-staged-review".into(),
+                    self.staged_mode.clone(),
+                ]
+            } else {
+                vec![
+                    "--mcp-config".into(),
+                    config.display().to_string(),
+                    "--fake-review-require".into(),
+                    LIBRARY.into(),
+                ]
+            },
             working_directory: std::env::temp_dir(),
             env: Vec::new(),
         };
@@ -236,6 +256,11 @@ impl BuildBench {
         let mut author = qa.clone();
         if let Some(json) = &self.author_json {
             author.env = vec![("KAISA_FAKE_QA_JSON".into(), json.clone())];
+        }
+        if let Some(json) = &self.characterization_json {
+            author
+                .env
+                .push(("KAISA_FAKE_CHARACTERIZATION_JSON".into(), json.clone()));
         }
         let mut blind = qa.clone();
         if let Some(json) = &self.blind_json {
@@ -275,16 +300,29 @@ impl BuildBench {
             agent_writable: &[],
             reduced_mode: &basis,
         };
+        let toolchain = QaToolchain::Rust { cargo };
+        let characterize = LedgerCharacterize::new(&author, &toolchain);
+        let out_of_order = AdmissionBeforeBaseline(&characterize);
         run_spec_goal(&SpecRequest {
             workflow: &workflow,
             spec_id: &self.spec.id,
             version: None,
             qa_author: &author,
             qa_blind: &blind,
-            qa_toolchain: &QaToolchain::Rust { cargo },
+            qa_toolchain: &toolchain,
             test_reviewer: &domain,
-            characterize: self.characterize.as_ref(),
-            staged_review: &ExistingReviewer,
+            characterize: if self.production_hooks && self.poison_admission {
+                &out_of_order
+            } else if self.production_hooks {
+                &characterize
+            } else {
+                self.characterize.as_ref()
+            },
+            staged_review: if self.production_hooks {
+                &AgentStagedReview
+            } else {
+                &ExistingReviewer
+            },
             accepted_qa_isolation: accept_isolation,
             development_mappings: &self.development_mappings,
         })
@@ -953,4 +991,466 @@ fn policy_accepted_reduced_human_approval_keeps_its_label_after_delivery() {
         .expect("gate");
     assert_eq!(gate["decision"]["reduced_assurance_approval"], true);
     assert_eq!(gate["result_branch"], branch);
+}
+
+fn production_bench(name: &str, correction: bool) -> BuildBench {
+    let mut bench = BuildBench::new(name);
+    bench.production_hooks = true;
+    bench.spec.criteria[0].correction = correction;
+    bench.characterization_json = Some(json!({
+        "tests":[{"test_id":"legacy-empty","file":"legacy.rs","contents":"#[test] fn current_empty_input_is_accepted() { assert!(spec_fixture::accept(\"\")); }"}],
+        "behaviours":[{"test_id":"legacy-empty","path":LIBRARY,"description":"empty input is currently accepted","edge_case":true,
+            "disposition":if correction {json!({"kind":"correct","criterion_id":"AC-1"})} else {json!({"kind":"preserve"})}}]
+    }).to_string());
+    bench
+}
+fn gate_line<'a>(
+    outcome: &'a SpecOutcome,
+    requirement: &str,
+) -> &'a kaisa_daemon::acceptance::GateCheck {
+    &outcome
+        .acceptance
+        .lines
+        .iter()
+        .find(|line| line.requirement == requirement)
+        .unwrap_or_else(|| panic!("missing {requirement}: {:?}", outcome.acceptance))
+        .check
+}
+fn recorded_events(bench: &BuildBench) -> Vec<kaisa_ledger::ChainedEvent> {
+    kaisa_ledger::EventStore::open(&bench.bench.state().join("kaisa.db"))
+        .expect("ledger")
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .expect("events")
+}
+#[test]
+fn production_legacy_baseline_precedes_real_developer_admission_and_blocks_unexplained_change() {
+    let bench = production_bench("production-unexplained", false);
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    let check = gate_line(&outcome, "characterization honoured");
+    assert_eq!(check.status, AcceptanceStatus::Fail);
+    assert!(
+        check
+            .detail
+            .contains("unexplained behaviour change: legacy-empty"),
+        "{}",
+        check.detail
+    );
+    let events = recorded_events(&bench);
+    let baseline = events
+        .iter()
+        .find(|e| e.recorded.event.kind == kaisa_domain::EventKind::CharacterizationBaseline)
+        .expect("real baseline");
+    let admissions: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&e.recorded.event.payload).expect("payload");
+            e.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted
+                && payload["run_id"] == outcome.run_id
+                && payload["role"] == "developer"
+        })
+        .collect();
+    assert_eq!(admissions.len(), 1);
+    assert_eq!(
+        admissions[0].recorded.event.subject,
+        outcome.attempts[0].attempt.as_str(),
+        "actual admission, not a synthetic post-execution event"
+    );
+    assert!(baseline.recorded.sequence < admissions[0].recorded.sequence);
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_flags_a_required_correction_that_preserves_the_old_behaviour() {
+    let bench = production_bench("production-correction-preserved", true);
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        BUGGY_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    let check = gate_line(&outcome, "characterization honoured");
+    assert_eq!(check.status, AcceptanceStatus::Fail);
+    assert!(
+        check
+            .detail
+            .contains("required correction AC-1 preserved current behaviour"),
+        "{}",
+        check.detail
+    );
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_staged_reviewer_escalates_with_ledger_evidence_and_blocks_delivery() {
+    let mut bench = production_bench("production-staged-escalation", true);
+    bench.staged_mode = "escalate".into();
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    let check = gate_line(&outcome, "staged review approved");
+    assert_eq!(check.status, AcceptanceStatus::Fail, "{}", check.detail);
+    assert!(check.detail.contains("unsafe input transition"));
+    let review: serde_json::Value = recorded_events(&bench)
+        .iter()
+        .rev()
+        .find(|e| e.recorded.event.kind == kaisa_domain::EventKind::ReviewVerdict)
+        .map(|e| serde_json::from_str(&e.recorded.event.payload).expect("review JSON"))
+        .expect("review receipt");
+    assert!(
+        review["stages"][4]["changes"][0]["evidence_ids"][0]
+            .as_str()
+            .expect("evidence id")
+            .starts_with("ledger:")
+    );
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_rejects_an_explanation_only_blocking_downgrade() {
+    let mut bench = production_bench("production-explanation-downgrade", true);
+    bench.staged_mode = "explanation".into();
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Inconclusive);
+    let check = gate_line(&outcome, "staged review approved");
+    assert_eq!(check.status, AcceptanceStatus::Inconclusive);
+    assert!(
+        check.detail.contains("requires passing check/QA evidence"),
+        "{}",
+        check.detail
+    );
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_staged_approval_cannot_override_a_failed_deterministic_line() {
+    let bench = production_bench("production-staged-vs-deterministic", true);
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        WEAK_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(
+        gate_line(&outcome, "staged review approved").status,
+        AcceptanceStatus::Pass
+    );
+    assert_eq!(
+        gate_line(&outcome, "deterministic checks").status,
+        AcceptanceStatus::Fail
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_happy_path_passes_with_traceability_and_review_only_stage_three_context() {
+    let mut bench = production_bench("production-happy-path", true);
+    bench.staged_mode = "resolve".into();
+    bench.revision_limit = 1;
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        BUGGY_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(
+        outcome.acceptance.status,
+        AcceptanceStatus::Pass,
+        "{:?}",
+        outcome.acceptance
+    );
+    assert_eq!(outcome.attempts.len(), 2);
+    assert_eq!(outcome.acceptance.lines.len(), 10);
+    if !kaisa_daemon::expected_sandbox_missing(true).is_empty() {
+        assert!(outcome.acceptance.label().contains("reduced:"));
+        assert!(
+            !gate_line(&outcome, "staged review approved")
+                .admitted_reductions
+                .is_empty()
+        );
+    }
+
+    assert!(outcome.result_branch.is_some());
+    let report = spec_report(&bench.bench.state(), &outcome.run_id).expect("traceability report");
+    assert!(
+        report.contains("AC-1")
+            && report.contains("R1")
+            && report.contains(&outcome.acceptance.label())
+    );
+    let context_path = bench
+        .bench
+        .state()
+        .join("spec-runs")
+        .join(&outcome.run_id)
+        .join(format!(
+            "staged-review-context-{}.json",
+            outcome.candidate.as_ref().expect("candidate").tree
+        ));
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(context_path).expect("review context"))
+            .expect("context JSON");
+    assert!(
+        context[2]["developer_final_answer"]
+            .as_str()
+            .expect("final answer")
+            .contains("REVIEW_ONLY_DEVELOPER_DECISIONS")
+    );
+    assert!(
+        context[2]["revision_history"]
+            .as_str()
+            .expect("history")
+            .contains("revision.started")
+    );
+    assert!(
+        context[2]["human_interventions"]
+            .as_str()
+            .expect("interventions")
+            .contains("spec_approval")
+    );
+    let ledger =
+        kaisa_ledger::EventStore::open(&bench.bench.state().join("kaisa.db")).expect("ledger");
+    let events = recorded_events(&bench);
+    let qa_attempts: Vec<_> =
+        events
+            .iter()
+            .filter(|e| e.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted)
+            .filter(|e| {
+                serde_json::from_str::<serde_json::Value>(&e.recorded.event.payload)
+                    .expect("payload")["role"]
+                    == "qa"
+            })
+            .map(|e| e.recorded.event.subject.as_str())
+            .collect();
+    assert_eq!(qa_attempts.len(), 2);
+    for attempt in qa_attempts {
+        let pack: serde_json::Value = events
+            .iter()
+            .find(|e| {
+                e.recorded.event.kind == kaisa_domain::EventKind::ContextPackRecorded
+                    && e.recorded.event.subject == attempt
+            })
+            .map(|e| serde_json::from_str(&e.recorded.event.payload).expect("pack event"))
+            .expect("recorded QA context");
+        let digest = kaisa_domain::ContentDigest::try_new(pack["digest"].as_str().expect("digest"))
+            .expect("valid digest");
+        let qa_context = String::from_utf8(
+            ledger
+                .context_pack(&digest)
+                .expect("QA pack")
+                .expect("QA bytes"),
+        )
+        .expect("UTF-8");
+        for forbidden in [
+            "REVIEW_ONLY_DEVELOPER_DECISIONS",
+            "developer_final_answer",
+            "revision_history",
+            "human_interventions",
+            "attempt.admitted",
+            "spec_approval",
+        ] {
+            assert!(
+                !qa_context.contains(forbidden),
+                "QA context leaked {forbidden}: {qa_context}"
+            );
+        }
+    }
+}
+
+// Simulate a pre-existing run-scoped admission; production must refuse its comparison.
+struct AdmissionBeforeBaseline<'a>(&'a dyn kaisa_daemon::spec_flow::Characterize);
+impl kaisa_daemon::spec_flow::Characterize for AdmissionBeforeBaseline<'_> {
+    fn baseline(
+        &self,
+        context: &kaisa_daemon::spec_flow::HookContext<'_>,
+    ) -> Result<kaisa_daemon::acceptance::GateCheck, kaisa_daemon::GoalError> {
+        kaisa_ledger::EventStore::open(&context.state_directory.join("kaisa.db"))
+            .expect("ledger")
+            .append(kaisa_domain::Event {
+                kind: kaisa_domain::EventKind::AttemptAdmitted,
+                subject: "att_prebaseline".into(),
+                payload_version: 1,
+                payload:
+                    json!({"run_id":context.run_id,"role":"developer","task":"task_prebaseline"})
+                        .to_string(),
+            })
+            .expect("out-of-order fixture");
+        self.0.baseline(context)
+    }
+    fn evaluate(
+        &self,
+        context: &kaisa_daemon::spec_flow::HookContext<'_>,
+        baseline: &kaisa_daemon::acceptance::GateCheck,
+    ) -> Result<kaisa_daemon::acceptance::GateCheck, kaisa_daemon::GoalError> {
+        self.0.evaluate(context, baseline)
+    }
+}
+#[test]
+fn production_refused_comparison_is_a_fail_with_an_explicit_ordering_reason() {
+    let mut bench = production_bench("production-refused-comparison", true);
+    bench.poison_admission = true;
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    let check = gate_line(&outcome, "characterization honoured");
+    assert_eq!(
+        check.status,
+        AcceptanceStatus::Fail,
+        "{:?}",
+        outcome.acceptance
+    );
+    assert!(
+        check
+            .detail
+            .contains("comparison refused: DeveloperAdmittedBeforeBaseline"),
+        "{}",
+        check.detail
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
+    bench.assert_not_delivered(&outcome);
+}
+#[test]
+fn production_does_not_admit_a_developer_when_legacy_baseline_authoring_fails() {
+    let mut bench = production_bench("production-invalid-baseline", false);
+    bench.characterization_json = Some(json!({"tests":[],"behaviours":[]}).to_string());
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Inconclusive);
+    assert!(
+        gate_line(&outcome, "characterization honoured")
+            .detail
+            .contains("every legacy area needs characterization")
+    );
+    assert!(outcome.attempts.is_empty());
+    assert!(recorded_events(&bench).iter().all(|e| {
+        let payload: serde_json::Value =
+            serde_json::from_str(&e.recorded.event.payload).expect("payload");
+        e.recorded.event.kind != kaisa_domain::EventKind::AttemptAdmitted
+            || payload["role"] != "developer"
+    }));
+    bench.assert_not_delivered(&outcome);
+}
+
+#[test]
+fn build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction() {
+    let bench = production_bench("production-cli-defaults", true);
+    bench.freeze();
+    let state = bench.bench.state();
+    let policy = Command::new(BINARY)
+        .current_dir(&bench.repository)
+        .env("KAISA_STATE_DIR", &state)
+        .args(["policy", "set", "allow_provisional_spec", "true"])
+        .output()
+        .expect("policy CLI");
+    assert!(policy.status.success());
+    let domain = bench.bench.base.join("cli-domain.txt");
+    std::fs::write(&domain, format!("```kaisa-test-review\n{}\n```", json!({"criteria":[{"id":"AC-1","coverage":"covered","note":"contract asserted"}],"missing_business_cases":[],"missing_state_transitions":[],"weak_assertions":[],"spec_test_mismatches":[]}))).expect("domain fixture");
+    let qa = json!({"tests":[{"test_id":"empty-input","criterion_ids":["AC-1"],"file":"empty.rs","contents":"#[test] fn empty_input_is_rejected() { assert_eq!(spec_fixture::accept(\"\"), false); }"}]}).to_string();
+    let qa_file = bench.bench.base.join("cli-qa.json");
+    let characterization_file = bench.bench.base.join("cli-characterization.json");
+    std::fs::write(&qa_file, qa).expect("QA fixture");
+    std::fs::write(
+        &characterization_file,
+        bench
+            .characterization_json
+            .as_ref()
+            .expect("baseline fixture"),
+    )
+    .expect("characterization fixture");
+    let mut build = Command::new(BINARY);
+    build
+        .current_dir(&bench.repository)
+        .env("KAISA_STATE_DIR", &state)
+        .args(["build", "--spec", bench.spec.id.as_str(), "--agent-program"])
+        .arg(fake_agent_beside(Path::new(BINARY)))
+        .args([
+            "--agent-arg",
+            "--fake-write",
+            "--agent-arg",
+            LIBRARY,
+            "--agent-arg",
+            "--fake-content",
+            "--agent-arg",
+            VALID_IMPLEMENTATION,
+            "--reviewer-arg",
+            "--fake-staged-review",
+            "--reviewer-arg",
+            "resolve",
+        ])
+        .args(["--qa-author-arg", "--fake-qa", "--qa-author-arg"])
+        .arg(&qa_file)
+        .args([
+            "--qa-author-arg",
+            "--fake-characterization-answer",
+            "--qa-author-arg",
+        ])
+        .arg(&characterization_file)
+        .args(["--qa-blind-arg", "--fake-qa", "--qa-blind-arg"])
+        .arg(&qa_file)
+        .args([
+            "--test-reviewer-arg",
+            "--fake-test-review-answer",
+            "--test-reviewer-arg",
+        ])
+        .arg(&domain)
+        .arg("--check-program")
+        .arg(program("cargo"))
+        .args(["--check-arg", "test", "--check-arg", "--offline"]);
+    if let Some(isolation) = platform_isolation_acceptance() {
+        build.args(["--accept-qa-isolation", isolation]);
+    }
+    let output = build.output().expect("build CLI");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("PASS") && text.contains("Result:"));
+    if !kaisa_daemon::expected_sandbox_missing(true).is_empty() {
+        assert!(
+            text.contains("reduced:"),
+            "CLI must retain the reduction: {text}"
+        );
+    }
+    let run = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Run: "))
+        .expect("run id");
+    let report = spec_report(&state, run).expect("traceability report");
+    assert!(report.contains("AC-1") && report.contains("legacy characterization honoured"));
+    assert!(
+        recorded_events(&bench)
+            .iter()
+            .any(|e| e.recorded.event.kind == kaisa_domain::EventKind::CharacterizationBaseline)
+    );
+    assert!(recorded_events(&bench).iter().any(|e| e.recorded.event.kind
+        == kaisa_domain::EventKind::ReviewVerdict
+        && e.recorded.event.payload.contains("stage5_judgment_changes")));
 }

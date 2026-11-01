@@ -550,6 +550,7 @@ fn run_verified_goal_inner(
             0,
         )?;
         let review_context = AttemptContext {
+            spec_run_id: None,
             route: reviewer_route.as_ref(),
             findings: &[],
             diff: &diff,

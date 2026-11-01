@@ -19,13 +19,14 @@ use crate::qa::{
     QaIsolation, QaRequest, QaResult, QaSuiteRequest, QaToolchain, qa_isolation, revision_feedback,
     run_private_qa, run_qa_suite,
 };
+pub use crate::spec_adapters::{AgentStagedReview, LedgerCharacterize};
 use crate::traceability::{TraceabilityReport, traceability_report};
 use crate::{
     GoalOutcome, LabelledTest, TestOrigin, TestReviewInput, TestReviewRequest, VerifiedRequest,
     prepare_review_repository, run_test_review, run_trusted_checks,
 };
 
-/// Shared inputs for optional WP5/WP6 adapters. Baseline calls have no candidate.
+/// Shared frozen inputs for review and characterization. Baselines have no candidate.
 #[derive(Clone, Copy)]
 pub struct HookContext<'a> {
     /// Original repository, never a mutable developer workspace.
@@ -52,7 +53,7 @@ pub trait Characterize {
         baseline: &GateCheck,
     ) -> Result<GateCheck, GoalError>;
 }
-/// Explicit default until a characterization adapter is installed.
+/// Explicit no-op for tests that isolate other workflow stages.
 pub struct NoCharacterization;
 impl Characterize for NoCharacterization {
     fn baseline(&self, context: &HookContext<'_>) -> Result<GateCheck, GoalError> {
@@ -78,7 +79,7 @@ impl Characterize for NoCharacterization {
 pub struct StagedReviewInput<'a, 'request> {
     /// Frozen repository/specification inputs.
     pub context: HookContext<'a>,
-    /// Trusted launch/policy configuration for the existing reviewer.
+    /// Trusted launch/policy configuration for the staged reviewer.
     pub workflow: &'a VerifiedRequest<'request>,
     /// Original-base to final-candidate diff.
     pub diff: &'a str,
@@ -98,7 +99,7 @@ pub trait StagedReview {
     /// Approve only with no unresolved blocking finding on this exact tree.
     fn review(&self, input: &StagedReviewInput<'_, '_>) -> Result<GateCheck, GoalError>;
 }
-/// Default uses the existing read-only reviewer and its strict verdict protocol.
+/// Plain reviewer for tests that explicitly isolate the original verdict protocol.
 pub struct ExistingReviewer;
 impl StagedReview for ExistingReviewer {
     fn review(&self, input: &StagedReviewInput<'_, '_>) -> Result<GateCheck, GoalError> {
@@ -208,9 +209,9 @@ pub struct SpecRequest<'a, 'request> {
     pub qa_toolchain: &'a QaToolchain,
     /// Domain test review launcher.
     pub test_reviewer: crate::AgentLauncher<'a>,
-    /// Optional baseline adapter.
+    /// Baseline adapter (production uses `LedgerCharacterize`).
     pub characterize: &'a dyn Characterize,
-    /// Optional context-aware review adapter.
+    /// Context-aware review adapter (production uses `AgentStagedReview`).
     pub staged_review: &'a dyn StagedReview,
     /// Explicit policy acceptance of a named reduced QA isolation boundary; absent by default.
     pub accepted_qa_isolation: Option<&'a str>,
@@ -250,14 +251,19 @@ fn transcript(state: &Path, attempt: &GoalOutcome) -> Result<String, GoalError> 
 fn run_directory(state: &Path, run: &str) -> PathBuf {
     state.join("spec-runs").join(run)
 }
-fn artifact(state: &Path, run: &str, name: &str, bytes: &[u8]) -> Result<String, GoalError> {
+pub(crate) fn artifact(
+    state: &Path,
+    run: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<String, GoalError> {
     let path = run_directory(state, run).join(name);
     std::fs::create_dir_all(path.parent().expect("artifact parent"))
         .map_err(at("preparing specification run artifacts"))?;
     std::fs::write(&path, bytes).map_err(at("preserving specification evidence"))?;
     Ok(format!("{name}:blake3:{}", blake3::hash(bytes).to_hex()))
 }
-fn hook_receipt(
+pub(crate) fn hook_receipt(
     context: &HookContext<'_>,
     name: &str,
     status: AcceptanceStatus,
@@ -279,7 +285,12 @@ fn hook_receipt(
     )?;
     Ok(GateCheck::recorded(status, detail, evidence, tree))
 }
-fn event(state: &Path, run: &str, kind: EventKind, mut payload: Value) -> Result<(), GoalError> {
+pub(crate) fn event(
+    state: &Path,
+    run: &str,
+    kind: EventKind,
+    mut payload: Value,
+) -> Result<(), GoalError> {
     payload["run_id"] = json!(run);
     let mut ledger = EventStore::open(&state.join("kaisa.db"))
         .map_err(at("opening specification workflow ledger"))?;
@@ -516,6 +527,7 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
             },
             &AttemptContext {
                 findings: &feedback,
+                spec_run_id: Some(&run_id),
                 ..AttemptContext::default()
             },
         ) {

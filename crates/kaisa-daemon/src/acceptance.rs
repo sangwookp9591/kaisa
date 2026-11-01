@@ -35,6 +35,9 @@ pub struct GateCheck {
     pub evidence_ids: Vec<String>,
     /// Candidate content to which the observation applies, when tree-dependent.
     pub candidate_tree: Option<String>,
+    /// Explicitly admitted containment gaps retained through delivery and report labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admitted_reductions: Vec<String>,
 }
 impl GateCheck {
     /// A check that has not produced usable evidence.
@@ -44,6 +47,7 @@ impl GateCheck {
             detail: detail.into(),
             evidence_ids: Vec::new(),
             candidate_tree: None,
+            admitted_reductions: Vec::new(),
         }
     }
     /// Constructs a trusted observation bound to preserved evidence.
@@ -58,6 +62,7 @@ impl GateCheck {
             detail: detail.into(),
             evidence_ids: vec![evidence.into()],
             candidate_tree: tree.map(str::to_owned),
+            admitted_reductions: Vec::new(),
         }
     }
 }
@@ -118,13 +123,29 @@ impl AcceptanceDecision {
     /// Display status without manufacturing human approval.
     pub fn label(&self) -> String {
         let status = format!("{:?}", self.status).to_uppercase();
-        if self.provisional {
+        let mut label = if self.provisional {
             format!("{status} (PROVISIONAL SPEC)")
         } else if self.reduced_assurance_approval {
             format!("{status} — human-approved (reduced assurance)")
         } else {
             status
+        };
+        let reductions: std::collections::BTreeSet<_> = self
+            .lines
+            .iter()
+            .flat_map(|line| &line.check.admitted_reductions)
+            .collect();
+        if !reductions.is_empty() {
+            label.push_str(&format!(
+                " (reduced: {})",
+                reductions
+                    .into_iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
+        label
     }
 }
 

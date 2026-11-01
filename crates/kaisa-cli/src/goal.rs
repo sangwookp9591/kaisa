@@ -740,7 +740,7 @@ impl GoalCommand {
         err: &mut dyn Write,
     ) -> io::Result<u8> {
         use kaisa_daemon::spec_flow::{
-            ExistingReviewer, NoCharacterization, SpecRequest, run_spec_goal,
+            AgentStagedReview, LedgerCharacterize, SpecRequest, run_spec_goal,
         };
         let qa_process = |args: &[String]| ProcessSpec {
             program: self
@@ -796,8 +796,8 @@ impl GoalCommand {
             qa_blind: &blind,
             qa_toolchain: &toolchain,
             test_reviewer: &domain,
-            characterize: &NoCharacterization,
-            staged_review: &ExistingReviewer,
+            characterize: &LedgerCharacterize::new(&author, &toolchain),
+            staged_review: &AgentStagedReview,
             accepted_qa_isolation: self.accepted_qa_isolation.as_deref(),
             development_mappings: &[],
         }) {

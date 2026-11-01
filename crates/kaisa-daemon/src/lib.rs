@@ -22,6 +22,7 @@ mod route;
 mod route_stats;
 mod sandbox;
 pub mod scheduler;
+mod spec_adapters;
 /// Read-only specification agent and strict final-answer parser.
 pub mod spec_agent;
 pub mod spec_flow;

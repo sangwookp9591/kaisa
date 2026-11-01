@@ -238,6 +238,66 @@ fn test_reviewer(args: &[String], config_path: &str, answer_file: &str) -> Resul
     Ok(())
 }
 
+/// Exercises staged adjudication using only the ordered context actually delivered.
+fn staged_reviewer(args: &[String], mode: &str) -> Result<(), String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    let message: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    let pack = message
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .ok_or("no review context")?;
+    let tree = pack
+        .split("Review candidate_tree: ")
+        .nth(1)
+        .and_then(|s| s.split(". Process").next())
+        .ok_or("no review tree")?;
+    let bundle: Value = serde_json::from_str(
+        pack.lines()
+            .find_map(|s| s.strip_prefix("Review-only context: "))
+            .ok_or("no ordered bundle")?,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(path) = flag(args, "--fake-dump-context") {
+        std::fs::write(path, pack).map_err(|e| e.to_string())?;
+    }
+    let concern = json!({"id":"F1","severity":"blocking","path":"src/lib.rs","line":1,"message":"staged evidence exposes an unsafe input transition"});
+    let blocking = matches!(mode, "escalate" | "explanation" | "resolve");
+    let initial = if mode == "escalate" {
+        let mut advisory = concern.clone();
+        advisory["severity"] = json!("advisory");
+        json!([advisory])
+    } else if blocking {
+        json!([concern.clone()])
+    } else {
+        json!([])
+    };
+    let evidence_id = bundle[1]["evidence"]
+        .as_array()
+        .and_then(|items| items.iter().find(|e| e["passed"] == true))
+        .and_then(|e| e["id"].as_str())
+        .unwrap_or("no-passing-evidence");
+    let changes = if mode == "explanation" || mode == "resolve" {
+        json!([{"concern_id":"F1","from":"blocking","to":"resolved","evidence_ids":[if mode == "explanation" { "developer-final-answer" } else { evidence_id }],"reason":"candidate evidence reconsidered"}])
+    } else if mode == "escalate" {
+        json!([{"concern_id":"F1","from":"advisory","to":"blocking","evidence_ids":[evidence_id],"reason":"execution evidence exposes a blocking transition"}])
+    } else {
+        json!([])
+    };
+    let answer = json!({"stages":[
+        {"stage":"stage1_diff_concerns","concerns":initial},
+        {"stage":"stage2_tests_and_expected_behaviour","assessment":"tests and frozen criteria reviewed"},
+        {"stage":"stage3_decisions_and_history","assessment":"developer and human history reviewed"},
+        {"stage":"stage4_evaluation","architecture":"cohesive","domain_invariants":"checked","error_handling":"checked","security":"checked","external_integrations":"none"},
+        {"stage":"stage5_judgment_changes","changes":changes}
+    ],"candidate_tree":tree,"approve":mode != "escalate","findings":if mode == "escalate" {json!([concern])} else {json!([])}});
+    println!("```kaisa-review\n{answer}\n```");
+    Ok(())
+}
+
 /// QA has no tools: it consumes the isolated pack and returns only a proposed suite.
 fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
     let mut pack = String::new();
@@ -251,13 +311,22 @@ fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
     {
         return Err("QA wrote outside its scratch".to_owned());
     }
-    let response = if path == "-" {
+    let characterization = flag_present(args, "--fake-characterization")
+        || serde_json::from_str::<Value>(&pack).is_ok_and(|p| p["role"] == "characterization");
+    let characterization_file = characterization
+        .then(|| flag(args, "--fake-characterization-answer"))
+        .flatten();
+    let response = if let Some(path) = characterization_file {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    } else if characterization && std::env::var_os("KAISA_FAKE_CHARACTERIZATION_JSON").is_some() {
+        std::env::var("KAISA_FAKE_CHARACTERIZATION_JSON").map_err(|e| e.to_string())?
+    } else if path == "-" {
         std::env::var("KAISA_FAKE_QA_JSON").map_err(|error| error.to_string())?
     } else {
         std::fs::read_to_string(path).map_err(|error| error.to_string())?
     };
     let suite: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
-    let fence = if flag_present(args, "--fake-characterization") {
+    let fence = if characterization {
         "kaisa-characterization"
     } else {
         "kaisa-qa"
@@ -355,6 +424,9 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string());
     }
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
+    if let Some(mode) = flag(&args, "--fake-staged-review") {
+        return staged_reviewer(&args, &mode);
+    }
     if let Some(answer) = flag(&args, "--fake-test-review-answer") {
         return test_reviewer(&args, &config_path, &answer);
     }
@@ -482,6 +554,9 @@ fn run() -> Result<(), String> {
     if refused {
         Err(format!("the bridge refused to write {target}"))
     } else {
+        if let Some(answer) = flag(&args, "--fake-final-answer") {
+            print_as_claude(&answer);
+        }
         Ok(())
     }
 }
