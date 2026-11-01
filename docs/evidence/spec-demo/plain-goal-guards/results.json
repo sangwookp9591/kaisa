@@ -1,0 +1,6 @@
+{
+  "exit-zero": {
+    "exit": 3,
+    "result": "blocked"
+  }
+}

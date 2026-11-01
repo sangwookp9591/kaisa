@@ -130,7 +130,8 @@ fn is_check_definition(path: &str) -> bool {
     let directories = &parts[..parts.len() - 1];
     // Cargo's legacy extension-less config (`.cargo/config`) is read next to `config.toml`.
     // `config.yml` only names a pipeline inside `.circleci/`; elsewhere it is ordinary data.
-    (file == "config" && directories.last() == Some(&".cargo"))
+    (file.starts_with("config") && directories.last() == Some(&".cargo"))
+        || file.starts_with("rust-toolchain")
         || CI_CONFIG_FILES.contains(&file)
         || (file == "config.yml" && directories.last() == Some(&".circleci"))
         || directories

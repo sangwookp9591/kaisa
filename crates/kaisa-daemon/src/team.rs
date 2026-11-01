@@ -137,9 +137,10 @@ fn review_check_receipts(candidate: &Candidate, evidence: &[Evidence]) -> String
             None => "deadline exceeded".to_owned(),
         };
         text.push_str(&format!(
-            "command (argv): {}\nexit: {exit}\nconfined: {}\n",
+            "command (argv): {}\nexit: {exit}\nconfined: {}\nvalidation: {}\n",
             serde_json::to_string(&command).expect("string argv"),
-            piece.confined
+            piece.confined,
+            piece.validation_label()
         ));
         if let Some(reason) = piece.bounded_failure_reason() {
             text.push_str(&format!("invalid evidence: {}\n", safe_reason(&reason)));
@@ -524,7 +525,7 @@ fn run_verified_goal_inner(
                 &candidate.tree,
                 json!({"candidate_tree": piece.candidate_tree, "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                     "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
-                    "exit": exit, "output_digest": piece.output_digest,
+                    "exit": exit, "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(),
                     "confined": piece.confined, "definitions_changed": piece.definitions_changed,
                     "weakened_tests": piece.weakened_tests}),
             )?;
@@ -631,7 +632,7 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                findings = revision_findings(&reasons);
+                findings = revision_feedback(&reasons, &evidence);
                 continue;
             }
         }
@@ -682,7 +683,7 @@ fn run_verified_goal_inner(
                     budget.used(),
                 )?;
                 base = candidate.commit.clone();
-                findings = revision_findings(&reasons);
+                findings = revision_feedback(&reasons, &evidence);
             }
             other => {
                 return finish(
@@ -696,6 +697,26 @@ fn run_verified_goal_inner(
             }
         }
     }
+}
+
+/// Carry the deterministic harness failure into the next developer's context pack.
+fn revision_feedback(
+    reasons: &[crate::gate::RevisionReason],
+    evidence: &[Evidence],
+) -> Vec<String> {
+    let mut findings = revision_findings(reasons);
+    findings.extend(
+        evidence
+            .iter()
+            .filter(|piece| piece.test_evidence == Some(false))
+            .map(|piece| {
+                format!(
+                    "failing check: `{}`: no positive test evidence",
+                    piece.check.join(" ")
+                )
+            }),
+    );
+    findings
 }
 
 fn finish(
@@ -757,7 +778,7 @@ fn finish(
             .map_err(at("learning from delivery"))?;
         }
     }
-    let weakened_tests = candidate
+    let mut weakened_tests = candidate
         .as_ref()
         .map(|candidate| {
             kaisa_workspace::weakened_tests(request.repository, &original_base.commit, candidate)
@@ -765,6 +786,13 @@ fn finish(
         .transpose()
         .map_err(at("reading final test weakening"))?
         .unwrap_or_default();
+    if let Some(candidate) = &candidate {
+        weakened_tests.extend(crate::qa::qa_influencing_findings(
+            request.repository,
+            &original_base.commit,
+            candidate,
+        )?);
+    }
     let advisories = candidate
         .as_ref()
         .and_then(|candidate| {
@@ -977,7 +1005,7 @@ pub(crate) fn verify_integration(
                 "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                 "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
                 "exit": match piece.exit { Some(ProcessExit::Code(code)) => json!({"code":code}), Some(ProcessExit::Terminated) => json!({"terminated":true}), None => json!({"deadline_exceeded":true}) },
-                "passed": piece.passed(), "output_digest": piece.output_digest,
+                "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(),
                 "confined": piece.confined, "definitions_changed":piece.definitions_changed, "weakened_tests":piece.weakened_tests}),
         )?;
     }
@@ -1045,6 +1073,7 @@ mod tests {
             check: vec!["actual-check".to_owned()],
             exit: Some(kaisa_sys::ProcessExit::Code(1)),
             failure_reason: None,
+            test_evidence: None,
             output_digest: String::new(),
             output_tail: FORGED_OUTPUT.to_owned(),
             confined: false,

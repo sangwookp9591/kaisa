@@ -1459,7 +1459,7 @@ fn git_output(repository: &Path, args: &[&str]) -> io::Result<String> {
     String::from_utf8(output.stdout).map_err(io::Error::other)
 }
 
-fn qa_influencing_findings(
+pub(crate) fn qa_influencing_findings(
     repository: &Path,
     base: &str,
     candidate: &Candidate,
@@ -1646,67 +1646,259 @@ fn node_test_names(source: &str) -> Result<Vec<String>, GoalError> {
 }
 
 fn positive_test_evidence(run: &CapturedRun, expected: &[String], toolchain: &QaToolchain) -> bool {
-    if expected.is_empty() || run.truncated {
+    let harness = match toolchain {
+        QaToolchain::Rust { .. } => TestHarness::Libtest,
+        QaToolchain::Node { .. } => TestHarness::Tap,
+    };
+    harness_test_evidence(run, Some(expected), harness)
+}
+
+/// Harness formats shared by private QA and ordinary trusted checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestHarness {
+    Libtest,
+    Tap,
+    Nextest,
+}
+
+/// Positive completion evidence; private QA additionally pins the exact expected name set.
+/// Ordinary Cargo checks can contain several independently completed test binaries.
+pub(crate) fn harness_test_evidence(
+    run: &CapturedRun,
+    expected: Option<&[String]>,
+    harness: TestHarness,
+) -> bool {
+    if run.truncated || expected.is_some_and(<[String]>::is_empty) {
         return false;
     }
     let output = String::from_utf8_lossy(&run.output);
-    let mut observed = Vec::new();
-    match toolchain {
-        QaToolchain::Rust { .. } => {
-            for line in output.lines() {
-                if let Some(name) = line
-                    .strip_prefix("test ")
-                    .and_then(|line| line.strip_suffix(" ... ok"))
-                {
-                    observed.push(name.to_owned());
-                }
-            }
-            let summary = format!(
-                "test result: ok. {} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;",
-                expected.len()
-            );
-            if output
-                .lines()
-                .filter(|line| line.starts_with("test result: "))
-                .count()
-                != 1
-                || output
-                    .lines()
-                    .filter(|line| line.starts_with(&summary))
-                    .count()
-                    != 1
-            {
-                return false;
-            }
-        }
-        QaToolchain::Node { .. } => {
-            for line in output.lines() {
-                if let Some(rest) = line
-                    .strip_prefix("ok ")
-                    .and_then(|line| line.split_once(" - ").map(|(_, name)| name))
-                {
-                    observed.push(rest.to_owned());
-                }
-            }
-            for required in [
-                format!("1..{}", expected.len()),
-                format!("# tests {}", expected.len()),
-                format!("# pass {}", expected.len()),
-                "# fail 0".into(),
-                "# cancelled 0".into(),
-                "# skipped 0".into(),
-                "# todo 0".into(),
-            ] {
-                if output.lines().filter(|line| *line == required).count() != 1 {
-                    return false;
-                }
-            }
-        }
+    let complete = match harness {
+        TestHarness::Libtest => completed_libtest(&output, expected.is_some()),
+        TestHarness::Tap => completed_tap(&output, expected.is_some()),
+        TestHarness::Nextest => completed_nextest(&output),
+    };
+    if !complete {
+        return false;
     }
+    let Some(expected) = expected else {
+        return true;
+    };
+    let mut observed = output
+        .lines()
+        .filter_map(|line| match harness {
+            TestHarness::Libtest => line
+                .strip_prefix("test ")
+                .and_then(|line| line.strip_suffix(" ... ok")),
+            TestHarness::Tap => line
+                .strip_prefix("ok ")
+                .and_then(|line| line.split_once(" - ").map(|(_, name)| name)),
+            TestHarness::Nextest => None,
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     observed.sort();
     let mut expected = expected.to_vec();
     expected.sort();
     observed == expected
+}
+
+fn completed_libtest(output: &str, private: bool) -> bool {
+    let mut running = None;
+    let mut summaries = 0;
+    let mut passed_total = 0_u64;
+    let mut named_passes = 0_u64;
+    for line in output.lines() {
+        if let Some(header) = line.strip_prefix("running ") {
+            if running.is_some() {
+                return false;
+            }
+            let Some(count) = header
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+            else {
+                return false;
+            };
+            running = Some(count);
+            named_passes = 0;
+        }
+        if line.starts_with("test ") && line.ends_with(" ... ok") {
+            named_passes += 1;
+        }
+        if let Some(summary) = line.strip_prefix("test result: ") {
+            let Some(summary) = summary.strip_prefix("ok. ") else {
+                return false;
+            };
+            let mut fields = summary.split(';');
+            let mut counts = Vec::new();
+            for suffix in [
+                " passed",
+                " failed",
+                " ignored",
+                " measured",
+                " filtered out",
+            ] {
+                let Some(count) = fields
+                    .next()
+                    .and_then(|f| f.trim().strip_suffix(suffix))
+                    .and_then(|n| n.parse::<u64>().ok())
+                else {
+                    return false;
+                };
+                counts.push(count);
+            }
+            let [passed, failed, ignored, measured, filtered] = counts.as_slice() else {
+                return false;
+            };
+            let Some(executed) = passed
+                .checked_add(*failed)
+                .and_then(|n| n.checked_add(*ignored))
+                .and_then(|n| n.checked_add(*measured))
+            else {
+                return false;
+            };
+            if *failed != 0
+                || (private && (*ignored != 0 || *measured != 0 || *filtered != 0))
+                || named_passes > *passed
+            {
+                return false;
+            }
+            match running.take() {
+                Some(count) if count == executed => {}
+                None if private => {}
+                _ => return false,
+            }
+            let Some(total) = passed_total.checked_add(*passed) else {
+                return false;
+            };
+            passed_total = total;
+            summaries += 1;
+            named_passes = 0;
+        }
+    }
+    running.is_none() && named_passes == 0 && passed_total > 0 && (!private || summaries == 1)
+}
+
+fn completed_tap(output: &str, private: bool) -> bool {
+    let lines = output.lines().collect::<Vec<_>>();
+    let count = |prefix: &str| {
+        let mut values = lines.iter().filter_map(|line| line.strip_prefix(prefix));
+        let value = values.next()?.parse::<u64>().ok()?;
+        values.next().is_none().then_some(value)
+    };
+    let (
+        Some(tests),
+        Some(passed),
+        Some(failed),
+        Some(cancelled),
+        Some(skipped),
+        Some(todo),
+        Some(plan),
+    ) = (
+        count("# tests "),
+        count("# pass "),
+        count("# fail "),
+        count("# cancelled "),
+        count("# skipped "),
+        count("# todo "),
+        count("1.."),
+    )
+    else {
+        return false;
+    };
+    let suites = count("# suites ").unwrap_or(0);
+    let mut top_level = 0_u64;
+    let mut observed = 0_u64;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("not ok ")
+            && !trimmed.contains("# TODO")
+            && !trimmed.contains("# SKIP")
+        {
+            return false;
+        }
+        if let Some(result) = trimmed
+            .strip_prefix("ok ")
+            .or_else(|| trimmed.strip_prefix("not ok "))
+        {
+            let Some((number, name)) = result.split_once(" - ") else {
+                return false;
+            };
+            if number.parse::<u64>().is_err() {
+                return false;
+            }
+            // Node reports a file wrapper as a passing test when its process exits early.
+            // A wrapper supplies no named test completion evidence.
+            let name = name.split(" #").next().unwrap_or(name);
+            if !private
+                && [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            {
+                return false;
+            }
+            observed += 1;
+            if trimmed == *line {
+                top_level += 1;
+            }
+        }
+    }
+    passed > 0
+        && failed == 0
+        && cancelled == 0
+        && tests.checked_add(suites) == Some(observed)
+        && passed
+            .checked_add(skipped)
+            .and_then(|n| n.checked_add(todo))
+            == Some(tests)
+        && top_level == plan
+        && (!private || (skipped == 0 && todo == 0 && suites == 0))
+}
+
+fn completed_nextest(output: &str) -> bool {
+    let mut summaries = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Summary "));
+    let Some(summary) = summaries
+        .next()
+        .and_then(|s| s.split_once(']').map(|(_, rest)| rest.trim()))
+    else {
+        return false;
+    };
+    if summaries.next().is_some() {
+        return false;
+    }
+    let Some((run, results)) = summary.split_once(" run: ") else {
+        return false;
+    };
+    let Some(run) = run
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let mut passed = None;
+    for result in results.split(',') {
+        let mut words = result.split_whitespace();
+        let (Some(count), Some(status)) = (
+            words.next().and_then(|n| n.parse::<u64>().ok()),
+            words.next(),
+        ) else {
+            return false;
+        };
+        match status {
+            "passed" if passed.is_none() => passed = Some(count),
+            "skipped" => {}
+            _ if count == 0 => {}
+            _ => return false,
+        }
+    }
+    let named = output
+        .lines()
+        .filter(|line| line.trim_start().starts_with("PASS "))
+        .count();
+    passed.is_some_and(|passed| passed > 0 && passed == run && u64::try_from(named) == Ok(passed))
 }
 
 fn normalized(text: &str) -> String {
@@ -3337,5 +3529,80 @@ mod tests {
             ),
             "a Node file wrapper cannot substitute for the expected test name"
         );
+    }
+    #[test]
+    fn ordinary_harness_evidence_rejects_missing_inconsistent_and_incomplete_summaries() {
+        use super::TestHarness;
+        let completed = "running 1 test\ntest acceptance ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let empty = "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let tap = "TAP version 13\nok 1 - acceptance\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+        let nextest =
+            "PASS [0.001s] fixture acceptance\nSummary [0.001s] 1 test run: 1 passed, 0 skipped\n";
+        let cases = [
+            (TestHarness::Libtest, completed.to_owned(), true),
+            (TestHarness::Libtest, format!("{completed}{empty}"), true),
+            (TestHarness::Libtest, empty.to_owned(), false),
+            (
+                TestHarness::Libtest,
+                format!("{completed}running 1 test\n{empty}"),
+                false,
+            ),
+            (
+                TestHarness::Libtest,
+                completed.replace("1 passed", "0 passed"),
+                false,
+            ),
+            (
+                TestHarness::Libtest,
+                format!(
+                    "{completed}test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
+                ),
+                false,
+            ),
+            (TestHarness::Tap, tap.to_owned(), true),
+            (
+                TestHarness::Tap,
+                tap.replace("acceptance", "/private/test.mjs"),
+                false,
+            ),
+            (
+                TestHarness::Tap,
+                tap.replace("# tests 1", "# tests 2"),
+                false,
+            ),
+            (TestHarness::Tap, format!("{tap}# pass 1\n"), false),
+            (TestHarness::Nextest, nextest.to_owned(), true),
+            (
+                TestHarness::Nextest,
+                nextest.replace("1 passed", "0 passed"),
+                false,
+            ),
+            (
+                TestHarness::Nextest,
+                nextest.replace("0 skipped", "1 failed"),
+                false,
+            ),
+            (TestHarness::Nextest, format!("{nextest}{nextest}"), false),
+        ];
+        for (harness, output, passes) in cases {
+            let run = kaisa_sys::CapturedRun {
+                output: output.into_bytes(),
+                exit: Some(ProcessExit::Code(0)),
+                truncated: false,
+            };
+            assert_eq!(
+                super::harness_test_evidence(&run, None, harness),
+                passes,
+                "a {harness:?} check needs positive, consistent completion evidence: {run:?}"
+            );
+            let truncated = kaisa_sys::CapturedRun {
+                truncated: true,
+                ..run
+            };
+            assert!(
+                !super::harness_test_evidence(&truncated, None, harness),
+                "truncation cannot establish a complete harness summary"
+            );
+        }
     }
 }

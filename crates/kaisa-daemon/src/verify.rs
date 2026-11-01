@@ -36,6 +36,8 @@ pub struct Evidence {
     pub exit: Option<ProcessExit>,
     /// A bounded, Kaisa-authored reason the check's evidence is invalid, regardless of exit.
     pub failure_reason: Option<String>,
+    /// Recognised test harness completion; None means exit-code only.
+    pub test_evidence: Option<bool>,
     /// The digest of its output, so the evidence can be matched to a stored transcript.
     pub output_digest: String,
     /// Bounded captured output tail, scrubbed before it can enter a recorded pack.
@@ -50,10 +52,22 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// True if the check exited successfully.
+    /// True if the check exited successfully with the required harness evidence.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.failure_reason.is_none() && self.exit == Some(ProcessExit::Code(0))
+        self.failure_reason.is_none()
+            && self.test_evidence != Some(false)
+            && self.exit == Some(ProcessExit::Code(0))
+    }
+
+    /// Human-readable validation boundary for the receipt and revision feedback.
+    #[must_use]
+    pub fn validation_label(&self) -> &'static str {
+        match self.test_evidence {
+            None => "exit-code only",
+            Some(true) => "positive test evidence",
+            Some(false) => "no positive test evidence",
+        }
     }
 
     /// The reason at the delivery boundary, capped even for programmatically built evidence.
@@ -104,8 +118,11 @@ pub fn run_trusted_checks(
     }
     definitions_changed.sort();
 
-    let weakened_tests = kaisa_workspace::weakened_tests(repository, base, candidate)
+    let mut weakened_tests = kaisa_workspace::weakened_tests(repository, base, candidate)
         .map_err(at("comparing candidate tests"))?;
+    weakened_tests.extend(crate::qa::qa_influencing_findings(
+        repository, base, candidate,
+    )?);
     let place: PathBuf = state_directory
         .join("checks")
         .join(format!("check_{}", fresh_suffix()));
@@ -154,6 +171,8 @@ pub fn run_trusted_checks(
             check: check.argv.clone(),
             exit: run.exit,
             failure_reason: source_changed.then(|| CHANGED_CHECK_SOURCES.to_owned()),
+            test_evidence: trusted_test_harness(repository, base, check)?
+                .map(|harness| crate::qa::harness_test_evidence(&run, None, harness)),
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             output_tail: review_output_tail(&run),
             confined: sandbox.is_confined(),
@@ -166,6 +185,95 @@ pub fn run_trusted_checks(
         }
     }
     Ok(evidence)
+}
+
+/// Classify from trusted argv and the base package script, never candidate package metadata.
+fn trusted_test_harness(
+    repository: &Path,
+    base: &str,
+    check: &DetectedCommand,
+) -> Result<Option<crate::qa::TestHarness>, GoalError> {
+    use crate::qa::TestHarness;
+    fn direct(argv: &[String]) -> Option<TestHarness> {
+        let program = Path::new(argv.first()?).file_stem()?.to_str()?;
+        let args = &argv[1..];
+        if program == "node"
+            && args
+                .iter()
+                .any(|arg| arg == "--test" || arg.starts_with("--test="))
+        {
+            return Some(TestHarness::Tap);
+        }
+        if program == "cargo" {
+            let mut args = args.iter();
+            while let Some(arg) = args.next() {
+                if [
+                    "--color",
+                    "--config",
+                    "--manifest-path",
+                    "--target-dir",
+                    "-C",
+                    "-Z",
+                ]
+                .contains(&arg.as_str())
+                {
+                    args.next();
+                } else if arg.starts_with('-') || arg.starts_with('+') {
+                    continue;
+                } else {
+                    return match arg.as_str() {
+                        "test" | "t" => Some(TestHarness::Libtest),
+                        "nextest" if args.next().is_some_and(|arg| arg == "run") => {
+                            Some(TestHarness::Nextest)
+                        }
+                        _ => None,
+                    };
+                }
+            }
+        }
+        None
+    }
+    if let Some(harness) = direct(&check.argv) {
+        return Ok(Some(harness));
+    }
+    let Some(program) = check
+        .argv
+        .first()
+        .and_then(|p| Path::new(p).file_stem())
+        .and_then(|p| p.to_str())
+    else {
+        return Ok(None);
+    };
+    if !matches!(program, "npm" | "pnpm" | "yarn" | "bun") {
+        return Ok(None);
+    }
+    let script = match check.argv.get(1).map(String::as_str) {
+        Some("run" | "run-script") => check.argv.get(2),
+        Some(_) => check.argv.get(1),
+        None => None,
+    };
+    let Some(script) = script else {
+        return Ok(None);
+    };
+    let manifest = check.directory.as_ref().map_or_else(
+        || "package.json".to_owned(),
+        |dir| format!("{}/package.json", dir.as_str()),
+    );
+    let output = Command::new("git")
+        .args(["show", &format!("{base}:{manifest}")])
+        .current_dir(repository)
+        .output()
+        .map_err(at("reading trusted test runner"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let package: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    Ok(package
+        .get("scripts")
+        .and_then(|scripts| scripts.get(script))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|body| shell_words::split(body).ok())
+        .and_then(|argv| direct(&argv)))
 }
 
 /// Resolve only trusted argv and base-revision package scripts. Candidate text never decides

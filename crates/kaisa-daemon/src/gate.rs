@@ -162,6 +162,7 @@ mod tests {
     fn evidence_on(tree: &str, exit: ProcessExit) -> Evidence {
         Evidence {
             failure_reason: None,
+            test_evidence: None,
             candidate_tree: tree.to_owned(),
             check: vec!["cargo".to_owned(), "test".to_owned()],
             exit: Some(exit),

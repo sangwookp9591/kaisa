@@ -92,8 +92,13 @@ acceptance and adversarial tests, review test quality and the candidate, and pub
 only after the orchestrator's final-tree gate passes. Provisional approval requires
 `kaisa policy set allow_provisional_spec true` and
 `kaisa spec approve <id> --provisional`; it never counts as human approval.
-Plain `kaisa "<goal>"` has no private QA and can still deliver the recorded
-premature-`exit(0)` candidate; that attack is blocked by `build --spec`.
+Plain `kaisa "<goal>"` has no private QA. Recognised Cargo/libtest, nextest and
+Node TAP test checks require positive completion evidence: at least one executed
+test, no failures and consistent summaries. The recorded premature-`exit(0)`
+candidate is blocked on this path too. Added library termination calls and
+QA-influencing configuration changes stop for a person; other commands retain
+exit-code semantics with receipts labelled `exit-code only`. These are bounded
+lexical and in-process checks, not protection against arbitrary output forgery.
 See the [offline fake-agent demo](examples/spec-demo/),
 [recorded results](docs/evidence/spec-demo/traceability.md), and
 [platform and trust limits](docs/evidence/limitations.md).
