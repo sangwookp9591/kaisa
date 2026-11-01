@@ -15,6 +15,7 @@ mod revision;
 mod route;
 mod sandbox;
 mod team;
+mod test_review;
 mod verify;
 
 pub use gate::{Delivery, RevisionReason, decide_delivery};
@@ -33,5 +34,11 @@ pub use route::{ROUTE_EFFORT, RouteDecision, decide_route, record_route};
 pub use sandbox::expected_missing as expected_sandbox_missing;
 pub use team::{
     CANDIDATE_TREE_LABEL, FirstPass, VerifiedOutcome, VerifiedRequest, run_verified_goal,
+};
+pub use test_review::{
+    Coverage, CriterionAssessment, LabelledTest, REVIEW_FENCE, REVIEW_SCHEMA, ReviewIssue,
+    TestOrigin, TestReview, TestReviewError, TestReviewInput, TestReviewOutcome, TestReviewRequest,
+    parse_test_review, prepare_review_repository, review_prompt, run_test_review,
+    test_review_in_answer,
 };
 pub use verify::{Evidence, run_trusted_checks};
