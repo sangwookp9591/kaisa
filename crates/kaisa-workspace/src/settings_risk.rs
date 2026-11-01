@@ -265,7 +265,14 @@ fn json_rules(contents: &str, mcp: bool) -> io::Result<Vec<(RiskRule, String)>> 
                 RiskRule::ClaudeAutoApprovesMcpServers,
                 "enableAllProjectMcpServers: true".to_owned(),
             )),
-            "enabledMcpjsonServers" if matches!(value, Json::Array(servers) if !servers.is_empty()) =>
+            // Approving only the server named `kaisa` is what Claude Code records when a person
+            // answers "Use this MCP server" for Kaisa's own entry. It widens nothing by itself: the
+            // `.mcp.json` entry it approves is scanned on its own, and anything there other than
+            // Kaisa's own server is still flagged. Any other name is an approval of a repository
+            // server.
+            "enabledMcpjsonServers"
+                if matches!(value, Json::Array(servers)
+                    if servers.iter().any(|server| server.string() != Some("kaisa"))) =>
             {
                 rules.push((
                     RiskRule::ClaudeAutoApprovesMcpServers,
@@ -309,8 +316,9 @@ fn json_rules(contents: &str, mcp: bool) -> io::Result<Vec<(RiskRule, String)>> 
 /// results (it has no tool to merge, approve or publish). It adds no authority, so it is not
 /// a repository server in the sense of [`RiskRule::RepositoryMcpServer`].
 ///
-/// Anything else is still flagged: a different name, command, extra arguments, an `env`, or any
-/// other key. The command is the bare name `kaisa`, which the agent's launcher resolves on the
+/// The `"type": "stdio"` and empty `"env": {}` that `claude mcp add` writes are accepted too.
+/// Anything else is still flagged: a different name, command, extra arguments, a non-empty `env`,
+/// another `type`, a repeated key, or any other key. The command is the bare name `kaisa`, which the agent's launcher resolves on the
 /// person's `PATH`; on Windows a launcher may also look in the working directory, where a
 /// repository could plant its own `kaisa.exe`, so there nothing is exempt.
 fn is_kaisas_own_server(name: &str, server: &Json) -> bool {
@@ -320,7 +328,21 @@ fn is_kaisas_own_server(name: &str, server: &Json) -> bool {
     let entries = server.entries();
     let command = entries.iter().find(|(key, _)| key == "command");
     let args = entries.iter().find(|(key, _)| key == "args");
-    entries.len() == 2
+    // `claude mcp add --scope project kaisa -- kaisa mcp serve` also writes `"type": "stdio"` and
+    // an empty `"env": {}`. Both say what the bare entry already means and add no authority, so
+    // they are accepted; any other key, another type or a non-empty env is not.
+    let neutral = |(key, value): &&(String, Json)| match key.as_str() {
+        "command" | "args" => true,
+        "type" => value.string() == Some("stdio"),
+        "env" => matches!(value, Json::Object(variables) if variables.is_empty()),
+        _ => false,
+    };
+    let names_unique = entries
+        .iter()
+        .enumerate()
+        .all(|(index, (key, _))| entries[..index].iter().all(|(earlier, _)| earlier != key));
+    names_unique
+        && entries.iter().all(|entry| neutral(&entry))
         && command.and_then(|(_, value)| value.string()) == Some("kaisa")
         && matches!(args, Some((_, Json::Array(items)))
             if items.len() == 2
@@ -626,6 +648,39 @@ mod tests {
     }
 
     #[test]
+    fn approving_only_kaisas_own_server_is_not_flagged_but_any_other_name_is() {
+        let repository = a_repository_with_one_commit_on_main();
+        write_settings(
+            repository.path(),
+            ".claude/settings.local.json",
+            r#"{"enabledMcpjsonServers":["kaisa"]}"#,
+            "approve kaisa",
+        );
+        assert!(
+            scan_settings(repository.path())
+                .expect("settings can be scanned")
+                .is_empty(),
+            "Claude Code records this when a person approves Kaisa's own project server"
+        );
+        let repository = a_repository_with_one_commit_on_main();
+        write_settings(
+            repository.path(),
+            ".claude/settings.local.json",
+            r#"{"enabledMcpjsonServers":["kaisa","repository-tools"]}"#,
+            "approve kaisa and another",
+        );
+        assert_eq!(
+            scan_settings(repository.path())
+                .expect("settings can be scanned")
+                .iter()
+                .map(|finding| finding.rule)
+                .collect::<Vec<_>>(),
+            vec![RiskRule::ClaudeAutoApprovesMcpServers],
+            "approving any other repository server is still flagged"
+        );
+    }
+
+    #[test]
     fn claude_settings_that_decline_repository_mcp_servers_are_not_flagged() {
         let repository = a_repository_with_one_commit_on_main();
         write_settings(
@@ -672,7 +727,24 @@ mod tests {
     #[test]
     fn kaisas_own_mcp_server_entry_is_not_flagged_but_nothing_like_it_is() {
         let own = r#"{"command":"kaisa","args":["mcp","serve"]}"#;
+        let written_by_claude_mcp_add =
+            r#"{"type":"stdio","command":"kaisa","args":["mcp","serve"],"env":{}}"#;
         let looks_alike = [
+            mcp_with(
+                "kaisa",
+                r#"{"type":"http","command":"kaisa","args":["mcp","serve"]}"#,
+                "",
+            ),
+            mcp_with(
+                "kaisa",
+                r#"{"command":"kaisa","args":["mcp","serve"],"cwd":"."}"#,
+                "",
+            ),
+            mcp_with(
+                "kaisa",
+                r#"{"command":"kaisa","command":"evil","args":["mcp","serve"]}"#,
+                "",
+            ),
             mcp_with(
                 "kaisa",
                 r#"{"command":"./kaisa","args":["mcp","serve"]}"#,
@@ -705,6 +777,19 @@ mod tests {
                 .expect("settings can be scanned")
                 .is_empty(),
             "the entry Kaisa itself writes adds no authority"
+        );
+        let repository = a_repository_with_one_commit_on_main();
+        write_settings(
+            repository.path(),
+            ".mcp.json",
+            &mcp_with("kaisa", written_by_claude_mcp_add, ""),
+            "claude-mcp-add",
+        );
+        assert!(
+            scan_settings(repository.path())
+                .expect("settings can be scanned")
+                .is_empty(),
+            "the same entry as `claude mcp add --scope project` writes it adds no authority either"
         );
         for text in looks_alike {
             let repository = a_repository_with_one_commit_on_main();

@@ -340,9 +340,13 @@ the directory Claude Code was started in and must be a git repository with a com
 The project slash command is `.claude/commands/kaisa.md`: `kaisa init` adds it with the rest of the
 project setup, prints the `claude mcp add` line above, and does not overwrite a file you wrote. A team that wants the server in the
 repository can instead commit `{"mcpServers":{"kaisa":{"command":"kaisa","args":["mcp","serve"]}}}`
-as `.mcp.json` (`claude_code_project_server`); Kaisa's settings scanner accepts exactly that entry on
-macOS and Linux and still flags any other server (on Windows every repository server is flagged).
-Claude Code asks you to approve a project server before it uses it.
+as `.mcp.json` (`claude_code_project_server`), or let Claude Code write it with
+`claude mcp add --scope project kaisa -- kaisa mcp serve` (which adds `"type": "stdio"` and an empty
+`"env"`). Kaisa's settings scanner accepts exactly that entry, in either form, on macOS and Linux and
+still flags any other server (on Windows every repository server is flagged). Claude Code asks you to
+approve a project server before it uses it; approving only `kaisa` records
+`"enabledMcpjsonServers": ["kaisa"]` in `.claude/settings.local.json`, which Kaisa also accepts,
+while approving any other server name is still flagged.
 
 <a id="how-a-verified-run-works"></a>
 
