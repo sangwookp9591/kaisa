@@ -11,6 +11,10 @@
 //! (or `--fake-write-next <path prefix>`)
 //! (or `--fake-review-require <path>`: act as a reviewer that approves only if the path exists,
 //! answering as `--fake-review-format raw|claude|claude-prose` says)
+//! (or `--fake-test-review-answer <file>`: act as the domain-test reviewer: print that file as the
+//! answer, after `--fake-dump-context <file>` saved the pack it was given and `--fake-try-write
+//! <path>` tried to write that path through the bridge, recording `refused` or `written` in
+//! `--fake-write-outcome <file>`)
 //! [--fake-content <text>: what `--fake-write` writes, instead of the start of the pack]
 //! [--try-direct-connect <ip:port>] [--expect-proxy-refuses <host>] [--crash-after-write]
 //! [other flags]`
@@ -166,6 +170,74 @@ fn review(required: &str, format: ReviewFormat) -> Result<(), String> {
     Ok(())
 }
 
+/// Acts as the domain-test reviewer: saves the pack it was given, tries one write through the
+/// bridge (a read-only attempt must be refused), and answers with the contents of `answer_file`.
+fn test_reviewer(args: &[String], config_path: &str, answer_file: &str) -> Result<(), String> {
+    let mut first_line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut first_line)
+        .map_err(|error| error.to_string())?;
+    let first: Value = serde_json::from_str(&first_line).map_err(|error| error.to_string())?;
+    let pack: &str = first
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(path) = flag(args, "--fake-dump-context") {
+        std::fs::write(path, pack).map_err(|error| error.to_string())?;
+    }
+    if let Some(target) = flag(args, "--fake-try-write") {
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let server: &Value = config
+            .pointer("/mcpServers/kaisa")
+            .ok_or("the MCP config names no `kaisa` server")?;
+        let command: &str = server["command"].as_str().ok_or("no bridge command")?;
+        let bridge_args: Vec<&str> = server["args"]
+            .as_array()
+            .map(|parts| parts.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut bridge = Command::new(command)
+            .args(&bridge_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("cannot start the bridge: {error}"))?;
+        let mut to_bridge = bridge.stdin.take().ok_or("no bridge stdin")?;
+        let mut from_bridge = BufReader::new(bridge.stdout.take().ok_or("no bridge stdout")?);
+        for request in [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                   "params": {"name": "fs_write", "arguments": {"path": target, "content": "written by the reviewer"}}}),
+        ] {
+            writeln!(to_bridge, "{request}").map_err(|error| error.to_string())?;
+        }
+        drop(to_bridge);
+        let mut refused = true;
+        for _ in 0..2 {
+            let mut line = String::new();
+            from_bridge
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?;
+            let response: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            if response["id"] == 2 {
+                refused =
+                    response.pointer("/result/isError").and_then(Value::as_bool) != Some(false);
+            }
+        }
+        let _ = bridge.wait();
+        if let Some(outcome) = flag(args, "--fake-write-outcome") {
+            std::fs::write(outcome, if refused { "refused" } else { "written" })
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let answer = std::fs::read_to_string(answer_file).map_err(|error| error.to_string())?;
+    println!("{answer}");
+    Ok(())
+}
+
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|argument| argument == name)
 }
@@ -210,6 +282,9 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string());
     }
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
+    if let Some(answer) = flag(&args, "--fake-test-review-answer") {
+        return test_reviewer(&args, &config_path, &answer);
+    }
     if let Some(required) = flag(&args, "--fake-review-require") {
         let format = ReviewFormat::from_flag(flag(&args, "--fake-review-format").as_deref())?;
         return review(&required, format);

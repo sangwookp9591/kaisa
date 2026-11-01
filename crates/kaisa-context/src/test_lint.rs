@@ -426,6 +426,9 @@ struct TestCase {
     line: u32,
     language: TestLanguage,
     should_panic: bool,
+    /// Subtests declared inside this case; they are cases of their own and are blanked out of
+    /// this case's body.
+    has_children: bool,
     /// Body text and its masked twin (same length), plus the file offset of the body's start.
     body: String,
     masked: String,
@@ -504,6 +507,7 @@ fn discover_rust(file: &SourceFile) -> Vec<TestCase> {
             path: file.path.clone(),
             language: TestLanguage::Rust,
             should_panic: heads.iter().any(|head| head == "should_panic"),
+            has_children: false,
             body: file.source[open + 1..close].to_owned(),
             masked: masked[open + 1..close].to_owned(),
             file_source: file.source.clone(),
@@ -516,11 +520,42 @@ fn discover_rust(file: &SourceFile) -> Vec<TestCase> {
 
 fn discover_node(file: &SourceFile) -> Vec<TestCase> {
     let masked = mask(&file.source, TestLanguage::Node);
-    let m = masked.as_bytes();
     let mut cases = Vec::new();
-    let mut i = 0;
-    while i < m.len() {
-        if !is_ident_byte(m[i]) || (i > 0 && (is_ident_byte(m[i - 1]) || m[i - 1] == b'.')) {
+    node_cases_within(file, &masked, 0, masked.len(), false, &mut cases);
+    cases
+}
+
+/// Blanks `ranges` (relative to the text) with spaces, keeping newlines and every offset.
+fn blank_ranges(text: &str, ranges: &[(usize, usize)]) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    for (from, to) in ranges {
+        for byte in &mut bytes[(*from).min(text.len())..(*to).min(text.len())] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| " ".repeat(text.len()))
+}
+
+/// Appends the test cases declared in `from..to` of the masked text and returns the byte range of
+/// each outermost call found. Cases inside a case (`t.test(…)`, `it(…)` in a test) are cases of
+/// their own, appended after their parent, and are blanked out of the parent's body so the parent
+/// is judged on what it asserts itself.
+fn node_cases_within(
+    file: &SourceFile,
+    masked: &str,
+    from: usize,
+    to: usize,
+    nested: bool,
+    cases: &mut Vec<TestCase>,
+) -> Vec<(usize, usize)> {
+    let m = masked.as_bytes();
+    let mut found = Vec::new();
+    let mut i = from;
+    while i < to {
+        let after_dot = i > 0 && m[i - 1] == b'.';
+        if !is_ident_byte(m[i]) || (i > 0 && is_ident_byte(m[i - 1])) || (after_dot && !nested) {
             i += 1;
             continue;
         }
@@ -555,7 +590,8 @@ fn discover_node(file: &SourceFile) -> Vec<TestCase> {
         while arg < close && m[arg].is_ascii_whitespace() {
             arg += 1;
         }
-        let (name, body_from) = if matches!(m.get(arg), Some(b'\'' | b'"' | b'`')) {
+        let named = matches!(m.get(arg), Some(b'\'' | b'"' | b'`'));
+        let (name, body_from) = if named {
             let quote = char::from(m[arg]);
             let end = masked[arg + 1..close]
                 .find(quote)
@@ -564,20 +600,39 @@ fn discover_node(file: &SourceFile) -> Vec<TestCase> {
         } else {
             (String::new(), arg)
         };
+        let body = &masked[body_from..close];
+        // `pattern.test("text")` is a regular expression, not a subtest: a subtest has a body.
+        if after_dot && !(named && (body.contains("=>") || body.contains("function"))) {
+            i = word_end;
+            continue;
+        }
+        let index = cases.len();
         cases.push(TestCase {
             line: line_of(&file.source, i),
             name,
             path: file.path.clone(),
             language: TestLanguage::Node,
             should_panic: false,
+            has_children: false,
             body: file.source[body_from..close].to_owned(),
-            masked: masked[body_from..close].to_owned(),
+            masked: body.to_owned(),
             file_source: file.source.clone(),
             body_offset: body_from,
         });
+        let children = node_cases_within(file, masked, body_from, close, true, cases);
+        if !children.is_empty() {
+            let relative: Vec<(usize, usize)> = children
+                .iter()
+                .map(|(start, end)| (start - body_from, end - body_from))
+                .collect();
+            cases[index].body = blank_ranges(&cases[index].body, &relative);
+            cases[index].masked = blank_ranges(&cases[index].masked, &relative);
+            cases[index].has_children = true;
+        }
+        found.push((i, close + 1));
         i = close + 1;
     }
-    cases
+    found
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -602,13 +657,162 @@ struct Assertions {
     direct: Vec<Assertion>,
     /// Calls to assertion-named helpers; their content is not inspected.
     helper_calls: usize,
-    /// An error pattern anywhere in the case (`is_err`, `unwrap_err`, `catch`).
-    error_pattern: bool,
+    /// An error is asserted without an assertion macro/call of its own: `unwrap_err()` and
+    /// `expect_err()` panic when there is no error; a Node `catch` block that asserts, or an
+    /// `expect(…).rejects` chain. A discarded `is_err()` is not this.
+    error_checked: bool,
+    /// A local helper that asserts an error is called.
+    helper_error: bool,
 }
 
 const COMPARATORS: &[&str] = &["===", "!==", "==", "!=", "<=", ">=", "<", ">"];
 
-fn assertions_of(case: &TestCase) -> Assertions {
+/// Functions declared in the same file whose bodies assert: name → whether they assert an error.
+type LocalHelpers = BTreeMap<String, bool>;
+
+fn word_at(masked: &str, at: usize) -> &str {
+    let end = at
+        + masked.as_bytes()[at..]
+            .iter()
+            .take_while(|byte| is_ident_byte(**byte))
+            .count();
+    &masked[at..end]
+}
+
+/// Body ranges of the functions a file declares, by name: Rust `fn`, Node `function` and
+/// `const name = (…) => { … }`.
+fn function_bodies(masked: &str, language: TestLanguage) -> Vec<(String, usize, usize)> {
+    let m = masked.as_bytes();
+    let mut bodies = Vec::new();
+    let mut i = 0;
+    while i < m.len() {
+        if !is_ident_byte(m[i]) || (i > 0 && is_ident_byte(m[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let word = word_at(masked, i);
+        let word_end = i + word.len();
+        let declares = match language {
+            TestLanguage::Rust => word == "fn",
+            TestLanguage::Node => matches!(word, "function" | "const" | "let" | "var"),
+        };
+        if !declares {
+            i = word_end;
+            continue;
+        }
+        let mut at = word_end;
+        while at < m.len() && (m[at].is_ascii_whitespace() || m[at] == b'*') {
+            at += 1;
+        }
+        let name = word_at(masked, at.min(m.len().saturating_sub(1)));
+        if name.is_empty() || at >= m.len() {
+            i = word_end;
+            continue;
+        }
+        let after_name = at + name.len();
+        let open = if word == "function" || word == "fn" {
+            // Up to the body's `{`, over the parameter list and any return type.
+            let mut scan = after_name;
+            let mut depth = 0_i32;
+            let mut found = None;
+            while scan < m.len() {
+                match m[scan] {
+                    b'(' | b'[' | b'<' => depth += 1,
+                    b')' | b']' | b'>' => depth -= 1,
+                    b'{' if depth <= 0 => {
+                        found = Some(scan);
+                        break;
+                    }
+                    b';' if depth <= 0 => break,
+                    _ => {}
+                }
+                scan += 1;
+            }
+            found
+        } else {
+            // `const name = (…) => {` : the arrow before any statement end.
+            let rest = &masked[after_name..];
+            let statement_end = rest.find(';').unwrap_or(rest.len());
+            rest[..statement_end].find("=>").and_then(|arrow| {
+                let mut scan = after_name + arrow + 2;
+                while scan < m.len() && m[scan].is_ascii_whitespace() {
+                    scan += 1;
+                }
+                (m.get(scan) == Some(&b'{')).then_some(scan)
+            })
+        };
+        if let Some(open) = open
+            && let Some(close) = matching(m, open)
+        {
+            bodies.push((name.to_owned(), open + 1, close));
+        }
+        i = word_end;
+    }
+    bodies
+}
+
+fn local_helpers(file: &SourceFile) -> LocalHelpers {
+    let Some(language) = TestLanguage::of_path(&file.path) else {
+        return LocalHelpers::new();
+    };
+    let masked = mask(&file.source, language);
+    let none = LocalHelpers::new();
+    function_bodies(&masked, language)
+        .into_iter()
+        .filter_map(|(name, from, to)| {
+            let helper = TestCase {
+                name: name.clone(),
+                path: file.path.clone(),
+                line: line_of(&file.source, from),
+                language,
+                should_panic: false,
+                has_children: false,
+                body: file.source[from..to].to_owned(),
+                masked: masked[from..to].to_owned(),
+                file_source: file.source.clone(),
+                body_offset: from,
+            };
+            let asserted = assertions_of(&helper, &none);
+            let asserts = !asserted.direct.is_empty() || asserted.helper_calls > 0;
+            let asserts_error = asserted.direct.iter().any(|a| a.error) || asserted.error_checked;
+            asserts.then_some((name, asserts_error))
+        })
+        .collect()
+}
+
+/// Whether a Node `catch` block (`catch (e) { … }` or `.catch(e => …)`) contains an assertion.
+fn catch_block_asserts(masked: &str) -> bool {
+    let m = masked.as_bytes();
+    masked.match_indices("catch").any(|(at, _)| {
+        let mut next = at + "catch".len();
+        while next < m.len() && m[next].is_ascii_whitespace() {
+            next += 1;
+        }
+        let mut region = None;
+        if m.get(next) == Some(&b'(') {
+            let promise_form = at > 0 && m[at - 1] == b'.';
+            let close = matching(m, next);
+            if promise_form {
+                region = close.map(|close| (next, close));
+            } else if let Some(close) = close {
+                let mut brace = close + 1;
+                while brace < m.len() && m[brace].is_ascii_whitespace() {
+                    brace += 1;
+                }
+                region = matching(m, brace)
+                    .filter(|_| m.get(brace) == Some(&b'{'))
+                    .map(|end| (brace, end));
+            }
+        } else if m.get(next) == Some(&b'{') {
+            region = matching(m, next).map(|end| (next, end));
+        }
+        region.is_some_and(|(from, to)| {
+            masked[from..to].contains("assert") || masked[from..to].contains("expect(")
+        })
+    })
+}
+
+fn assertions_of(case: &TestCase, helpers: &LocalHelpers) -> Assertions {
     let m = case.masked.as_bytes();
     let mut found = Assertions::default();
     let mut i = 0;
@@ -630,12 +834,35 @@ fn assertions_of(case: &TestCase) -> Assertions {
         i = consumed.unwrap_or(end).max(end);
     }
     let text = &case.masked;
-    found.error_pattern = match case.language {
-        TestLanguage::Rust => ["is_err", "unwrap_err", "expect_err", "Err("]
-            .iter()
-            .any(|pattern| text.contains(pattern)),
-        TestLanguage::Node => text.contains("catch") || text.contains("rejects"),
+    found.error_checked = match case.language {
+        // `unwrap_err()` and `expect_err()` fail the test when the call succeeded.
+        TestLanguage::Rust => text.contains("unwrap_err(") || text.contains("expect_err("),
+        TestLanguage::Node => {
+            ((text.contains(".rejects") || text.contains("toThrow")) && found.helper_calls > 0)
+                || catch_block_asserts(text)
+        }
     };
+    // A test that hands its checking to a helper declared in the same file asserts through it.
+    let m = text.as_bytes();
+    let mut i = 0;
+    while i < m.len() {
+        if !is_ident_byte(m[i]) || (i > 0 && is_ident_byte(m[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let word = word_at(text, i);
+        let end = i + word.len();
+        let after_dot = i > 0 && m[i - 1] == b'.';
+        if !after_dot
+            && m.get(end) == Some(&b'(')
+            && word != case.name
+            && let Some(asserts_error) = helpers.get(word)
+        {
+            found.helper_calls += 1;
+            found.helper_error |= *asserts_error;
+        }
+        i = end;
+    }
     found
 }
 
@@ -763,7 +990,7 @@ fn split_comparison(expr: &(String, String)) -> Option<(String, String)> {
             b')' | b']' | b'}' => depth -= 1,
             _ if depth == 0 => {
                 for op in COMPARATORS.iter().copied() {
-                    if expr.1[index..].starts_with(op) {
+                    if m[index..].starts_with(op.as_bytes()) {
                         // `->` and `=>` are not comparators.
                         if op == ">" && index > 0 && matches!(m[index - 1], b'-' | b'=') {
                             continue;
@@ -778,6 +1005,13 @@ fn split_comparison(expr: &(String, String)) -> Option<(String, String)> {
         index += 1;
     }
     None
+}
+
+/// Whether `operand` is a plain variable, field path, constant or literal: nothing that runs code.
+/// Two equal call expressions are not a tautology (`a().bytes() == a().bytes()` guards that the
+/// call is repeatable), but one name compared with itself can never differ.
+fn is_plain_operand(operand: &str) -> bool {
+    !operand.is_empty() && !operand.contains(['(', '[', '{', '!'])
 }
 
 fn is_value_predicate(masked_expr: &str) -> bool {
@@ -801,7 +1035,10 @@ fn classify(base: &str, args: &[&(String, String)], line: u32) -> Assertion {
             if text == "true" {
                 assertion.trivial = true;
             } else if let Some((lhs, rhs)) = split_comparison(expr) {
-                if compact(&lhs) == compact(&rhs) && is_equality(&expr.1) {
+                if compact(&lhs) == compact(&rhs)
+                    && is_plain_operand(&compact(&lhs))
+                    && is_equality(&expr.1)
+                {
                     assertion.trivial = true;
                 }
                 assertion.literals = bare_literals([lhs.as_str(), rhs.as_str()]);
@@ -809,9 +1046,17 @@ fn classify(base: &str, args: &[&(String, String)], line: u32) -> Assertion {
                 assertion.truthy_only = !is_value_predicate(&expr.1);
             }
         }
+        "assert_matches" => {
+            assertion.error = args
+                .first()
+                .is_some_and(|expr| expr.1.contains("Err(") || expr.1.contains("is_err"));
+        }
         "assert_eq" | "assert_ne" => {
             if let [lhs, rhs] = args {
-                if base == "assert_eq" && compact(&lhs.0) == compact(&rhs.0) {
+                if base == "assert_eq"
+                    && compact(&lhs.0) == compact(&rhs.0)
+                    && is_plain_operand(&compact(&lhs.1))
+                {
                     assertion.trivial = true;
                 }
                 assertion.error = lhs.1.contains("Err(") || rhs.1.contains("Err(");
@@ -842,7 +1087,10 @@ fn classify_node(kind: &str, args: &[&(String, String)], line: u32) -> Assertion
             if compact(&expr.0) == "true" {
                 assertion.trivial = true;
             } else if let Some((lhs, rhs)) = split_comparison(expr) {
-                if compact(&lhs) == compact(&rhs) && is_equality(&expr.1) {
+                if compact(&lhs) == compact(&rhs)
+                    && is_plain_operand(&compact(&lhs))
+                    && is_equality(&expr.1)
+                {
                     assertion.trivial = true;
                 }
                 assertion.literals = bare_literals([lhs.as_str(), rhs.as_str()]);
@@ -858,7 +1106,10 @@ fn classify_node(kind: &str, args: &[&(String, String)], line: u32) -> Assertion
                     kind,
                     "equal" | "strictEqual" | "deepEqual" | "deepStrictEqual"
                 );
-                if positive && compact(&lhs.0) == compact(&rhs.0) {
+                if positive
+                    && compact(&lhs.0) == compact(&rhs.0)
+                    && is_plain_operand(&compact(&lhs.1))
+                {
                     assertion.trivial = true;
                 }
                 assertion.literals = bare_literals([lhs.0.as_str(), rhs.0.as_str()]);
@@ -1230,21 +1481,25 @@ pub fn lint_tests(
     };
     let mut declared: BTreeSet<String> = BTreeSet::new();
     for file in files {
+        let helpers = local_helpers(file);
         for case in discover(file) {
             declared.insert(case.name.clone());
             declared.insert(format!("{}::{}", case.path, case.name));
             for (rule, message) in name_findings(&case.name, policy) {
                 emit(rule, &case, case.line, message);
             }
-            let asserted = assertions_of(&case);
-            let any_assertion =
-                !asserted.direct.is_empty() || asserted.helper_calls > 0 || case.should_panic;
-            if !any_assertion {
+            let asserted = assertions_of(&case, &helpers);
+            let any_assertion = !asserted.direct.is_empty()
+                || asserted.helper_calls > 0
+                || case.should_panic
+                || asserted.error_checked;
+            // A test that only groups subtests is judged through them.
+            if !any_assertion && !case.has_children {
                 emit(
                     LintRule::NoAssertion,
                     &case,
                     case.line,
-                    "the test asserts nothing, so it passes whatever the code does".to_owned(),
+                    "the lint sees no assertion in this test: no assert macro or call, no call to a helper that asserts (a function in this file that asserts, or one named assert…/verify…/expect…/check…), and no #[should_panic]; if it asserts inside a helper from another file, name that helper assert_… so the lint can see it".to_owned(),
                 );
             }
             for assertion in &asserted.direct {
@@ -1278,16 +1533,18 @@ pub fn lint_tests(
                     .is_some_and(|kind| *kind != CriterionKind::Error)
             });
             if has_error_criterion {
+                // The error must be asserted: evaluating `is_err()` and dropping the answer
+                // passes whether or not the call failed.
                 let asserts_error = case.should_panic
                     || asserted.direct.iter().any(|assertion| assertion.error)
-                    || (asserted.error_pattern
-                        && (!asserted.direct.is_empty() || asserted.helper_calls > 0));
+                    || asserted.error_checked
+                    || asserted.helper_error;
                 if !asserts_error {
                     emit(
                         LintRule::MissingErrorAssertion,
                         &case,
                         case.line,
-                        "the test covers an Error criterion but never asserts the error (is_err, should_panic, assert.throws/rejects …)".to_owned(),
+                        "the test covers an Error criterion but never asserts the error: put it in an assertion (assert!(r.is_err()), assert_eq!(r, Err(…)), matches!, unwrap_err/expect_err, #[should_panic], assert.throws/rejects); an error predicate whose result is dropped proves nothing".to_owned(),
                     );
                 }
             }
@@ -1312,6 +1569,7 @@ pub fn lint_tests(
                 line: 0,
                 language: TestLanguage::Rust,
                 should_panic: false,
+                has_children: false,
                 body: String::new(),
                 masked: String::new(),
                 file_source: String::new(),
@@ -1403,6 +1661,16 @@ mod tests {
 
     /// The line a fixture test is declared on, counting from the first line of its source.
     const SECOND_LINE: u32 = 2;
+    /// How many tests the generic-name fixture names with nothing but filler.
+    const GENERICALLY_NAMED_TESTS: usize = 2;
+    /// How many tests of the no-assertion fixture assert nothing.
+    const SILENT_TESTS: usize = 1;
+    /// How many tests of the error-criterion fixture never assert their error.
+    const TESTS_MISSING_AN_ERROR_ASSERTION: usize = 1;
+    /// Lines of the Rust fixture whose assertions compare against a bare number or string.
+    const UNEXPLAINED_LITERAL_LINES: [u32; 3] = [4, 8, 9];
+    /// The line of the Node fixture whose assertion compares against a bare number.
+    const BARE_LITERAL_LINE: u32 = 2;
 
     fn rust_file(source: &str) -> SourceFile {
         SourceFile {
@@ -1489,13 +1757,14 @@ test('adding a negative quantity is rejected with an error', () => {
             .collect();
         assert_eq!(
             generic.len(),
-            SECOND_LINE as usize,
+            GENERICALLY_NAMED_TESTS,
             "both names are generic: {findings:#?}"
         );
         assert!(
             generic
                 .iter()
-                .all(|finding| finding.severity == LintSeverity::Blocking)
+                .all(|finding| finding.severity == LintSeverity::Blocking),
+            "a name that says nothing blocks by default: {generic:#?}"
         );
         assert!(has_blocking(&findings), "a generic name blocks the review");
         assert_eq!(
@@ -1528,7 +1797,10 @@ test('adding a negative quantity is rejected with an error', () => {
         }
         let fine =
             "test('rejects an expired token with an error', () => { assert.equal(a(), b()); });";
-        assert!(!rules_of(&[node_file(fine)]).contains(&LintRule::GenericName));
+        assert!(
+            !rules_of(&[node_file(fine)]).contains(&LintRule::GenericName),
+            "a name that states condition and outcome is not generic"
+        );
     }
 
     #[test]
@@ -1560,10 +1832,13 @@ test('adding a negative quantity is rejected with an error', () => {
             .collect();
         assert_eq!(
             missing.len(),
-            1,
+            SILENT_TESTS,
             "only the first test lacks assertions: {findings:#?}"
         );
-        assert_eq!(missing[0].line, SECOND_LINE);
+        assert_eq!(
+            missing[0].line, SECOND_LINE,
+            "the finding names the line the silent test is declared on"
+        );
     }
 
     #[test]
@@ -1603,7 +1878,10 @@ test('adding a negative quantity is rejected with an error', () => {
             .filter(|f| f.rule == LintRule::UnexplainedLiteral)
             .map(|f| f.line)
             .collect();
-        assert_eq!(literal_lines, vec![4, 8, 9], "{findings:#?}");
+        assert_eq!(
+            literal_lines, UNEXPLAINED_LITERAL_LINES,
+            "only the bare number, the bare string and the bare comparison are unexplained: {findings:#?}"
+        );
     }
 
     #[test]
@@ -1615,7 +1893,11 @@ test('adding a negative quantity is rejected with an error', () => {
             .filter(|f| f.rule == LintRule::UnexplainedLiteral)
             .map(|f| f.line)
             .collect();
-        assert_eq!(lines, vec![2], "{findings:#?}");
+        assert_eq!(
+            lines,
+            [BARE_LITERAL_LINE],
+            "only the assertion against the bare number is unexplained: {findings:#?}"
+        );
     }
 
     #[test]
@@ -1659,25 +1941,37 @@ test('adding a negative quantity is rejected with an error', () => {
             .iter()
             .filter(|f| f.rule == LintRule::MissingErrorAssertion)
             .collect();
-        assert_eq!(missing.len(), 1, "{findings:#?}");
-        assert_eq!(missing[0].test, "an_expired_coupon_is_not_applied");
-        assert_eq!(missing[0].severity, LintSeverity::Blocking);
+        assert_eq!(
+            missing.len(),
+            TESTS_MISSING_AN_ERROR_ASSERTION,
+            "only the test that never asserts its error is reported: {findings:#?}"
+        );
+        assert_eq!(
+            missing[0].test, "an_expired_coupon_is_not_applied",
+            "the finding names the test that never asserts its error"
+        );
+        assert_eq!(
+            missing[0].severity,
+            LintSeverity::Blocking,
+            "an error criterion without an error assertion blocks by default"
+        );
     }
 
     #[test]
     fn severities_are_configurable_and_a_rule_can_be_switched_off() {
         let source = "test('login page', () => { assert.equal(a(), b()); });";
         let strict = LintPolicy::default().with(LintRule::ShortName, RuleSetting::Blocking);
-        assert!(has_blocking(&lint_tests(
-            &[node_file(source)],
-            &[],
-            &[],
-            &strict
-        )));
+        assert!(
+            has_blocking(&lint_tests(&[node_file(source)], &[], &[], &strict)),
+            "a rule switched to blocking blocks"
+        );
         let lax = LintPolicy::default()
             .with(LintRule::ShortName, RuleSetting::Off)
             .with(LintRule::NoOutcomeVerb, RuleSetting::Off);
-        assert!(lint_tests(&[node_file(source)], &[], &[], &lax).is_empty());
+        assert!(
+            lint_tests(&[node_file(source)], &[], &[], &lax).is_empty(),
+            "rules switched off report nothing"
+        );
     }
 
     #[test]
@@ -1721,14 +2015,269 @@ test('adding a negative quantity is rejected with an error', () => {
             maps("covers_nothing", &[]),
         ];
         let report = check_coverage(&criteria, &manifest);
-        assert_eq!(report.uncovered, vec!["AC-2".to_owned(), "AC-3".to_owned()]);
+        assert_eq!(
+            report.uncovered,
+            vec!["AC-2".to_owned(), "AC-3".to_owned()],
+            "criteria no mapped test names are uncovered"
+        );
         assert_eq!(
             report.unknown_references,
-            vec![("covers_phantom".to_owned(), "AC-9".to_owned())]
+            vec![("covers_phantom".to_owned(), "AC-9".to_owned())],
+            "a test pointing at a criterion the spec lacks is reported with the criterion"
         );
-        assert_eq!(report.unmapped_tests, vec!["covers_nothing".to_owned()]);
-        assert!(!report.is_complete());
+        assert_eq!(
+            report.unmapped_tests,
+            vec!["covers_nothing".to_owned()],
+            "a test mapped to nothing is reported"
+        );
+        assert!(!report.is_complete(), "a report with gaps is not complete");
         let complete = check_coverage(&criteria[..1], &manifest[..1]);
         assert!(complete.is_complete(), "{complete:?}");
+    }
+
+    // --- Review follow-up (RWP3 findings 2, 3, 7, 8) -------------------------------------------
+
+    /// Identifiers whose characters take more than one byte, in the scripts the lint may meet.
+    const MULTIBYTE_IDENTIFIERS: [&str; 6] = [
+        "résultat",
+        "ünïcode_total",
+        "合計",
+        "сумма",
+        "🧾total",
+        "naïve_café",
+    ];
+    const EXPECTED_TOTAL: &str = "EXPECTED_TOTAL";
+    /// A hollow helper leaves exactly the one test that calls it without an assertion.
+    const EXACTLY_ONE_FINDING: usize = 1;
+
+    fn findings_of(files: &[SourceFile]) -> Vec<super::LintFinding> {
+        lint_tests(files, &[], &[], &LintPolicy::default())
+    }
+
+    fn blocking_rules(findings: &[super::LintFinding]) -> Vec<LintRule> {
+        findings
+            .iter()
+            .filter(|finding| finding.severity == LintSeverity::Blocking)
+            .map(|finding| finding.rule)
+            .collect()
+    }
+
+    #[test]
+    fn a_unicode_identifier_in_a_comparison_is_linted_without_panicking() {
+        let source = format!(
+            "#[test]\nfn a_total_is_returned() {{ let résultat = total(); assert!(résultat == {EXPECTED_TOTAL}); }}\n"
+        );
+        let findings = findings_of(&[rust_file(&source)]);
+        assert!(
+            blocking_rules(&findings).is_empty(),
+            "a comparison against a named constant is a real assertion, accented name or not: {findings:#?}"
+        );
+        let self_comparison = "#[test]\nfn a_total_is_returned() { let résultat = total(); assert!(résultat == résultat); }\n";
+        let findings = findings_of(&[rust_file(self_comparison)]);
+        assert!(
+            blocking_rules(&findings).contains(&LintRule::TrivialAssertion),
+            "a plain name compared with itself cannot fail, whatever alphabet it is written in: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn multibyte_names_strings_and_comments_never_panic_the_lint_in_either_language() {
+        for identifier in MULTIBYTE_IDENTIFIERS {
+            for operator in ["==", "!=", "<=", ">=", "<", ">", "==="] {
+                let rust = format!(
+                    "// {identifier}\n#[test]\nfn {identifier}_is_compared() {{ let {identifier} = total(); assert!({identifier} {operator} {EXPECTED_TOTAL}); assert!({EXPECTED_TOTAL} {operator} {identifier}); assert!(\"{identifier}\" {operator} \"{identifier}\"); assert_eq!({identifier}, {identifier}); }}\n"
+                );
+                let node = format!(
+                    "// {identifier}\ntest('{identifier} is compared', () => {{ const {identifier} = total(); assert.ok({identifier} {operator} {EXPECTED_TOTAL}); assert.ok(`{identifier}` {operator} '{identifier}'); assert.equal({identifier}, {identifier}); }});\ntest('{identifier}', async (t) => {{ await t.test('{identifier} nested', () => {{ assert({identifier}); }}); }});\n"
+                );
+                let files = [rust_file(&rust), node_file(&node)];
+                let manifest = [maps(&format!("{identifier}_is_compared"), &["AC-1"])];
+                let criteria = [criterion("AC-1", CriterionKind::Error)];
+                let findings = lint_tests(&files, &criteria, &manifest, &LintPolicy::default());
+                assert!(
+                    findings
+                        .iter()
+                        .all(|finding| finding.line > 0 || finding.path == "<manifest>"),
+                    "every finding names a real line for `{identifier} {operator}`: {findings:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_equal_call_expressions_are_a_determinism_check_not_a_tautology() {
+        let determinism = "#[test]\nfn a_pack_for_the_same_goal_has_the_same_bytes() { assert_eq!(a_pack_for(&goal()).canonical_bytes(), a_pack_for(&goal()).canonical_bytes()); }\n#[test]\nfn a_repeated_grade_is_the_same() { assert!(grade_task(&task()) == grade_task(&task())); }\n";
+        let findings = findings_of(&[rust_file(determinism)]);
+        assert!(
+            !blocking_rules(&findings).contains(&LintRule::TrivialAssertion),
+            "repeating a call and comparing the results can fail when the call is not repeatable: {findings:#?}"
+        );
+        let node = "test('a pack for the same goal has the same bytes', () => { assert.equal(packFor(goal()).bytes(), packFor(goal()).bytes()); });\n";
+        let findings = findings_of(&[node_file(node)]);
+        assert!(
+            !blocking_rules(&findings).contains(&LintRule::TrivialAssertion),
+            "the same holds in Node: {findings:#?}"
+        );
+        for (source, why) in [
+            (
+                "#[test]\nfn a_total_is_returned() { let total = total(); assert_eq!(total, total); }\n",
+                "a variable compared with itself",
+            ),
+            (
+                "#[test]\nfn a_total_is_returned() { assert_eq!(7, 7); }\n",
+                "a literal compared with itself",
+            ),
+            (
+                "#[test]\nfn a_total_is_returned() { assert!(EXPECTED_TOTAL == EXPECTED_TOTAL); }\n",
+                "a constant compared with itself",
+            ),
+            (
+                "#[test]\nfn a_total_is_returned() { assert!(cart.total == cart.total); }\n",
+                "one field compared with itself",
+            ),
+        ] {
+            let findings = findings_of(&[rust_file(source)]);
+            assert!(
+                blocking_rules(&findings).contains(&LintRule::TrivialAssertion),
+                "{why} cannot fail: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_test_that_delegates_to_a_local_asserting_helper_is_not_reported_as_asserting_nothing() {
+        let delegating = "fn a_first_pass_that_reaches_full_review() { assert_eq!(status(), EXIT_REVIEWED); }\n#[test]\nfn a_goal_reaches_full_review() { a_first_pass_that_reaches_full_review(); }\n";
+        let findings = findings_of(&[rust_file(delegating)]);
+        assert!(
+            !blocking_rules(&findings).contains(&LintRule::NoAssertion),
+            "the helper in the same file asserts, so the test does through it: {findings:#?}"
+        );
+        let hollow = "fn a_first_pass_that_reaches_full_review() { start(); }\n#[test]\nfn a_goal_reaches_full_review() { a_first_pass_that_reaches_full_review(); }\n";
+        let findings = findings_of(&[rust_file(hollow)]);
+        let no_assertion: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.rule == LintRule::NoAssertion)
+            .collect();
+        assert_eq!(
+            no_assertion.len(),
+            EXACTLY_ONE_FINDING,
+            "a helper that asserts nothing leaves the test asserting nothing: {findings:#?}"
+        );
+        assert!(
+            no_assertion[0].message.contains("helper")
+                && !no_assertion[0].message.contains("passes whatever"),
+            "the message says what the lint could and could not see rather than claiming the test is worthless: {}",
+            no_assertion[0].message
+        );
+        let node = "function checksOut() { assert.equal(total(), expectedTotal()); }\nconst alsoChecks = () => { assert.ok(valid()); };\ntest('a cart is priced', () => { checksOut(); });\ntest('a cart is valid', () => { alsoChecks(); });\n";
+        let findings = findings_of(&[node_file(node)]);
+        assert!(
+            !blocking_rules(&findings).contains(&LintRule::NoAssertion),
+            "function declarations and arrow constants in the same file are followed too: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_discarded_error_predicate_does_not_cover_an_error_criterion() {
+        let criteria = [criterion("AC-2", CriterionKind::Error)];
+        let cases = [
+            (
+                "a_checkout_is_not_rejected",
+                "#[test]\nfn a_checkout_is_not_rejected() {\n    let result = checkout();\n    let _ = result.is_err();\n    assert_eq!(cart.total(), EXPECTED_TOTAL);\n}\n",
+                true,
+            ),
+            (
+                "an_empty_cart_is_rejected",
+                "#[test]\nfn an_empty_cart_is_rejected() { assert!(checkout().is_err()); }\n",
+                false,
+            ),
+            (
+                "an_empty_cart_is_an_error_value",
+                "#[test]\nfn an_empty_cart_is_an_error_value() { assert!(matches!(checkout(), Err(_))); }\n",
+                false,
+            ),
+            (
+                "an_empty_cart_equals_the_error",
+                "#[test]\nfn an_empty_cart_equals_the_error() { assert_eq!(checkout(), Err(CartError::Empty)); }\n",
+                false,
+            ),
+            (
+                "an_empty_cart_unwraps_to_its_error",
+                "#[test]\nfn an_empty_cart_unwraps_to_its_error() { let error = checkout().unwrap_err(); assert_eq!(error, CartError::Empty); }\n",
+                false,
+            ),
+            (
+                "an_empty_cart_expects_its_error",
+                "#[test]\nfn an_empty_cart_expects_its_error() { checkout().expect_err(\"an empty cart is refused\"); }\n",
+                false,
+            ),
+        ];
+        for (name, source, expect_missing) in cases {
+            let manifest = [maps(name, &["AC-2"])];
+            let findings = lint_tests(
+                &[rust_file(source)],
+                &criteria,
+                &manifest,
+                &LintPolicy::default(),
+            );
+            let missing = findings
+                .iter()
+                .any(|finding| finding.rule == LintRule::MissingErrorAssertion);
+            assert_eq!(
+                missing, expect_missing,
+                "`{name}`: an error criterion is covered only when the error is asserted: {findings:#?}"
+            );
+        }
+        let node_discarded = "test('a checkout is not rejected', async () => {\n  const failed = await checkout().then(() => false, () => true);\n  assert.equal(cart.total(), EXPECTED_TOTAL);\n});\n";
+        let manifest = [maps("a checkout is not rejected", &["AC-2"])];
+        let findings = lint_tests(
+            &[node_file(node_discarded)],
+            &criteria,
+            &manifest,
+            &LintPolicy::default(),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == LintRule::MissingErrorAssertion),
+            "a Node test that evaluates a failure and asserts something unrelated asserts no error: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn nested_node_subtests_are_cases_of_their_own_with_their_own_assertions() {
+        let source = "test('a cart is priced', async (t) => {\n  await t.test('a discount is applied', () => {});\n  await t.test('a coupon is applied', () => { assert.equal(price(), DISCOUNTED_PRICE); });\n  assert.equal(total(), expectedTotal());\n});\ndescribe('checkout', () => {\n  it('an empty cart is rejected', () => {});\n});\n";
+        let findings = findings_of(&[node_file(source)]);
+        let silent: Vec<&str> = findings
+            .iter()
+            .filter(|finding| finding.rule == LintRule::NoAssertion)
+            .map(|finding| finding.test.as_str())
+            .collect();
+        assert_eq!(
+            silent,
+            ["a discount is applied", "an empty cart is rejected"],
+            "an assertionless subtest and an assertionless nested it are each reported by name: {findings:#?}"
+        );
+        let grouping = "test('a cart is priced', async (t) => {\n  await t.test('a coupon is applied', () => { assert.equal(price(), DISCOUNTED_PRICE); });\n});\n";
+        let findings = findings_of(&[node_file(grouping)]);
+        assert!(
+            !blocking_rules(&findings).contains(&LintRule::NoAssertion),
+            "a test that only groups asserted subtests is judged through them: {findings:#?}"
+        );
+        let borrowed = "test('a cart is priced', async (t) => {\n  await t.test('a coupon is applied', () => { assert.equal(price(), DISCOUNTED_PRICE); });\n  const matched = /coupon/.test('a coupon');\n});\n";
+        let findings = findings_of(&[node_file(borrowed)]);
+        assert!(
+            !findings.iter().any(|finding| finding.test == "a coupon"),
+            "a regular expression's .test() is not a subtest: {findings:#?}"
+        );
+        let own_assertion_is_not_the_childs = "test('a cart is priced', async (t) => {\n  await t.test('a coupon is applied', () => { assert.equal(price(), DISCOUNTED_PRICE); });\n  const price = 1;\n});\ntest('a cart is totalled', async (t) => {\n  await t.test('a discount is applied', () => { assert.equal(price(), DISCOUNTED_PRICE); });\n  assert.ok(true);\n});\n";
+        let findings = findings_of(&[node_file(own_assertion_is_not_the_childs)]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == LintRule::TrivialAssertion
+                    && finding.test == "a cart is totalled"),
+            "the parent's own trivial assertion is found and attributed to the parent: {findings:#?}"
+        );
     }
 }

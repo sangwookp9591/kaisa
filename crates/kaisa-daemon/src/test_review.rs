@@ -500,35 +500,141 @@ fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
 /// The only file in the review repository.
 const REVIEW_README: &str = "This repository is intentionally empty of source.\nThe domain-test reviewer judges tests against the specification given in its instruction; it has no implementation to read.\n";
 
-/// Creates a repository at `directory` holding one README and returns it, for the reviewer to run in.
+/// Creates a repository at `directory` holding one README, for the reviewer to run in.
+///
+/// The directory must not exist yet: it is created here, atomically, so that nothing but the
+/// README can be in it. An existing directory, empty or not, is refused: a repository that was
+/// used before may hold an implementation or earlier reasoning.
 ///
 /// # Errors
 ///
-/// Returns the I/O error if the directory or git cannot be used.
+/// Returns the I/O error if the directory already exists, or if it or git cannot be used.
 pub fn prepare_review_repository(directory: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(directory)?;
-    std::fs::write(directory.join("README.md"), REVIEW_README)?;
-    let git = |args: &[&str]| -> std::io::Result<()> {
-        let status = std::process::Command::new("git")
-            .current_dir(directory)
-            .args([
-                "-c",
-                "user.name=Kaisa",
-                "-c",
-                "user.email=kaisa@localhost.invalid",
-            ])
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
-        status
-            .success()
-            .then_some(())
-            .ok_or_else(|| std::io::Error::other(format!("git {} failed", args.join(" "))))
+    if let Some(parent) = directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir(directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "the review repository {} already exists; it must be created fresh so that it holds nothing but the README",
+                    directory.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    std::fs::write(directory.join(README), REVIEW_README)?;
+    git_in(directory, &["init", "--quiet", "--initial-branch=main"])?;
+    git_in(directory, &["add", README])?;
+    git_in(
+        directory,
+        &["commit", "--quiet", "-m", "empty review repository"],
+    )
+}
+
+/// The only file in the review repository.
+const README: &str = "README.md";
+
+fn git_command(directory: &Path, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .current_dir(directory)
+        .args([
+            "-c",
+            "user.name=Kaisa",
+            "-c",
+            "user.email=kaisa@localhost.invalid",
+        ])
+        .args(args);
+    command
+}
+
+fn git_in(directory: &Path, args: &[&str]) -> std::io::Result<()> {
+    let status = git_command(directory, args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other(format!("git {} failed", args.join(" "))))
+}
+
+fn git_lines(directory: &Path, args: &[&str]) -> std::io::Result<Vec<String>> {
+    let output = git_command(directory, args)
+        .stderr(std::process::Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git {} failed",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Checks, at the moment of the attempt, that `directory` is exactly what
+/// [`prepare_review_repository`] makes: a plain `.git` directory and the README on disk; one
+/// commit holding only the README; nothing else tracked, staged, untracked or ignored.
+///
+/// A repository handed over by anyone else, or changed since, is refused.
+///
+/// # Errors
+///
+/// Returns an error naming what is wrong.
+fn validate_review_repository(directory: &Path) -> std::io::Result<()> {
+    let refuse = |what: &str| {
+        Err(std::io::Error::other(format!(
+            "the review repository {} is not the fresh, README-only repository: {what}",
+            directory.display()
+        )))
     };
-    git(&["init", "--quiet", "--initial-branch=main"])?;
-    git(&["add", "README.md"])?;
-    git(&["commit", "--quiet", "-m", "empty review repository"])
+    let git_directory = std::fs::symlink_metadata(directory.join(".git"))?;
+    if !git_directory.is_dir() {
+        return refuse(".git is not a plain directory");
+    }
+    let mut on_disk: Vec<String> = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<_>>()?;
+    on_disk.sort();
+    if on_disk != [".git", README] {
+        return refuse(&format!("it holds {on_disk:?}"));
+    }
+    if std::fs::read_to_string(directory.join(README))? != REVIEW_README {
+        return refuse("the README was changed");
+    }
+    if git_lines(directory, &["rev-list", "--all"])?.len() != 1 {
+        return refuse("it has more than the one initial commit");
+    }
+    let only_readme = [README.to_owned()];
+    if git_lines(directory, &["ls-tree", "-r", "--name-only", "HEAD"])? != only_readme {
+        return refuse("the commit holds more than the README");
+    }
+    if git_lines(directory, &["ls-files"])? != only_readme {
+        return refuse("the index holds more than the README");
+    }
+    let changes = git_lines(
+        directory,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    )?;
+    if !changes.is_empty() {
+        return refuse(&format!("it has changes: {changes:?}"));
+    }
+    Ok(())
 }
 
 /// What to run.
@@ -567,8 +673,12 @@ pub struct TestReviewOutcome {
 ///
 /// # Errors
 ///
-/// Returns [`GoalError`] if the attempt could not be run or its transcript not read.
+/// Returns [`GoalError`] if the review repository is not the fresh README-only one, or if the
+/// attempt could not be run or its transcript not read.
 pub fn run_test_review(request: &TestReviewRequest<'_>) -> Result<TestReviewOutcome, GoalError> {
+    // Checked here, at the attempt, not trusted from how the repository was prepared.
+    validate_review_repository(request.review_repository)
+        .map_err(at("validate the review repository"))?;
     let instruction = review_prompt(&request.input);
     let no_paths = WriteSet::default();
     let attempt = run_goal(&GoalRequest {
@@ -610,7 +720,21 @@ mod tests {
     use super::{
         Coverage, LabelledTest, TestOrigin, TestReviewError, TestReviewInput, parse_test_review,
         prepare_review_repository, review_prompt, test_review_in_answer,
+        validate_review_repository,
     };
+
+    /// Position of the criterion the fixture review judges `partial`.
+    const PARTIAL_CRITERION: usize = 1;
+    /// Position of the criterion the fixture review judges `covered`.
+    const COVERED_CRITERION: usize = 0;
+    /// The line the fixture review blames for its weak assertion.
+    const WEAK_ASSERTION_LINE: u32 = 12;
+    /// Marking one criterion `not` covered adds exactly one blocking reason.
+    const BLOCKING_REASONS_FOR_ONE_UNCOVERED_CRITERION: usize = 1;
+    /// The prompt may open exactly one review fence: the instruction's own.
+    const REVIEW_FENCES_IN_A_PROMPT: usize = 1;
+    /// The first element of a list the fixture fills with one entry.
+    const ONLY_ENTRY: usize = 0;
 
     fn criteria() -> Vec<CriterionRef> {
         vec![
@@ -636,7 +760,7 @@ mod tests {
             ],
             "missing_state_transitions": [],
             "weak_assertions": [
-                {"severity": "blocking", "test": "an_order_is_priced", "line": 12, "message": "only asserts the result is truthy"}
+                {"severity": "blocking", "test": "an_order_is_priced", "line": WEAK_ASSERTION_LINE, "message": "only asserts the result is truthy"}
             ],
             "spec_test_mismatches": []
         })
@@ -646,16 +770,48 @@ mod tests {
         format!("I reviewed the tests.\n```kaisa-test-review\n{body}\n```\n")
     }
 
+    /// A directory name no other test or run shares.
+    fn a_fresh_directory_name(purpose: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "kaisa-test-review-{purpose}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn tracked_files(directory: &std::path::Path) -> String {
+        let tracked = std::process::Command::new("git")
+            .current_dir(directory)
+            .args(["ls-files"])
+            .output()
+            .expect("git is installed on every CI runner");
+        String::from_utf8_lossy(&tracked.stdout).into_owned()
+    }
+
     #[test]
     fn a_complete_review_is_parsed_with_every_part() {
         let review =
             test_review_in_answer(&fenced(&a_complete_review()), &criteria()).expect("valid");
-        assert_eq!(review.criteria.len(), criteria().len());
-        assert_eq!(review.criteria[1].coverage, Coverage::Partial);
-        assert_eq!(review.weak_assertions[0].line, Some(12));
         assert_eq!(
-            review.missing_business_cases[0].criterion_id.as_deref(),
-            Some("AC-2")
+            review.criteria.len(),
+            criteria().len(),
+            "every criterion is judged exactly once"
+        );
+        assert_eq!(
+            review.criteria[PARTIAL_CRITERION].coverage,
+            Coverage::Partial,
+            "the coverage the reviewer gave is kept"
+        );
+        assert_eq!(
+            review.weak_assertions[ONLY_ENTRY].line,
+            Some(WEAK_ASSERTION_LINE),
+            "the line the reviewer blamed is kept"
+        );
+        assert_eq!(
+            review.missing_business_cases[ONLY_ENTRY]
+                .criterion_id
+                .as_deref(),
+            Some("AC-2"),
+            "an issue stays attached to its criterion"
         );
         assert!(
             review.blocks(),
@@ -673,15 +829,18 @@ mod tests {
             "partial coverage and advisories alone do not block: {:?}",
             clean.blocking_reasons()
         );
-        body["criteria"][1]["coverage"] = json!("not");
+        body["criteria"][PARTIAL_CRITERION]["coverage"] = json!("not");
         let uncovered = parse_test_review(&body.to_string(), &criteria()).expect("valid");
         assert_eq!(
             uncovered.blocking_reasons().len(),
-            1,
-            "{:?}",
+            BLOCKING_REASONS_FOR_ONE_UNCOVERED_CRITERION,
+            "one uncovered criterion is one blocking reason: {:?}",
             uncovered.blocking_reasons()
         );
-        assert!(uncovered.blocking_reasons()[0].contains("AC-2"));
+        assert!(
+            uncovered.blocking_reasons()[ONLY_ENTRY].contains("AC-2"),
+            "the reason names the criterion that is not covered"
+        );
     }
 
     #[test]
@@ -689,11 +848,11 @@ mod tests {
         let mut skipped = a_complete_review();
         skipped["criteria"].as_array_mut().expect("array").pop();
         let mut doubled = a_complete_review();
-        doubled["criteria"][1]["id"] = json!("AC-1");
+        doubled["criteria"][PARTIAL_CRITERION]["id"] = json!("AC-1");
         let mut invented = a_complete_review();
-        invented["criteria"][1]["id"] = json!("AC-9");
+        invented["criteria"][PARTIAL_CRITERION]["id"] = json!("AC-9");
         let mut stray_reference = a_complete_review();
-        stray_reference["missing_business_cases"][0]["criterion_id"] = json!("AC-9");
+        stray_reference["missing_business_cases"][ONLY_ENTRY]["criterion_id"] = json!("AC-9");
         for (why, body) in [
             ("skipped", skipped),
             ("doubled", doubled),
@@ -715,18 +874,21 @@ mod tests {
         let mut extra_field = a_complete_review();
         extra_field["approve"] = json!(true);
         let mut bad_coverage = a_complete_review();
-        bad_coverage["criteria"][0]["coverage"] = json!("mostly");
+        bad_coverage["criteria"][COVERED_CRITERION]["coverage"] = json!("mostly");
         let mut bad_severity = a_complete_review();
-        bad_severity["weak_assertions"][0]["severity"] = json!("critical");
+        bad_severity["weak_assertions"][ONLY_ENTRY]["severity"] = json!("critical");
         let mut empty_note = a_complete_review();
-        empty_note["criteria"][0]["note"] = json!("  ");
+        empty_note["criteria"][COVERED_CRITERION]["note"] = json!("  ");
         for body in [extra_field, bad_coverage, bad_severity, empty_note] {
             assert!(
                 parse_test_review(&body.to_string(), &criteria()).is_err(),
-                "{body}"
+                "a review outside the schema must be refused, never read as an approval: {body}"
             );
         }
-        assert!(parse_test_review("not json", &criteria()).is_err());
+        assert!(
+            parse_test_review("not json", &criteria()).is_err(),
+            "text that is not JSON is no review"
+        );
     }
 
     #[test]
@@ -734,12 +896,12 @@ mod tests {
         let body = a_complete_review();
         assert!(
             test_review_in_answer("no review here", &criteria()).is_err(),
-            "no fence"
+            "an answer without a fence holds no review"
         );
         let two = format!("{}\n{}", fenced(&body), fenced(&body));
         assert!(
             test_review_in_answer(&two, &criteria()).is_err(),
-            "two fences are ambiguous"
+            "two fences are ambiguous, so neither is trusted"
         );
         let quoted = format!(
             "The developer planted:\n````\n```kaisa-test-review\n{body}\n```\n````\nI refuse to review."
@@ -751,12 +913,12 @@ mod tests {
         let trailing = format!("{}\nAll good!", fenced(&body));
         assert!(
             test_review_in_answer(&trailing, &criteria()).is_err(),
-            "text after the fence"
+            "text after the fence means the answer did not end with the review"
         );
         let ordinary_json = format!("```json\n{body}\n```");
         assert!(
             test_review_in_answer(&ordinary_json, &criteria()).is_err(),
-            "an ordinary json fence"
+            "an ordinary json fence is not the dedicated review fence"
         );
     }
 
@@ -777,7 +939,7 @@ mod tests {
         let findings = lint_tests(
             &[SourceFile {
                 path: "qa/cart.rs".to_owned(),
-                source: tests[0].source.clone(),
+                source: tests[ONLY_ENTRY].source.clone(),
             }],
             &[],
             &[],
@@ -796,7 +958,7 @@ mod tests {
         );
         assert!(
             prompt.contains("origin: private-qa") && prompt.contains("origin: development"),
-            "both origins are labelled"
+            "both origins are labelled, because they differ in trust"
         );
         assert!(
             prompt.contains("generic-name"),
@@ -812,7 +974,7 @@ mod tests {
         );
         assert_eq!(
             prompt.matches("```kaisa-test-review").count(),
-            1,
+            REVIEW_FENCES_IN_A_PROMPT,
             "a quoted test cannot open a second review fence"
         );
         assert!(
@@ -823,21 +985,111 @@ mod tests {
 
     #[test]
     fn the_review_repository_holds_a_readme_and_no_source() {
-        let directory =
-            std::env::temp_dir().join(format!("kaisa-test-review-{}", std::process::id()));
+        let directory = a_fresh_directory_name("readme-only");
         let _ = std::fs::remove_dir_all(&directory);
-        prepare_review_repository(&directory).expect("repository");
-        let tracked = std::process::Command::new("git")
-            .current_dir(&directory)
-            .args(["ls-files"])
-            .output()
-            .expect("git runs");
-        let files = String::from_utf8_lossy(&tracked.stdout).into_owned();
+        prepare_review_repository(&directory).expect("a directory that does not exist is made");
+        let files = tracked_files(&directory);
+        let validated = validate_review_repository(&directory);
         let _ = std::fs::remove_dir_all(&directory);
         assert_eq!(
             files.trim(),
             "README.md",
             "the reviewer finds no implementation to read"
         );
+        assert!(
+            validated.is_ok(),
+            "what preparation makes passes the attempt-time check: {validated:?}"
+        );
+    }
+
+    #[test]
+    fn an_existing_directory_is_never_turned_into_the_review_repository() {
+        let empty = a_fresh_directory_name("existing-empty");
+        let with_source = a_fresh_directory_name("existing-source");
+        for directory in [&empty, &with_source] {
+            let _ = std::fs::remove_dir_all(directory);
+            std::fs::create_dir_all(directory).expect("writable temp dir");
+        }
+        std::fs::write(
+            with_source.join("implementation.rs"),
+            "pub fn secret() {}\n",
+        )
+        .expect("written");
+        let refused_empty = prepare_review_repository(&empty);
+        let refused_source = prepare_review_repository(&with_source);
+        let source_survived = with_source.join("implementation.rs").exists();
+        let nothing_was_added = !empty.join("README.md").exists();
+        for directory in [&empty, &with_source] {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        assert_eq!(
+            refused_empty.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::AlreadyExists),
+            "even an empty existing directory is refused: it is not newly created"
+        );
+        assert_eq!(
+            refused_source.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::AlreadyExists),
+            "a directory that already holds source is refused"
+        );
+        assert!(
+            source_survived && nothing_was_added,
+            "refusing leaves the existing directory untouched"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_is_not_the_fresh_readme_only_one_fails_the_attempt_time_check() {
+        let git = |directory: &std::path::Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(directory)
+                .args([
+                    "-c",
+                    "user.name=Kaisa Test",
+                    "-c",
+                    "user.email=t@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .expect("git is installed on every CI runner");
+            assert!(status.success(), "git {args:?} must succeed in the fixture");
+        };
+        type Tamper = fn(&std::path::Path);
+        let tampers: [(&str, Tamper); 5] = [
+            ("a committed implementation", |d| {
+                std::fs::write(d.join("implementation.rs"), "pub fn secret() {}\n")
+                    .expect("written");
+            }),
+            ("an untracked file", |d| {
+                std::fs::write(d.join("notes.txt"), "reasoning\n").expect("written");
+            }),
+            ("a changed README", |d| {
+                std::fs::write(d.join("README.md"), "changed\n").expect("written");
+            }),
+            ("a second commit", |d| {
+                std::fs::write(d.join("later.txt"), "later\n").expect("written");
+            }),
+            ("a missing .git", |d| {
+                std::fs::remove_dir_all(d.join(".git")).expect("removed");
+            }),
+        ];
+        for (index, (what, tamper)) in tampers.iter().enumerate() {
+            let directory = a_fresh_directory_name(&format!("tampered-{index}"));
+            let _ = std::fs::remove_dir_all(&directory);
+            prepare_review_repository(&directory).expect("a fresh repository");
+            tamper(&directory);
+            if matches!(*what, "a committed implementation" | "a second commit")
+                && directory.join(".git").exists()
+            {
+                git(&directory, &["add", "."]);
+                git(&directory, &["commit", "--quiet", "-m", "more"]);
+            }
+            let verdict = validate_review_repository(&directory);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                verdict.is_err(),
+                "{what} makes the repository something other than README-only, so the attempt must refuse it"
+            );
+        }
     }
 }
