@@ -3,6 +3,7 @@
 //! Design: `docs/architecture.md`. In M0 a goal runs in one process (`run_goal`); the long-lived
 //! daemon, its control endpoint and keeper reconnection wrap the same steps later.
 
+pub mod characterize;
 mod gate;
 mod goal;
 mod ids;

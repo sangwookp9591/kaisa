@@ -503,7 +503,7 @@ fn error(detail: &str) -> GoalError {
     }
 }
 
-fn author_suite(
+pub(crate) fn author_suite(
     state: &Path,
     repository: &Path,
     temporary: &Path,
@@ -521,11 +521,20 @@ fn author_suite(
     prepare_author_repository(&public, pack)?;
     let digest = ContentDigest::try_new(blake3::hash(pack.as_bytes()).to_hex().as_str())
         .map_err(at("hashing QA context"))?;
+    // Characterization supplies a structured base-only pack; ordinary QA keeps its prose pack.
+    let role = if serde_json::from_str::<Value>(pack)
+        .ok()
+        .is_some_and(|value| value["role"] == "characterization")
+    {
+        "characterization"
+    } else {
+        "qa"
+    };
     record(
         ledger,
         EventKind::AttemptAdmitted,
         attempt.as_str(),
-        json!({"task":format!("task_{suffix}"),"role":"qa","read_only":true}),
+        json!({"task":format!("task_{suffix}"),"role":role,"read_only":true}),
     )?;
     ledger
         .record_context_pack(&attempt, &digest, pack.as_bytes())
@@ -761,7 +770,34 @@ pub struct QaSuiteRequest<'a> {
 /// # Errors
 /// Returns an error before execution on storage tampering or infrastructure failure.
 pub fn run_qa_suite(request: &QaSuiteRequest<'_>) -> Result<Vec<QaResult>, GoalError> {
-    let QaSuiteRequest {
+    execute_suite(&SuiteExecution {
+        repository: request.repository,
+        base: request.base,
+        state: request.state,
+        run_id: request.run_id,
+        candidate: request.candidate,
+        suite: request.suite,
+        toolchain: request.toolchain,
+        isolation: qa_isolation(request.attempt),
+        attempt_id: request.attempt.attempt.as_str(),
+    })
+}
+
+/// Shared trusted executor; characterization has no developer receipt before development.
+pub(crate) struct SuiteExecution<'a> {
+    pub repository: &'a Path,
+    pub base: &'a str,
+    pub state: &'a Path,
+    pub run_id: &'a str,
+    pub candidate: &'a Candidate,
+    pub suite: &'a QaSuite,
+    pub toolchain: &'a QaToolchain,
+    pub isolation: QaIsolation,
+    pub attempt_id: &'a str,
+}
+
+pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult>, GoalError> {
+    let SuiteExecution {
         repository,
         state,
         run_id,
@@ -1083,7 +1119,7 @@ pub fn run_qa_suite(request: &QaSuiteRequest<'_>) -> Result<Vec<QaResult>, GoalE
                 "reduced(write-deny unavailable; digests only)"
             },
             blocking_findings: findings.clone(),
-            qa_isolation: qa_isolation(request.attempt),
+            qa_isolation: request.isolation.clone(),
             failures,
         };
         record(
@@ -1095,7 +1131,7 @@ pub fn run_qa_suite(request: &QaSuiteRequest<'_>) -> Result<Vec<QaResult>, GoalE
                 "source_unchanged":result.source_unchanged,"private_test_unchanged":result.private_test_unchanged,
                 "private_test_integrity":result.private_test_integrity,"qa_evidence":result.qa_evidence,"expected_tests":result.expected_tests,
                 "positive_evidence":result.positive_evidence,"blocking_findings":result.blocking_findings,
-                "attempt":request.attempt.attempt.as_str(),"qa_isolation":result.qa_isolation.label()}),
+                "attempt":request.attempt_id,"qa_isolation":result.qa_isolation.label()}),
         )?;
         results.push(result);
         // A mutated shared build invalidates the remainder; never reuse tainted artifacts.

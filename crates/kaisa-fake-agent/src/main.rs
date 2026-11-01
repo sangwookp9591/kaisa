@@ -257,7 +257,12 @@ fn fake_qa(path: &str, args: &[String]) -> Result<(), String> {
         std::fs::read_to_string(path).map_err(|error| error.to_string())?
     };
     let suite: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
-    println!("```kaisa-qa\n{suite}\n```");
+    let fence = if flag_present(args, "--fake-characterization") {
+        "kaisa-characterization"
+    } else {
+        "kaisa-qa"
+    };
+    println!("```{fence}\n{suite}\n```");
     Ok(())
 }
 
@@ -280,6 +285,9 @@ fn run() -> Result<(), String> {
         let answer = format!("```kaisa-spec\n{proposal}\n```");
         print_as_claude(&answer);
         return Ok(());
+    }
+    if let Some(path) = flag(&args, "--fake-characterization") {
+        return fake_qa(&path, &args);
     }
     if let Some(path) = flag(&args, "--fake-qa") {
         return fake_qa(&path, &args);
