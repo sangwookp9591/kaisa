@@ -15,7 +15,7 @@ use crate::qa::QaToolchain;
 use crate::spec_flow::{
     Characterize, HookContext, StagedReview, StagedReviewInput, artifact, event, hook_receipt,
 };
-use crate::staged_review::{EvidenceKind, ReviewEvidence, run_staged_review};
+use crate::staged_review::{EvidenceKind, ReviewEvidence, run_staged_review_with_context};
 
 /// Runs the staged agent protocol; only ledger-authenticated execution can close a blocker.
 pub struct AgentStagedReview;
@@ -87,7 +87,10 @@ impl StagedReview for AgentStagedReview {
             evidence.push(ReviewEvidence {
                 id: format!("ledger:{}", recorded.sequence.value()),
                 kind,
-                candidate_tree: candidate.tree.clone(),
+                candidate_tree: payload["candidate_tree"]
+                    .as_str()
+                    .expect("filtered candidate tree")
+                    .to_owned(),
                 passed,
             });
         }
@@ -116,7 +119,7 @@ impl StagedReview for AgentStagedReview {
         let workflow = input.workflow;
         let no_paths = WriteSet::default();
         let admission_time = crate::ids::now_ms();
-        let outcome = run_staged_review(
+        let outcome = run_staged_review_with_context(
             GoalRequest {
                 repository: context.repository,
                 state_directory: context.state_directory,
@@ -134,6 +137,10 @@ impl StagedReview for AgentStagedReview {
                 reduced_mode: workflow.reduced_mode,
             },
             &bundle,
+            &crate::goal::AttemptContext {
+                spec_run_id: Some(context.run_id),
+                ..Default::default()
+            },
         )?;
         let (status, detail) = staged_status(&outcome, &candidate.tree, admission_time);
         let stages = outcome.review.as_ref().ok().map(|review| review.stages());
@@ -150,14 +157,6 @@ impl StagedReview for AgentStagedReview {
             &detail,
             Some(&candidate.tree),
         )?;
-        if status == AcceptanceStatus::Pass {
-            check.admitted_reductions = outcome
-                .attempt
-                .missing
-                .iter()
-                .map(|capability| capability.code().into())
-                .collect();
-        }
         check.evidence_ids.push(artifact(
             context.state_directory,
             context.run_id,
@@ -327,6 +326,10 @@ impl Characterize for LedgerCharacterize<'_> {
             .map_err(at("opening characterization comparison ledger"))?;
         let (status, detail) = match self.service(context).compare(baseline, candidate, &ledger) {
             Err(reason) => (AcceptanceStatus::Fail, reason.to_string()),
+            Ok(findings) if findings.is_empty() && baseline.areas().is_empty() => (
+                AcceptanceStatus::Pass,
+                "no untested legacy area detected; characterization not applicable".into(),
+            ),
             Ok(findings) if findings.is_empty() => (
                 AcceptanceStatus::Pass,
                 "legacy characterization honoured on final tree".into(),

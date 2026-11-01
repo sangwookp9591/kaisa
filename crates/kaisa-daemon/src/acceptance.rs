@@ -67,11 +67,57 @@ impl GateCheck {
     }
 }
 
+/// Actual containment recorded before an agent starts, scoped to its specification run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptContainment {
+    /// Ledger attempt identity.
+    pub attempt: String,
+    /// Agent role, including QA and characterization authors.
+    pub role: String,
+    /// Missing capabilities, expressed as stable domain codes.
+    pub missing: Vec<String>,
+    /// Whether the actual shortfall was admitted before execution.
+    pub admitted: bool,
+    /// Observed developers retain this reduction even when QA isolation is accepted.
+    pub observed: bool,
+    /// Preserved ledger receipt identity.
+    pub evidence_id: String,
+}
+
+/// Union every attempt, including previous revisions; one unadmitted attempt prevents PASS.
+fn attempt_containment(receipts: &[AttemptContainment]) -> GateCheck {
+    let mut check = GateCheck::missing("no recorded agent containment receipts");
+    if !receipts.is_empty() {
+        check.status = AcceptanceStatus::Pass;
+        check.detail = "all recorded attempt containment shortfalls admitted".into();
+    }
+    let mut reductions = std::collections::BTreeSet::new();
+    for receipt in receipts {
+        check.evidence_ids.push(receipt.evidence_id.clone());
+        if !receipt.admitted {
+            check.status = AcceptanceStatus::Inconclusive;
+            check.detail.push_str(&format!(
+                "; {} {} containment not admitted",
+                receipt.role, receipt.attempt
+            ));
+        } else {
+            reductions.extend(receipt.missing.iter().cloned());
+            if receipt.observed {
+                reductions.insert("observed".into());
+            }
+        }
+    }
+    check.admitted_reductions = reductions.into_iter().collect();
+    check
+}
+
 /// The complete recorded evidence considered by §5, kept separate from any agent verdict.
 #[derive(Debug, Clone)]
 pub struct AcceptanceEvidence {
     /// Final content being considered for delivery.
     pub final_tree: Option<String>,
+    /// Run-scoped receipts for every agent attempt, across all revisions.
+    pub attempts: Vec<AttemptContainment>,
     /// Whether approval was policy-based, never a claim of human confirmation.
     pub provisional: bool,
     /// Human approval followed unconfined attempts and retains its reduced assurance.
@@ -151,7 +197,9 @@ impl AcceptanceDecision {
 
 /// Pure gate: a reviewer cannot repair a failing deterministic line or stale QA evidence.
 pub fn acceptance_gate(evidence: &AcceptanceEvidence) -> AcceptanceDecision {
+    let containment = attempt_containment(&evidence.attempts);
     let checks = [
+        ("all attempt containment admitted", &containment, false),
         ("spec approval status", &evidence.approval, false),
         ("spec digest unchanged", &evidence.spec_digest, false),
         ("traceability complete", &evidence.traceability, true),
@@ -228,7 +276,7 @@ pub fn acceptance_gate(evidence: &AcceptanceEvidence) -> AcceptanceDecision {
 #[cfg(test)]
 mod tests {
     use super::{AcceptanceEvidence, AcceptanceStatus, GateCheck, acceptance_gate};
-    const ACCEPTANCE_REQUIREMENTS: usize = 10;
+    const ACCEPTANCE_REQUIREMENTS: usize = 11;
     fn complete_evidence() -> AcceptanceEvidence {
         let receipt = GateCheck::recorded(
             AcceptanceStatus::Pass,
@@ -238,6 +286,7 @@ mod tests {
         );
         AcceptanceEvidence {
             final_tree: Some("final-tree".into()),
+            attempts: vec![attempt("confined", &[])],
             provisional: false,
             reduced_assurance_approval: false,
             approval: receipt.clone(),
@@ -313,6 +362,87 @@ mod tests {
             decision.lines.len(),
             ACCEPTANCE_REQUIREMENTS,
             "every design requirement has a line"
+        );
+    }
+    fn attempt(role: &str, missing: &[&str]) -> super::AttemptContainment {
+        super::AttemptContainment {
+            attempt: format!("att_{role}"),
+            role: role.into(),
+            missing: missing.iter().map(|s| (*s).into()).collect(),
+            admitted: true,
+            observed: false,
+            evidence_id: format!("ledger:{role}"),
+        }
+    }
+
+    #[test]
+    fn fully_confined_reviewer_cannot_hide_a_reduced_developer_on_any_platform() {
+        let mut evidence = complete_evidence();
+        evidence.attempts = vec![
+            attempt(
+                "developer",
+                &["write", "tcp", "udp", "state-read", "descendants"],
+            ),
+            attempt("reviewer", &[]),
+        ];
+        evidence.attempts[0].observed = true;
+        let decision = acceptance_gate(&evidence);
+        assert_eq!(decision.status, AcceptanceStatus::Pass);
+        assert_eq!(
+            decision.label(),
+            "PASS (reduced: descendants,observed,state-read,tcp,udp,write)"
+        );
+        assert!(evidence.staged_review.admitted_reductions.is_empty());
+    }
+
+    #[test]
+    fn every_role_and_revision_contributes_its_own_containment_shortfall() {
+        for role in [
+            "developer",
+            "developer-revision-1",
+            "developer-revision-2",
+            "qa-author",
+            "qa-blind",
+            "test-reviewer",
+            "staged-reviewer",
+            "characterization",
+        ] {
+            let mut evidence = complete_evidence();
+            evidence.attempts = vec![
+                attempt(role, &["write"]),
+                attempt("final-developer", &[]),
+                attempt("final-reviewer", &[]),
+            ];
+            let decision = acceptance_gate(&evidence);
+            assert_eq!(decision.status, AcceptanceStatus::Pass);
+            assert_eq!(
+                decision.label(),
+                "PASS (reduced: write)",
+                "lost {role}'s reduction"
+            );
+            evidence.attempts[0].admitted = false;
+            assert_eq!(
+                acceptance_gate(&evidence).status,
+                AcceptanceStatus::Inconclusive,
+                "unadmitted {role} must block approval"
+            );
+        }
+    }
+
+    #[test]
+    fn containment_labels_union_distinct_attempts_and_deduplicate_shortfalls() {
+        let mut evidence = complete_evidence();
+        evidence.attempts = vec![
+            attempt("developer", &["write", "tcp"]),
+            attempt("revision", &["udp"]),
+            attempt("qa-author", &["state-read"]),
+            attempt("qa-blind", &["state-read"]),
+            attempt("test-reviewer", &["descendants"]),
+            attempt("staged-reviewer", &[]),
+        ];
+        assert_eq!(
+            acceptance_gate(&evidence).label(),
+            "PASS (reduced: descendants,state-read,tcp,udp,write)"
         );
     }
 }

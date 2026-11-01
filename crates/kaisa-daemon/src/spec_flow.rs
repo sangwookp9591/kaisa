@@ -23,7 +23,7 @@ pub use crate::spec_adapters::{AgentStagedReview, LedgerCharacterize};
 use crate::traceability::{TraceabilityReport, traceability_report};
 use crate::{
     GoalOutcome, LabelledTest, TestOrigin, TestReviewInput, TestReviewRequest, VerifiedRequest,
-    prepare_review_repository, run_test_review, run_trusted_checks,
+    prepare_review_repository, run_trusted_checks,
 };
 
 /// Shared frozen inputs for review and characterization. Baselines have no candidate.
@@ -141,6 +141,7 @@ impl StagedReview for ExistingReviewer {
                 reduced_mode: request.reduced_mode,
             },
             &AttemptContext {
+                spec_run_id: Some(context.run_id),
                 diff: input.diff,
                 ..AttemptContext::default()
             },
@@ -296,10 +297,62 @@ pub(crate) fn event(
         .map_err(at("opening specification workflow ledger"))?;
     record(&mut ledger, kind, run, payload)
 }
+fn containment_receipts(
+    state: &Path,
+    run_id: &str,
+) -> Result<Vec<crate::acceptance::AttemptContainment>, GoalError> {
+    let ledger =
+        EventStore::open(&state.join("kaisa.db")).map_err(at("opening containment receipts"))?;
+    ledger
+        .verify()
+        .map_err(at("verifying containment receipts"))?;
+    let events = ledger
+        .read_from(kaisa_domain::Sequence::FIRST)
+        .map_err(at("reading containment receipts"))?;
+    let mut receipts = std::collections::BTreeMap::new();
+    for entry in events {
+        let recorded = entry.recorded;
+        let payload: Value = serde_json::from_str(&recorded.event.payload)
+            .map_err(at("parsing containment receipt"))?;
+        if payload["run_id"] != run_id {
+            continue;
+        }
+        let id = &recorded.event.subject;
+        if recorded.event.kind == EventKind::AttemptAdmitted {
+            receipts.insert(
+                id.clone(),
+                crate::acceptance::AttemptContainment {
+                    attempt: id.clone(),
+                    role: payload["role"].as_str().unwrap_or("unknown").into(),
+                    missing: Vec::new(),
+                    admitted: false,
+                    observed: false,
+                    evidence_id: format!("ledger:{}", recorded.sequence.value()),
+                },
+            );
+        } else if recorded.event.kind == EventKind::AttemptStateChanged
+            && !payload["containment"].is_null()
+        {
+            let receipt = receipts.get_mut(id).ok_or_else(|| GoalError {
+                step: "containment receipt",
+                detail: "actual containment has no run-scoped admission".into(),
+            })?;
+            let containment = &payload["containment"];
+            receipt.missing = serde_json::from_value(containment["missing"].clone())
+                .map_err(at("reading missing containment"))?;
+            receipt.admitted = containment["admitted"] == true;
+            receipt.observed = containment["observed"] == true;
+            receipt.evidence_id = format!("ledger:{}", recorded.sequence.value());
+        }
+    }
+    Ok(receipts.into_values().collect())
+}
+
 fn missing_evidence() -> AcceptanceEvidence {
     let unknown = || GateCheck::missing("stage has not produced evidence");
     AcceptanceEvidence {
         final_tree: None,
+        attempts: Vec::new(),
         provisional: false,
         reduced_assurance_approval: false,
         approval: unknown(),
@@ -653,6 +706,7 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
                 None,
             )?;
         }
+        evidence.attempts = containment_receipts(state, &run_id)?;
         let decision = acceptance_gate(&evidence);
         if decision.status != AcceptanceStatus::Fail
             || evidence.spec_digest.status == AcceptanceStatus::Fail
@@ -1055,23 +1109,29 @@ fn evaluate_candidate(
     let review_repo = run_directory(state, context.run_id).join(format!("test-review-{tree}"));
     prepare_review_repository(&review_repo).map_err(at("preparing isolated domain test review"))?;
     let spec_text = String::from_utf8(context.specification.canonical_json()).expect("spec UTF-8");
-    let domain = run_test_review(&TestReviewRequest {
-        review_repository: &review_repo,
-        state_directory: state,
-        input: TestReviewInput {
-            spec_text: &spec_text,
-            criteria: &context.specification.criteria,
-            tests: &labelled,
-            findings: &lint,
+    let domain = crate::test_review::run_test_review_with_context(
+        &TestReviewRequest {
+            review_repository: &review_repo,
+            state_directory: state,
+            input: TestReviewInput {
+                spec_text: &spec_text,
+                criteria: &context.specification.criteria,
+                tests: &labelled,
+                findings: &lint,
+            },
+            launch: request.test_reviewer,
+            kaisa_executable: workflow.kaisa_executable,
+            confine_agent: workflow.confine_agent && workflow.policy.policy().confine_agents,
+            egress_hosts: workflow.egress_hosts,
+            agent_writable: workflow.agent_writable,
+            observed: false,
+            reduced_mode: workflow.reduced_mode,
         },
-        launch: request.test_reviewer,
-        kaisa_executable: workflow.kaisa_executable,
-        confine_agent: workflow.confine_agent && workflow.policy.policy().confine_agents,
-        egress_hosts: workflow.egress_hosts,
-        agent_writable: workflow.agent_writable,
-        observed: false,
-        reduced_mode: workflow.reduced_mode,
-    })?;
+        &AttemptContext {
+            spec_run_id: Some(context.run_id),
+            ..Default::default()
+        },
+    )?;
     let (review_status, review_detail) = if !successful(&domain.attempt) {
         (
             AcceptanceStatus::Inconclusive,
@@ -1416,6 +1476,7 @@ fn finish(
             None,
         );
     }
+    evidence.attempts = containment_receipts(state, &run_id)?;
     let decision = acceptance_gate(&evidence);
     let mut trace = trace.unwrap_or(TraceabilityReport {
         run_id: run_id.clone(),

@@ -235,6 +235,7 @@ pub fn run_private_qa(request: &QaRequest<'_>) -> Result<QaOutcome, GoalError> {
         let pack = qa_context(request.frozen_spec, &interface, kind, request.toolchain);
         let (attempt, answer) = author_suite(
             request.state_directory,
+            request.run_id,
             request.repository,
             &temporary.0,
             process,
@@ -505,6 +506,7 @@ fn error(detail: &str) -> GoalError {
 
 pub(crate) fn author_suite(
     state: &Path,
+    run_id: &str,
     repository: &Path,
     temporary: &Path,
     process: &ProcessSpec,
@@ -534,7 +536,7 @@ pub(crate) fn author_suite(
         ledger,
         EventKind::AttemptAdmitted,
         attempt.as_str(),
-        json!({"task":format!("task_{suffix}"),"role":role,"read_only":true}),
+        json!({"task":format!("task_{suffix}"),"role":role,"run_id":run_id,"read_only":true}),
     )?;
     ledger
         .record_context_pack(&attempt, &digest, pack.as_bytes())
@@ -559,7 +561,17 @@ pub(crate) fn author_suite(
             .env
             .push((key.to_owned(), scratch.to_string_lossy().into_owned()));
     }
-    record_execution(ledger, &attempt, Execution::Starting)?;
+    record(
+        ledger,
+        EventKind::AttemptStateChanged,
+        attempt.as_str(),
+        json!({
+            "execution": Execution::Starting.code(), "run_id":run_id,
+            "containment":{"missing":missing.iter().map(|c| c.code()).collect::<Vec<_>>(),
+                "admitted": !matches!(kaisa_domain::admit_on(&missing, &kaisa_domain::ReducedModeBasis::None, crate::ids::now_ms()), kaisa_domain::Admission::Refused { .. }),
+                "observed":false}
+        }),
+    )?;
     record_execution(ledger, &attempt, Execution::Running)?;
     let captured = run_captured(
         &process,

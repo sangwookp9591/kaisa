@@ -700,6 +700,10 @@ fn run_goal_inner(
         EventKind::AttemptStateChanged,
         attempt.as_str(),
         json!({"execution": Execution::Starting.code(),
+            "run_id": context.spec_run_id,
+            "containment": {"missing": missing.iter().map(|c| c.code()).collect::<Vec<_>>(),
+                "admitted": !matches!(spawn_admission, Admission::Refused { .. }),
+                "observed": request.observed},
             "login_keychain_access": login_keychain_access,
             "notice": login_keychain_access.then_some(
                 "This confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot.")}),

@@ -420,8 +420,9 @@ fn run() -> Result<(), String> {
         if let Some(parent) = std::path::Path::new(&path).parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        return std::fs::write(&path, "written by an observed agent\n")
-            .map_err(|error| error.to_string());
+        let content = flag(&args, "--fake-observed-content")
+            .unwrap_or_else(|| "written by an observed agent\n".to_owned());
+        return std::fs::write(&path, content).map_err(|error| error.to_string());
     }
     let config_path: String = flag(&args, "--mcp-config").ok_or("missing --mcp-config")?;
     if let Some(mode) = flag(&args, "--fake-staged-review") {

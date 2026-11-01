@@ -25,7 +25,9 @@ use kaisa_context::{CriterionRef, LintFinding};
 use kaisa_domain::{Role, Severity, WriteSet};
 use serde_json::{Map, Value};
 
-use crate::goal::{AgentLauncher, GoalError, GoalOutcome, GoalRequest, at, run_goal};
+use crate::goal::{
+    AgentLauncher, AttemptContext, GoalError, GoalOutcome, GoalRequest, at, run_goal_with_context,
+};
 use crate::review::VerdictError;
 
 /// The JSON a reviewer must end its answer with.
@@ -676,27 +678,37 @@ pub struct TestReviewOutcome {
 /// Returns [`GoalError`] if the review repository is not the fresh README-only one, or if the
 /// attempt could not be run or its transcript not read.
 pub fn run_test_review(request: &TestReviewRequest<'_>) -> Result<TestReviewOutcome, GoalError> {
+    run_test_review_with_context(request, &AttemptContext::default())
+}
+
+pub(crate) fn run_test_review_with_context(
+    request: &TestReviewRequest<'_>,
+    context: &AttemptContext<'_>,
+) -> Result<TestReviewOutcome, GoalError> {
     // Checked here, at the attempt, not trusted from how the repository was prepared.
     validate_review_repository(request.review_repository)
         .map_err(at("validate the review repository"))?;
     let instruction = review_prompt(&request.input);
     let no_paths = WriteSet::default();
-    let attempt = run_goal(&GoalRequest {
-        repository: request.review_repository,
-        goal: &instruction,
-        base: "HEAD",
-        state_directory: request.state_directory,
-        write_set: &no_paths,
-        role: Role::Reviewer,
-        launch: request.launch,
-        kaisa_executable: request.kaisa_executable,
-        confine_agent: request.confine_agent,
-        egress_hosts: request.egress_hosts,
-        agent_writable: request.agent_writable,
-        local_model_port: None,
-        observed: request.observed,
-        reduced_mode: request.reduced_mode,
-    })?;
+    let attempt = run_goal_with_context(
+        &GoalRequest {
+            repository: request.review_repository,
+            goal: &instruction,
+            base: "HEAD",
+            state_directory: request.state_directory,
+            write_set: &no_paths,
+            role: Role::Reviewer,
+            launch: request.launch,
+            kaisa_executable: request.kaisa_executable,
+            confine_agent: request.confine_agent,
+            egress_hosts: request.egress_hosts,
+            agent_writable: request.agent_writable,
+            local_model_port: None,
+            observed: request.observed,
+            reduced_mode: request.reduced_mode,
+        },
+        context,
+    )?;
     let transcript = std::fs::read_to_string(
         request
             .state_directory

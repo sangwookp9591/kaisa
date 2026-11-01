@@ -275,6 +275,7 @@ impl LegacyCharacterizer<'_> {
                 .map_err(at("opening characterization ledger"))?;
             let (_, answer) = author_suite(
                 self.state,
+                self.run_id,
                 self.repository,
                 &temporary,
                 self.author,

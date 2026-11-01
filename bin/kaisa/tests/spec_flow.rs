@@ -191,7 +191,12 @@ impl BuildBench {
         let developer = |config: &Path| ProcessSpec {
             program: fake.clone(),
             args: if observed {
-                vec!["--fake-observed-write".into(), target.into()]
+                vec![
+                    "--fake-observed-write".into(),
+                    target.into(),
+                    "--fake-observed-content".into(),
+                    content.into(),
+                ]
             } else {
                 vec![
                     "--mcp-config".into(),
@@ -1128,9 +1133,9 @@ fn production_rejects_an_explanation_only_blocking_downgrade() {
         true,
         platform_isolation_acceptance(),
     );
-    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Inconclusive);
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Fail);
     let check = gate_line(&outcome, "staged review approved");
-    assert_eq!(check.status, AcceptanceStatus::Inconclusive);
+    assert_eq!(check.status, AcceptanceStatus::Fail);
     assert!(
         check.detail.contains("requires passing check/QA evidence"),
         "{}",
@@ -1178,11 +1183,45 @@ fn production_happy_path_passes_with_traceability_and_review_only_stage_three_co
         outcome.acceptance
     );
     assert_eq!(outcome.attempts.len(), 2);
-    assert_eq!(outcome.acceptance.lines.len(), 10);
+    assert_eq!(outcome.acceptance.lines.len(), 11);
+    let containment = gate_line(&outcome, "all attempt containment admitted");
+    assert_eq!(
+        containment.evidence_ids.len(),
+        9,
+        "characterization, both developers, both QA authors, and both reviewers on both revisions"
+    );
+    let events = recorded_events(&bench);
+    let admissions: Vec<_> = events
+        .iter()
+        .filter(|entry| {
+            entry.recorded.event.kind == kaisa_domain::EventKind::AttemptAdmitted
+                && serde_json::from_str::<serde_json::Value>(&entry.recorded.event.payload)
+                    .expect("admission")["run_id"]
+                    == outcome.run_id
+        })
+        .collect();
+    assert_eq!(
+        admissions.len(),
+        containment.evidence_ids.len(),
+        "every admission must feed the gate"
+    );
+    for entry in admissions {
+        assert!(
+            containment.evidence_ids.iter().any(|id| {
+                events.iter().any(|receipt| {
+                    format!("ledger:{}", receipt.recorded.sequence.value()) == *id
+                        && receipt.recorded.event.subject == entry.recorded.event.subject
+                })
+            }),
+            "attempt {} is missing from the gate",
+            entry.recorded.event.subject
+        );
+    }
+
     if !kaisa_daemon::expected_sandbox_missing(true).is_empty() {
         assert!(outcome.acceptance.label().contains("reduced:"));
         assert!(
-            !gate_line(&outcome, "staged review approved")
+            !gate_line(&outcome, "all attempt containment admitted")
                 .admitted_reductions
                 .is_empty()
         );
@@ -1453,4 +1492,147 @@ fn build_spec_cli_uses_production_adapters_and_reports_the_admitted_reduction() 
     assert!(recorded_events(&bench).iter().any(|e| e.recorded.event.kind
         == kaisa_domain::EventKind::ReviewVerdict
         && e.recorded.event.payload.contains("stage5_judgment_changes")));
+}
+
+#[test]
+fn production_review_evidence_is_only_this_run_and_final_tree() {
+    let mut bench = production_bench("scratch-evidence-scope", true);
+    bench.staged_mode = "resolve".into();
+    bench.revision_limit = 1;
+    bench.freeze();
+    // First run in the same state directory leaves passing evidence for another run.
+    let first = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    let outcome = bench.run(
+        LIBRARY,
+        BUGGY_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(first.acceptance.status, AcceptanceStatus::Pass);
+    assert_eq!(outcome.acceptance.status, AcceptanceStatus::Pass);
+    assert_eq!(
+        outcome.attempts.len(),
+        2,
+        "exercise stale revision evidence"
+    );
+    let events = recorded_events(&bench);
+    let tree = &outcome.candidate.as_ref().expect("candidate").tree;
+    let path = bench
+        .bench
+        .state()
+        .join("spec-runs")
+        .join(&outcome.run_id)
+        .join(format!("staged-review-context-{tree}.json"));
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("ctx")).expect("json");
+    let ids: Vec<u64> = context[1]["evidence"]
+        .as_array()
+        .expect("evidence")
+        .iter()
+        .map(|e| {
+            e["id"]
+                .as_str()
+                .expect("valid recorded evidence")
+                .strip_prefix("ledger:")
+                .expect("valid recorded evidence")
+                .parse()
+                .expect("valid recorded evidence")
+        })
+        .collect();
+    assert!(!ids.is_empty());
+    for id in ids {
+        let e = events
+            .iter()
+            .find(|e| e.recorded.sequence.value() == id)
+            .expect("event");
+        let p: serde_json::Value =
+            serde_json::from_str(&e.recorded.event.payload).expect("valid recorded evidence");
+        assert_eq!(
+            p["run_id"], outcome.run_id,
+            "evidence ledger:{id} from another run"
+        );
+        assert_eq!(
+            &p["candidate_tree"], tree,
+            "evidence ledger:{id} from a stale tree"
+        );
+    }
+}
+
+#[test]
+fn production_observed_developer_labels_every_missing_capability() {
+    let mut bench = production_bench("production-observed-label", true);
+    bench.staged_mode = "resolve".into();
+    bench.freeze();
+    let outcome = bench.run_mode(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        Some("reduced(observed developer)"),
+        true,
+    );
+    assert_eq!(
+        outcome.acceptance.status,
+        AcceptanceStatus::Pass,
+        "{:?}",
+        outcome.acceptance
+    );
+    let label = outcome.acceptance.label();
+    for capability in ContainmentCapability::ALL {
+        assert!(
+            label.contains(capability.code()),
+            "missing {} in {label}",
+            capability.code()
+        );
+    }
+    assert!(label.contains("observed"));
+}
+
+#[test]
+fn production_reports_characterization_as_not_applicable_when_base_has_tests() {
+    let mut bench = production_bench("production-no-legacy", true);
+    // Existing executable coverage means the public entry point is not untested legacy.
+    std::fs::write(bench.repository.join(LIBRARY), BUGGY_IMPLEMENTATION).expect("covered base");
+    std::fs::create_dir_all(bench.repository.join("tests")).expect("existing test directory");
+    std::fs::write(
+        bench.repository.join("tests/existing.rs"),
+        "#[test] fn nonempty() { assert!(spec_fixture::accept(\"value\")); }\n",
+    )
+    .expect("existing executable coverage");
+    git(&bench.repository, &["add", LIBRARY, "tests/existing.rs"]);
+    git(
+        &bench.repository,
+        &[
+            "-c",
+            "user.name=Kaisa Test",
+            "-c",
+            "user.email=kaisa@example.invalid",
+            "commit",
+            "-qm",
+            "existing coverage",
+        ],
+    );
+    bench.original_head = git(&bench.repository, &["rev-parse", "HEAD"]);
+    bench.staged_mode = "resolve".into();
+    bench.freeze();
+    let outcome = bench.run(
+        LIBRARY,
+        VALID_IMPLEMENTATION,
+        true,
+        platform_isolation_acceptance(),
+    );
+    assert_eq!(
+        outcome.acceptance.status,
+        AcceptanceStatus::Pass,
+        "{:?}",
+        outcome.acceptance
+    );
+    assert_eq!(
+        gate_line(&outcome, "characterization honoured").detail,
+        "no untested legacy area detected; characterization not applicable"
+    );
 }

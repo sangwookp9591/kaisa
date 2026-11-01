@@ -12,8 +12,8 @@ use kaisa_domain::{ReviewVerdict, Role, WriteSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::goal::at;
-use crate::{GoalError, GoalOutcome, GoalRequest, VerdictError, parse_verdict, run_goal};
+use crate::goal::{AttemptContext, at, run_goal_with_context};
+use crate::{GoalError, GoalOutcome, GoalRequest, VerdictError, parse_verdict};
 
 /// The required stage order in both context and answer.
 pub const STAGES: [&str; 5] = [
@@ -232,6 +232,7 @@ pub fn parse_staged_review(
         .iter()
         .map(|(id, c)| (*id, c.severity))
         .collect::<BTreeMap<_, _>>();
+    let mut retained_blockers = BTreeMap::new();
     for change in changes {
         if change.reason.trim().is_empty()
             || change.from == change.to
@@ -252,7 +253,15 @@ pub fn parse_staged_review(
         }
         // All downgrades require execution evidence; explanations never close a blocker.
         if (change.from == Judgment::Blocking || change.to == Judgment::Resolved) && !execution {
-            return Err("downgrade or resolution requires passing check/QA evidence".into());
+            if change.from != Judgment::Blocking {
+                return Err("downgrade or resolution requires passing check/QA evidence".into());
+            }
+            retained_blockers.insert(
+                change.concern_id.as_str(),
+                initial[change.concern_id.as_str()],
+            );
+        } else if execution {
+            retained_blockers.remove(change.concern_id.as_str());
         }
         judgments.insert(
             initial
@@ -279,7 +288,20 @@ pub fn parse_staged_review(
         .iter()
         .map(|c| json!({"severity":c.severity,"path":c.path,"line":c.line,"message":c.message}))
         .collect::<Vec<_>>();
-    let verdict = parse_verdict(&json!({"candidate_tree":answer.candidate_tree,"approve":answer.approve,"findings":findings}).to_string(), &input.candidate_tree).map_err(|e| e.to_string())?;
+    // Validate the declared output completely before retaining unsupported blockers. Other
+    // protocol errors (including a stale tree or contradictory verdict) remain inconclusive.
+    let mut verdict = parse_verdict(&json!({"candidate_tree":answer.candidate_tree,"approve":answer.approve,"findings":findings}).to_string(), &input.candidate_tree).map_err(|e| e.to_string())?;
+    for concern in retained_blockers.values() {
+        verdict.findings.push(kaisa_domain::Finding {
+            severity: kaisa_domain::Severity::Blocking,
+            path: kaisa_domain::RepoPath::try_new(&concern.path).expect("validated concern path"),
+            line: concern.line,
+            message: format!(
+                "{}; downgrade or resolution requires passing check/QA evidence",
+                concern.message
+            ),
+        });
+    }
     Ok(ValidatedStagedReview { verdict, stages })
 }
 
@@ -349,14 +371,25 @@ pub fn run_staged_review(
     request: GoalRequest<'_>,
     input: &StagedReviewInput,
 ) -> Result<StagedReviewOutcome, GoalError> {
+    run_staged_review_with_context(request, input, &AttemptContext::default())
+}
+
+pub(crate) fn run_staged_review_with_context(
+    request: GoalRequest<'_>,
+    input: &StagedReviewInput,
+    context: &AttemptContext<'_>,
+) -> Result<StagedReviewOutcome, GoalError> {
     let instruction = staged_review_prompt(input);
     let no_paths = WriteSet::default();
-    let attempt = run_goal(&GoalRequest {
-        goal: &instruction,
-        role: Role::Reviewer,
-        write_set: &no_paths,
-        ..request
-    })?;
+    let attempt = run_goal_with_context(
+        &GoalRequest {
+            goal: &instruction,
+            role: Role::Reviewer,
+            write_set: &no_paths,
+            ..request
+        },
+        context,
+    )?;
     let transcript = std::fs::read_to_string(
         request
             .state_directory
@@ -494,14 +527,20 @@ mod tests {
             let mut answer = resolved_review();
             answer["stages"][4]["changes"][0]["evidence_ids"] = json!([id]);
             assert!(
-                parse_staged_review(&answer.to_string(), &review_input()).is_err(),
+                !parse_staged_review(&answer.to_string(), &review_input())
+                    .expect("valid review with retained blocker")
+                    .verdict()
+                    .approves("frozen-session-tree"),
                 "persuasion or source alone cannot close a blocker"
             );
         }
         let mut failed = review_input();
         failed.evidence[0].passed = false;
         assert!(
-            parse_staged_review(&resolved_review().to_string(), &failed).is_err(),
+            !parse_staged_review(&resolved_review().to_string(), &failed)
+                .expect("valid review with failed execution")
+                .verdict()
+                .approves(&failed.candidate_tree),
             "failed execution does not justify removing a blocker"
         );
     }
@@ -539,7 +578,10 @@ mod tests {
         downgrade["stages"][4]["changes"][0]["to"] = json!("advisory");
         downgrade["stages"][4]["changes"][0]["evidence_ids"] = json!(["developer-explanation"]);
         assert!(
-            parse_staged_review(&downgrade.to_string(), &review_input()).is_err(),
+            !parse_staged_review(&downgrade.to_string(), &review_input())
+                .expect("valid advisory downgrade with retained blocker")
+                .verdict()
+                .approves("frozen-session-tree"),
             "downgrading a blocker needs execution just as resolution does"
         );
     }
@@ -604,5 +646,15 @@ mod tests {
             parse_staged_review(&unknown.to_string(), &review_input()).is_err(),
             "the strict schema rejects extra fields"
         );
+    }
+    #[test]
+    fn an_unsupported_downgrade_does_not_hide_other_invalid_review_output() {
+        let mut answer = resolved_review();
+        answer["stages"][4]["changes"][0]["evidence_ids"] = json!(["developer-explanation"]);
+        answer["candidate_tree"] = json!("another-tree");
+        assert!(parse_staged_review(&answer.to_string(), &review_input()).is_err());
+        answer["candidate_tree"] = json!("frozen-session-tree");
+        answer["stages"][4]["changes"][0]["evidence_ids"] = json!(["unknown-id"]);
+        assert!(parse_staged_review(&answer.to_string(), &review_input()).is_err());
     }
 }
