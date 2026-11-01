@@ -1,4 +1,5 @@
 //! Exercise the documented offline example, including its production gate and reports.
+//! macOS-only runtime evidence: this regression is not compiled on Linux or Windows.
 #[cfg(target_os = "macos")]
 #[test]
 fn documented_offline_spec_demo_delivers_only_the_passing_candidate() {

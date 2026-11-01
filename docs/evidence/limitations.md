@@ -8,7 +8,10 @@ worktrees' `target/kaisa-review/` were read as background, not substituted for r
 | Label / limit | Consequence and evidence boundary |
 |---|---|
 | `qa_evidence: candidate-influenceable-in-process` | Candidate code shares the harness process. Positive named results and matching summaries reject the recorded exit-zero attacks, but a candidate anticipating all expected lines can forge output. PASS is not proof against arbitrary in-process forgery. See the demo gate reports and `review_repro_b_candidate_exit_zero_cannot_pass_a_private_criterion`. |
-| macOS runtime only | Native isolation was exercised here only. Linux and Windows cross-clippy are compile checks; their filesystem, private-input write denial, networking and author isolation require native runtime validation. |
+| Plain-goal path has no private QA | Plain `kaisa "<goal>"` can still deliver a candidate that terminates the test process early with `exit(0)`. Only `kaisa build --spec <id>` blocks the recorded attack through private QA; see the `exit-zero` row in [before/after](before-after.md). |
+| Unknown-command UX risk | Older binaries without the `spec` subcommand treat `kaisa spec` as goal text and can start a real agent attempt. Current dispatch recognizes `spec` and reserves planned commands, but still sends other unknown first words to the goal parser (`crates/kaisa-cli/src/lib.rs:181`); a typo can therefore start a real attempt. This is a known risk; CLI behavior is unchanged. |
+| Test harness binary replacement | `bin/kaisa/tests/mcp_serve.rs` relies on the `test-hooks` build to redirect agent launches to the fake. Rebuilding `target/debug/kaisa` without that feature while integration tests run can replace the binary and make those tests launch the real agent CLI found on PATH. Do not run concurrent builds against that target directory; offline validation should also put refusing `claude`/`codex` shims first on PATH. |
+| macOS runtime only | Native isolation was exercised here only. The demo regression `bin/kaisa/tests/spec_demo.rs` is compiled only on macOS and is skipped entirely on Linux/Windows. Linux and Windows cross-clippy are compile checks; their filesystem, private-input write denial, networking and author isolation require native runtime validation. |
 | Lexical detectors | Test detection, assertions, cfg wrappers, legacy coverage and public-interface extraction use bounded lexical analysis, not semantic proof. Aliasing, generated code and encodings can escape heuristics. The before/after report covers only its concrete fixtures. |
 | Same-user trust | State belongs to the user's OS identity. Unconfined/observed agents or unrelated same-user processes may impersonate PTY input or rewrite user-owned state. Digest checks and append receipts do not form a cryptographic boundary against the state owner. |
 | Reduced containment | Missing write/state-read/tcp/udp/descendants capabilities and observed mode are aggregated across all attempts. PASS is labelled only when shortfalls are admitted; an unadmitted shortfall is INCONCLUSIVE. macOS demo reports `reduced: descendants`. |
@@ -19,14 +22,19 @@ worktrees' `target/kaisa-review/` were read as background, not substituted for r
 | Routing attribution | Legacy rows without agent/model/effort route identity remain unattributable. Explicit fake/model launches bypass automatic routing. Cold-start catalog order is a proxy; no real model quality, price advantage or latency advantage was measured. |
 | Parallel scheduling | Explicit user-supplied DAGs, deterministic waves and write-set exclusion are implemented. Slow siblings delay later waves; admitted failures drain under existing deadlines. There is no immediate interactive sibling cancellation or automatic decomposition. |
 | Shared Git metadata | The common-directory mutex and advisory lock serialize cooperating Kaisa worktree calls, including QA and recovery listings. They do not serialize arbitrary external Git processes that ignore the lock. Mixed-thread/process regressions ran here. |
-| Production pre-exec lock inheritance window | `crates/kaisa-daemon/src/goal.rs:441-453` names/prepares the attempt before the owner lock; the owner handle is retained around spawn near `:684` (line numbers shift). Unix fork-before-exec can inherit descriptors before close-on-exec. Concurrent process creation can transiently extend an owner lock's lifetime. This task does not establish elimination of that window; QA author attempts also lack normal owner-lock receipts, producing the preserved conservative “older Kaisa / no owner lock” recovery notices on a second demo build. |
+| Production pre-exec lock inheritance window | `crates/kaisa-daemon/src/goal.rs:441-453` names/prepares the attempt before the owner lock; the owner handle is retained at `crates/kaisa-daemon/src/goal.rs:467`, through the process start at `crates/kaisa-daemon/src/goal.rs:716`. Unix fork-before-exec can inherit descriptors before close-on-exec. Concurrent process creation can transiently extend an owner lock's lifetime. This task does not establish elimination of that window; QA author attempts also lack normal owner-lock receipts, producing the preserved conservative “older Kaisa / no owner lock” recovery notices on a second demo build. |
 | Runtime ownership | The engine/keeper runs in the CLI process; there is no independent daemon/keeper process or restart reattachment. Existing state may require manual preserved-worktree inspection. |
 | Feedback redaction | Source overlap filters and bounded observable messages reject recorded disclosures; arbitrary encodings from hostile in-process code are not proven confidential. |
 
 ## Measured offline costs
 
 The demo ran with a zero revision budget. The fake answers are deterministic; IDs,
-resource observations and Git digests vary. `/usr/bin/time -l` on this macOS host
+resource observations and Git digests vary. IDs, hashes and temporary paths have no
+numeric variance bound. In the reviewer’s one-off rerun, build wall time differed
+by about 3–6%, peak RSS by about 2% (roughly 119–123 MB), per-agent RSS by about
+0.5–1.5%, and ledger `elapsed_ms` by about 15% (recorded 32–34 ms versus rerun
+28–29 ms). These are observed differences, not guaranteed ranges.
+`/usr/bin/time -l` on this macOS host
 reports wall seconds at hundredth-second resolution and maximum resident set size
 in bytes. A reported `0.00` means below that display resolution, not zero work.
 Raw command measurements and per-agent measurements are linked below. RSS is a

@@ -92,6 +92,8 @@ acceptance and adversarial tests, review test quality and the candidate, and pub
 only after the orchestrator's final-tree gate passes. Provisional approval requires
 `kaisa policy set allow_provisional_spec true` and
 `kaisa spec approve <id> --provisional`; it never counts as human approval.
+Plain `kaisa "<goal>"` has no private QA and can still deliver the recorded
+premature-`exit(0)` candidate; that attack is blocked by `build --spec`.
 See the [offline fake-agent demo](examples/spec-demo/),
 [recorded results](docs/evidence/spec-demo/traceability.md), and
 [platform and trust limits](docs/evidence/limitations.md).
@@ -563,8 +565,10 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
   next `kaisa` start; a still-running agent is ended, not reattached.
 - **Captured output, not a PTY.** Agents run with captured stdio. `kaisa wrap`, attach and steer do not
   exist.
-- **Event-sourced ledger.** SQLite stores immutable specs, attempts, context packs and events; most state is folded from events. The outbox is built and tested but not on the run
-  path. There is no single OS-level ledger writer.
+- **Event-sourced ledger.** SQLite stores attempts, context packs and events. Immutable specs
+  are content-addressed JSON files under the state directory (`specs/<id>/v<n>.json`),
+  with ledger events; most state is folded from events. The outbox is built and tested
+  but not on the run path. There is no single OS-level ledger writer.
 - **Index and impact sets** are built but a run does not use them. Unpinned Claude verified goals record measured routing decisions; task impact signals remain approximate. Explicit agent/model launches keep their selections.
 - **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
   off" label yet.
