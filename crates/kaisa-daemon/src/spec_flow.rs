@@ -522,6 +522,9 @@ pub fn run_spec_goal(request: &SpecRequest<'_, '_>) -> Result<SpecOutcome, GoalE
         )?,
     };
     if baseline.status != AcceptanceStatus::Pass {
+        // Development requires a passing baseline. Later lines intentionally retain
+        // "stage has not produced evidence"; a reduced developer QA-isolation label
+        // is instead evaluated after verification and does not cause this return.
         evidence.characterization = baseline;
         return finish(
             request,
@@ -833,7 +836,7 @@ fn evaluate_candidate(
             state,
             context.run_id,
             EventKind::CheckEvidence,
-            json!({"candidate_tree":check.candidate_tree,"command":check.check,"passed":check.passed(),"output_digest":check.output_digest,"confined":check.confined,"weakened_tests":check.weakened_tests,"definitions_changed":check.definitions_changed}),
+            json!({"candidate_tree":check.candidate_tree,"command":check.check,"passed":check.passed(),"output_digest":check.output_digest,"generated_lockfile":check.generated_lockfile,"confined":check.confined,"weakened_tests":check.weakened_tests,"definitions_changed":check.definitions_changed}),
         )?;
         if !check.passed() || !check.applies_to(candidate) {
             deterministic_failures.push(format!("trusted check failed: {:?}", check.check));
@@ -888,6 +891,15 @@ fn evaluate_candidate(
     )?;
     let isolation = worst_qa_isolation(developers.iter().map(qa_isolation));
     *stage = EvaluationStage::PrivateQa;
+    // Matching bytes cannot prove that candidate code was denied writes to private inputs.
+    // In particular Windows check execution is unconfined. Refuse this evidence boundary
+    // explicitly rather than turning an unavailable guarantee into a test failure or PASS.
+    if !crate::qa::qa_write_deny_available() {
+        return Err(GoalError {
+            step: "verifying private QA isolation",
+            detail: "private QA write-deny unavailable; digests alone cannot verify private input isolation".into(),
+        });
+    }
     let results: Vec<QaResult> = if suites.is_empty() {
         let spec_json = serde_json::to_value(context.specification).expect("spec JSON");
         let outcome = run_private_qa(&QaRequest {
@@ -920,7 +932,7 @@ fn evaluate_candidate(
         }
         results
     };
-    let results_json: Vec<_> = results.iter().map(|result| json!({"kind":result.kind.code(),"test_id":result.test_id,"criterion_ids":result.criterion_ids,"passed":result.passed,"candidate_tree":result.candidate_tree,"output_digest":result.output_digest,"qa_isolation":result.qa_isolation.label(),"qa_evidence":result.qa_evidence,"positive_evidence":result.positive_evidence,"private_test_integrity":result.private_test_integrity,"blocking_findings":result.blocking_findings})).collect();
+    let results_json: Vec<_> = results.iter().map(|result| json!({"kind":result.kind.code(),"test_id":result.test_id,"criterion_ids":result.criterion_ids,"passed":result.passed,"generated_lockfile":result.generated_lockfile,"candidate_tree":result.candidate_tree,"output_digest":result.output_digest,"qa_isolation":result.qa_isolation.label(),"qa_evidence":result.qa_evidence,"positive_evidence":result.positive_evidence,"private_test_integrity":result.private_test_integrity,"blocking_findings":result.blocking_findings})).collect();
     let qa_id = artifact(
         state,
         context.run_id,

@@ -184,6 +184,7 @@ mod tests {
             output_digest: "digest-of-test-output".to_owned(),
             output_tail: String::new(),
             confined: true,
+            generated_lockfile: false,
             definitions_changed: Vec::new(),
             weakened_tests: Vec::new(),
             advisories: Vec::new(),

@@ -24,23 +24,21 @@ echo "== tests"
 cargo build --locked -q -p kaisa-fake-agent
 cargo test --workspace --locked --no-fail-fast
 if rustup target list --installed 2>/dev/null | grep -qx "x86_64-pc-windows-msvc"; then
-  # Only crates without C build steps: blake3 (assembly) and SQLite cannot be cross-compiled
-  # for MSVC from macOS/Linux, so kaisa-ledger, kaisa-context, kaisa-mcp, kaisa-agents, kaisa-cli and the binary (which reach blake3) are left
-  # out; their Windows-specific code lives in kaisa-sys, which is checked here. The real Windows
-  # CI runner builds and tests everything.
-  echo "== clippy (Windows cross-check of crates without C build steps, compile only)"
-  cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc \
-    -p kaisa-sys -p kaisa-keeper -p kaisa-domain -p kaisa-protocol -p kaisa-workspace -p kaisa-supervisor -p kaisa-egress --features blake3/pure \
-    -- -D warnings
-  # blake3's C/assembly build cannot target MSVC from here; its pure-Rust build can. Crates that
-  # also need bundled SQLite (ledger, daemon, cli) still rely on the Windows CI job.
-  for crate in kaisa-mcp kaisa-context; do
-    cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -p "$crate" --features blake3/pure \
-      -- -D warnings
-  done
+  echo "== clippy (Windows cross-check of the full workspace, compile only)"
+  # As in the Linux cross-check below, use Rust bindings without cross-building native
+  # SQLite/blake3. This checks daemon and CLI cfg branches too; Windows CI tests runtime.
+  LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/usr/lib \
+    cargo clippy --workspace --locked --all-targets --target x86_64-pc-windows-msvc \
+      --features blake3/pure -- -D warnings
 fi
 if [[ "$(uname -s)" != "Linux" ]] && rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
-  echo "== clippy (Linux cross-check of kaisa-sys and kaisa-mcp, compile only)"
-  cargo clippy --locked --all-targets --target x86_64-unknown-linux-gnu -p kaisa-sys -p kaisa-mcp -- -D warnings
+  echo "== clippy (Linux cross-check of the full workspace, compile only)"
+  # Check the same workspace and targets as CI, including Linux-only daemon code. Pure
+  # blake3 and SQLite's linked bindings avoid cross-building C/assembly: clippy emits no
+  # executable, so no target SQLite library or linker is needed. Native CI still builds
+  # and runs the bundled C code with the normal features.
+  LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/usr/lib \
+    cargo clippy --workspace --locked --all-targets --target x86_64-unknown-linux-gnu \
+      --features blake3/pure -- -D warnings
 fi
 echo "== all checks passed"

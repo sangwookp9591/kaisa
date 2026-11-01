@@ -21,7 +21,7 @@ pub use candidate::{
     Candidate, CandidateCheckout, candidate_diff, changed_check_definitions, changed_paths,
     freeze_candidate, weakened_tests,
 };
-pub use git::{GitError, git_cli_path};
+pub use git::{GitError, external_tool_path, git_cli_path};
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
 pub use qa_store::{QaKind, QaManifestEntry, QaSuite, QaTestFile, record_qa_suite};

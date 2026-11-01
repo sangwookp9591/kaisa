@@ -536,7 +536,7 @@ fn run_verified_goal_inner(
                 &candidate.tree,
                 json!({"candidate_tree": piece.candidate_tree, "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                     "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
-                    "exit": exit, "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(),
+                    "exit": exit, "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(), "generated_lockfile": piece.generated_lockfile,
                     "confined": piece.confined, "definitions_changed": piece.definitions_changed,
                     "weakened_tests": piece.weakened_tests, "advisories":piece.advisories}),
             )?;
@@ -1019,7 +1019,7 @@ pub(crate) fn verify_integration(
                 "command": piece.check.iter().map(|arg| safe_reason(arg)).collect::<Vec<_>>(),
                 "check_id": format!("check_{}", blake3::hash(serde_json::to_string(&piece.check).unwrap_or_default().as_bytes()).to_hex()),
                 "exit": match piece.exit { Some(ProcessExit::Code(code)) => json!({"code":code}), Some(ProcessExit::Terminated) => json!({"terminated":true}), None => json!({"deadline_exceeded":true}) },
-                "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(),
+                "passed": piece.passed(), "output_digest": piece.output_digest, "validation": piece.validation_label(), "generated_lockfile": piece.generated_lockfile,
                 "confined": piece.confined, "definitions_changed":piece.definitions_changed, "weakened_tests":piece.weakened_tests, "advisories":piece.advisories}),
         )?;
     }
@@ -1091,6 +1091,7 @@ mod tests {
             output_digest: String::new(),
             output_tail: FORGED_OUTPUT.to_owned(),
             confined: false,
+            generated_lockfile: false,
             definitions_changed: vec![],
             weakened_tests: vec![],
             advisories: vec![],

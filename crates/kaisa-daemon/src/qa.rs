@@ -4,8 +4,8 @@
 //! external private inputs, artifact digests and positive named-test harness evidence.
 //! Runtime private-QA write denial and author isolation were exercised only on macOS;
 //! native Linux/Windows guarantees remain unverified (NFR-04/NFR-08). The Linux/Windows
-//! cross-clippy checks in scripts/check.sh are compile-only; this macOS host's Windows
-//! cross-check excludes the SQLite-dependent daemon.
+//! cross-clippy checks in scripts/check.sh cover the full workspace but are compile-only;
+//! they do not validate native SQLite linking or runtime isolation.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -17,7 +17,9 @@ use kaisa_domain::{
 };
 use kaisa_ledger::EventStore;
 use kaisa_sys::{CapturedRun, ProcessExit, ProcessSpec, run_captured};
-use kaisa_workspace::{Candidate, CandidateCheckout, QaKind, QaSuite, QaTestFile, record_qa_suite};
+use kaisa_workspace::{
+    Candidate, CandidateCheckout, QaKind, QaSuite, QaTestFile, external_tool_path, record_qa_suite,
+};
 use serde_json::{Value, json};
 
 use crate::goal::{GoalError, GoalOutcome, at, record, record_execution};
@@ -144,6 +146,8 @@ pub struct QaResult {
     pub candidate_tree: String,
     /// Whether the check actually ran with OS confinement.
     pub confined: bool,
+    /// Kaisa prepared a missing Cargo.lock output in its disposable checkout.
+    pub generated_lockfile: bool,
     /// Source changes invalidate evidence even if the test returned zero.
     pub source_unchanged: bool,
     /// OS write denial applied and installed bytes match before and after execution.
@@ -916,7 +920,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
                 file,
                 "\n[[test]]\nname = {}\npath = {}",
                 json!(name),
-                json!(path.to_string_lossy())
+                json!(external_tool_path(&path))
             )
             .map_err(at("adding immutable QA target"))?;
         }
@@ -934,6 +938,9 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
         ));
     }
     let readonly = vec![inputs.clone(), manifest.clone()];
+    let generated_lockfile = matches!(toolchain, QaToolchain::Rust { .. })
+        && crate::verify::prepare_cargo_lockfile(checkout.path())
+            .map_err(at("preparing private QA Cargo lockfile output"))?;
     let mut build = None;
     if findings.is_empty()
         && let QaToolchain::Rust { cargo } = toolchain
@@ -944,8 +951,11 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             "--no-run".into(),
             "--message-format=json".into(),
             "--manifest-path".into(),
-            manifest.to_string_lossy().into_owned(),
+            external_tool_path(&manifest),
         ];
+        if !generated_lockfile {
+            args.push("--locked".into());
+        }
         args.extend(cargo_configuration_overrides(cargo, &runtime)?);
         for name in &names {
             args.extend(["--test".into(), name.clone()]);
@@ -1041,7 +1051,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
                         args: vec![
                             "--test".into(),
                             "--test-reporter=tap".into(),
-                            installed[index].to_string_lossy().into_owned(),
+                            external_tool_path(&installed[index]),
                         ],
                         working_directory: checkout.path().to_owned(),
                         env: Vec::new(),
@@ -1116,6 +1126,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             output_digest: blake3::hash(&run.output).to_hex().to_string(),
             candidate_tree: candidate.tree.clone(),
             confined,
+            generated_lockfile,
             source_unchanged: unchanged,
             private_test_unchanged,
             expected_tests: expected[index].clone(),
@@ -1136,6 +1147,7 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
             &test.test_id,
             json!({"run_id":run_id,"test_id":result.test_id,"kind":result.kind.code(),"criterion_ids":result.criterion_ids,
                 "passed":result.passed,"output_digest":result.output_digest,"candidate_tree":result.candidate_tree,"confined":result.confined,
+                "generated_lockfile":result.generated_lockfile,
                 "source_unchanged":result.source_unchanged,"private_test_unchanged":result.private_test_unchanged,
                 "private_test_integrity":result.private_test_integrity,"qa_evidence":result.qa_evidence,"expected_tests":result.expected_tests,
                 "positive_evidence":result.positive_evidence,"blocking_findings":result.blocking_findings,
@@ -1152,9 +1164,9 @@ pub(crate) fn execute_suite(request: &SuiteExecution<'_>) -> Result<Vec<QaResult
 }
 
 fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<String>, GoalError> {
-    let output = std::process::Command::new(cargo)
+    let output = std::process::Command::new(external_tool_path(cargo))
         .arg("-vV")
-        .current_dir(directory)
+        .current_dir(external_tool_path(directory))
         .env_clear()
         .envs(kaisa_sys::base_environment())
         .output()
@@ -1174,7 +1186,7 @@ fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<S
     // cfg and exact-host runners: --no-run is mandatory and Kaisa executes binaries itself.
     let runner = format!(
         "[{}, \"--kaisa-no-runner\"]",
-        json!(cargo.to_string_lossy())
+        json!(external_tool_path(cargo))
     );
     Ok(vec![
         "--config".into(),
@@ -1188,10 +1200,10 @@ fn cargo_configuration_overrides(cargo: &Path, directory: &Path) -> Result<Vec<S
     ])
 }
 
-fn qa_write_deny_available() -> bool {
+pub(crate) fn qa_write_deny_available() -> bool {
     #[cfg(target_os = "linux")]
     {
-        return kaisa_sys::landlock_abi().is_some_and(|abi| abi >= 3);
+        kaisa_sys::landlock_abi().is_some_and(|abi| abi >= 3)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1223,10 +1235,10 @@ fn prepare_node_inputs(checkout: &Path, parent: &Path) -> Result<(), GoalError> 
             .map_err(at("Node entry metadata"))?
             .is_dir()
         {
-            std::os::windows::fs::symlink_dir(entry.path(), destination)
+            std::os::windows::fs::symlink_dir(external_tool_path(&entry.path()), destination)
                 .map_err(at("linking public Node directory"))?;
         } else {
-            std::os::windows::fs::symlink_file(entry.path(), destination)
+            std::os::windows::fs::symlink_file(external_tool_path(&entry.path()), destination)
                 .map_err(at("linking public Node module"))?;
         }
     }
@@ -1289,11 +1301,15 @@ fn qa_command(
     #[cfg(not(target_os = "macos"))]
     let _ = &mut sandbox;
     let mut process = process.clone();
+    // Keep the canonical checkout/runtime above for sandbox and integrity comparisons.
+    // Child tools must receive ordinary Windows paths, including their cwd and outputs.
+    process.program = external_tool_path(&process.program).into();
+    process.working_directory = external_tool_path(&process.working_directory).into();
     for (key, value) in [
-        ("CARGO_HOME", cargo_home.to_string_lossy().into_owned()),
+        ("CARGO_HOME", external_tool_path(&cargo_home)),
         (
             "CARGO_TARGET_DIR",
-            runtime.join("target").to_string_lossy().into_owned(),
+            external_tool_path(&runtime.join("target")),
         ),
         ("RUSTC_WRAPPER", String::new()),
         ("RUSTC_WORKSPACE_WRAPPER", String::new()),
@@ -1304,11 +1320,11 @@ fn qa_command(
         ("NODE_OPTIONS", String::new()),
         (
             "KAISA_STATE_DIR",
-            runtime.join("test-state").to_string_lossy().into_owned(),
+            external_tool_path(&runtime.join("test-state")),
         ),
-        ("TMPDIR", runtime.to_string_lossy().into_owned()),
-        ("TMP", runtime.to_string_lossy().into_owned()),
-        ("TEMP", runtime.to_string_lossy().into_owned()),
+        ("TMPDIR", external_tool_path(runtime)),
+        ("TMP", external_tool_path(runtime)),
+        ("TEMP", external_tool_path(runtime)),
     ] {
         process.env.push((key.to_owned(), value));
     }
@@ -1373,7 +1389,7 @@ fn add_cli_help(
                             "--offline".into(),
                             "--message-format=json".into(),
                             "--manifest-path".into(),
-                            checkout.join("Cargo.toml").to_string_lossy().into_owned(),
+                            external_tool_path(&checkout.join("Cargo.toml")),
                             "--bin".into(),
                             name,
                         ],
@@ -3114,6 +3130,9 @@ mod tests {
             "[[bin]]\nname = \"qa-cli\"\npath = \"src/command.rs\""
         )
         .expect("explicit bin");
+        // Windows publishes final write metadata when the writing handle closes.
+        // Git must see the appended bin declaration rather than a cached index stat.
+        drop(manifest);
         std::fs::write(fixture.repository.join("src/command.rs"), "fn main() { assert!(std::env::args().any(|arg| arg == \"--help\")); println!(\"Usage: qa-cli <input>\"); }").expect("custom CLI entry");
         git(
             &fixture.repository,
@@ -3139,6 +3158,11 @@ mod tests {
             &temporary.0.join("help"),
         )
         .expect("fresh help checkout");
+        assert_eq!(
+            crate::qa_interface::rust_bins(checkout.path()).expect("frozen CLI bins"),
+            vec![("qa-cli".into(), "src/command.rs".into())],
+            "the frozen candidate must contain the committed explicit bin"
+        );
         let sources = crate::verify::CheckedSources::record(checkout.path()).expect("pin sources");
         let mut interface = crate::qa_interface::extract_public_interface(checkout.path())
             .expect("public contract");
@@ -3400,6 +3424,21 @@ mod tests {
         std::fs::create_dir_all(&public).expect("public");
         super::prepare_author_repository(&public, "frozen public context")
             .expect("fresh context repository");
+        // Apple's /usr/bin/git shim consults xcrun's per-user cache (confstr),
+        // independently of TMPDIR. Resolve the real executable before confinement;
+        // keep the author's filesystem grants unchanged.
+        #[cfg(target_os = "macos")]
+        let git_program = std::process::Command::new("/usr/bin/xcrun")
+            .args(["--find", "git"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|path| path.trim().to_owned())
+            .filter(|path| Path::new(path).is_absolute() && Path::new(path).is_file())
+            .unwrap_or_else(|| "/usr/bin/git".into());
+        #[cfg(not(target_os = "macos"))]
+        let git_program = "/usr/bin/git".to_owned();
         let probe = |program: &str, args: Vec<String>| {
             let sandbox = super::author_sandbox(
                 &fixture.state,
@@ -3413,6 +3452,7 @@ mod tests {
                     env: vec![
                         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
                     ],
                 },
             )
@@ -3425,6 +3465,7 @@ mod tests {
                     env: vec![
                         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
                     ],
                 },
                 &sandbox.confinement(),
@@ -3441,9 +3482,10 @@ mod tests {
             "the author can read its context-only repository"
         );
         let own_history = probe(
-            "/usr/bin/git",
+            &git_program,
             vec!["log".into(), "-1".into(), "--format=%s".into()],
         );
+        assert_eq!(own_history.0, Some(ProcessExit::Code(0)), "{own_history:?}");
         assert_eq!(
             own_history.1.trim(),
             "QA context",
@@ -3465,7 +3507,7 @@ mod tests {
             "QA authors cannot read developer tests by absolute path"
         );
         let log = probe(
-            "/usr/bin/git",
+            &git_program,
             vec![
                 "-C".into(),
                 fixture.repository.to_string_lossy().into_owned(),
