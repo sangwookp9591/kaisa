@@ -34,5 +34,5 @@ pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
 pub use worktree::{
     Worktree, WorktreeError, branch_has_worktree, create_worktree, inventory, open_worktree,
-    remove_worktree,
+    remove_worktree, worktree_paths,
 };

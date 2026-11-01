@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use kaisa_workspace::{
     CandidateCheckout, IgnoredPolicy, PreservationReceipt, branch_has_worktree, create_worktree,
-    freeze_candidate, remove_worktree,
+    freeze_candidate, remove_worktree, worktree_paths,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -208,6 +208,45 @@ fn an_external_metadata_lock_blocks_both_checkout_apis() {
         );
         repository.assert_clean();
     }
+}
+
+#[test]
+fn qa_worktree_listing_waits_for_an_external_metadata_owner() {
+    let repository = Arc::new(Repository::new());
+    let candidate = freeze_candidate(&repository.path(), "main").expect("candidate");
+    let linked = CandidateCheckout::create(
+        &repository.path(),
+        &candidate,
+        &repository.0.join("qa-anchor"),
+    )
+    .expect("linked repository entry point");
+    let entry_point = linked.path().to_owned();
+    let held = repository.metadata_lock();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        ready_tx.send(()).expect("ready");
+        done_tx.send(worktree_paths(&entry_point)).expect("listing");
+    });
+    ready_rx.recv_timeout(DEADLINE).expect("reader started");
+    let blocked = done_rx.recv_timeout(Duration::from_millis(200)).is_err();
+    drop(held);
+    worker.join().expect("reader drained");
+    assert!(blocked, "QA listing bypassed the common Git directory lock");
+    let paths = done_rx
+        .recv_timeout(DEADLINE)
+        .expect("reader resumed")
+        .expect("listing");
+    assert!(
+        paths.contains(&repository.path().canonicalize().expect("main path")),
+        "the main checkout is excluded from QA reads"
+    );
+    assert!(
+        paths.contains(&linked.path().canonicalize().expect("linked path")),
+        "linked checkouts are excluded from QA reads"
+    );
+    drop(linked);
+    repository.assert_clean();
 }
 
 #[test]

@@ -638,12 +638,8 @@ fn developer_private_roots(repository: &Path) -> io::Result<Vec<PathBuf>> {
         repository.canonicalize()?,
         repository.join(common.trim()).canonicalize()?,
     ];
-    let worktrees = git_output(repository, &["worktree", "list", "--porcelain", "-z"])?;
-    for path in worktrees
-        .split('\0')
-        .filter_map(|field| field.strip_prefix("worktree "))
-    {
-        roots.push(Path::new(path).canonicalize()?);
+    for path in kaisa_workspace::worktree_paths(repository).map_err(io::Error::other)? {
+        roots.push(path.canonicalize()?);
     }
     roots.sort();
     roots.dedup();

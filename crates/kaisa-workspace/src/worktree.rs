@@ -170,6 +170,20 @@ pub fn branch_has_worktree(repository: &Path, branch: &str) -> Result<bool, GitE
         .any(|line| line == expected))
 }
 
+/// Lists registered worktree paths while holding the shared metadata lock.
+/// Private QA uses this to exclude every developer checkout from its read grants.
+///
+/// # Errors
+///
+/// Returns [`GitError`] if listing or locking the shared metadata fails.
+pub fn worktree_paths(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
+    let listing = run_git(repository, &["worktree", "list", "--porcelain", "-z"])?;
+    Ok(String::from_utf8_lossy(&listing)
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree ").map(PathBuf::from))
+        .collect())
+}
+
 /// What would have to be preserved before `worktree` is removed, according to git and
 /// `policy`. Untracked files are listed individually and ignored files are included, so
 /// nothing in the worktree is invisible to the preservation protocol.
