@@ -29,7 +29,11 @@
 //!
 //! Lexical analysis only: macros that generate tests, regex literals containing quotes, and
 //! assertions hidden inside helper functions are not seen through. A helper whose name starts with
-//! `assert`/`verify`/`expect`/`check` counts as an assertion without being inspected.
+//! `assert`/`verify`/`expect`/`check` counts as an assertion without being inspected. Negated
+//! success predicates (`assert!(!r.is_ok())`) count as error assertions. Also not followed:
+//! dynamic `import()`, helpers defined in other files, and semantic equivalence (a test that
+//! asserts something unrelated in the same shape). All of this is best-effort; the binding
+//! defence is private QA and the independent review (design `spec-driven-workflow.md` §3).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1031,7 +1035,8 @@ fn classify(base: &str, args: &[&(String, String)], line: u32) -> Assertion {
                 return assertion;
             };
             let text = compact(&expr.0);
-            assertion.error = expr.1.contains("is_err") || expr.1.contains("Err(");
+            assertion.error =
+                expr.1.contains("is_err") || expr.1.contains("Err(") || negated_success(&text);
             if text == "true" {
                 assertion.trivial = true;
             } else if let Some((lhs, rhs)) = split_comparison(expr) {
@@ -1066,6 +1071,15 @@ fn classify(base: &str, args: &[&(String, String)], line: u32) -> Assertion {
         _ => {}
     }
     assertion
+}
+
+/// A negated success predicate, which fails exactly when the call succeeded: `!r.is_ok()`,
+/// `!matches!(r, Ok(_))`, `r.is_ok() == false`. Lexical, best-effort.
+fn negated_success(compact_expr: &str) -> bool {
+    (compact_expr.starts_with('!')
+        && (compact_expr.contains(".is_ok()")
+            || compact_expr.starts_with("!matches!(") && compact_expr.contains("Ok(")))
+        || compact_expr.contains(".is_ok()==false")
 }
 
 fn is_equality(masked_expr: &str) -> bool {
@@ -2204,6 +2218,16 @@ test('adding a negative quantity is rejected with an error', () => {
             (
                 "an_empty_cart_unwraps_to_its_error",
                 "#[test]\nfn an_empty_cart_unwraps_to_its_error() { let error = checkout().unwrap_err(); assert_eq!(error, CartError::Empty); }\n",
+                false,
+            ),
+            (
+                "an_invalid_cart_is_rejected_by_a_negated_success_predicate",
+                "#[test]\nfn an_invalid_cart_is_rejected_by_a_negated_success_predicate() { let r = checkout(); assert!(!r.is_ok()); }\n",
+                false,
+            ),
+            (
+                "an_invalid_cart_is_rejected_by_a_negated_ok_match",
+                "#[test]\nfn an_invalid_cart_is_rejected_by_a_negated_ok_match() { let r = checkout(); assert!(!matches!(r, Ok(_))); }\n",
                 false,
             ),
             (
