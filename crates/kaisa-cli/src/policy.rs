@@ -16,7 +16,7 @@ static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 /// The command surface and accepted values.
 const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
-keys: revision_limit (0..10), confine_agents (true|false),
+keys: allow_provisional_spec (true|false), revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true only; always enforced),
       require_person_when_tests_weaken (true only; always enforced),
@@ -34,6 +34,10 @@ fn grade_from(code: &str) -> Option<Grade> {
 
 fn policy_from_json(value: &Value) -> Option<Policy> {
     Some(Policy {
+        allow_provisional_spec: match value.get("allow_provisional_spec") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
         require_person_when_tests_weaken: match value.get("require_person_when_tests_weaken") {
             None => true,
             Some(value) => value.as_bool()?,
@@ -84,6 +88,7 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
     kaisa_sys::ensure_private_directory(state)?;
     let value = json!({
         "revision_limit": policy.revision_limit,
+        "allow_provisional_spec": policy.allow_provisional_spec,
         "require_person_when_tests_weaken": policy.require_person_when_tests_weaken,
         "allowed_egress_hosts": policy.allowed_egress_hosts,
         "confine_agents": policy.confine_agents,
@@ -119,6 +124,9 @@ fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
                 .ok_or(format!(
                     "revision_limit must be between 0 and {MAX_REVISION_LIMIT}"
                 ))?;
+        }
+        "allow_provisional_spec" => {
+            policy.allow_provisional_spec = value.parse().map_err(|_| "use true or false")?;
         }
         "confine_agents" => {
             policy.confine_agents = value.parse().map_err(|_| "use true or false")?;

@@ -77,6 +77,11 @@ uses only scripted fake agents; unavailable provider usage and cost are shown as
 
 ---
 
+Versioned requirements are available through `kaisa spec draft --file requirements.txt`,
+`kaisa spec show <id>`, `kaisa spec list`, and terminal-confirmed
+`kaisa spec approve <id> [--version <n>]`. See the [specification flow](docs/user-flows.md#versioned-specifications-current-cli)
+for approval assurance limits and the opt-in `allow_provisional_spec` policy.
+
 ## ✨ Why Kaisa
 
 | | Without Kaisa | With Kaisa |

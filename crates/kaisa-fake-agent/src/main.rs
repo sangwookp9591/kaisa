@@ -244,6 +244,20 @@ fn flag_present(args: &[String], name: &str) -> bool {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(path) = flag(&args, "--fake-spec") {
+        let mut input = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut input)
+            .map_err(|e| e.to_string())?;
+        let proposal = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if std::env::var_os("KAISA_ATTEMPT").is_none() {
+            return Err("missing attempt marker".into());
+        }
+        let answer = format!("```kaisa-spec\n{proposal}\n```");
+        print_as_claude(&answer);
+        return Ok(());
+    }
     // A read-only hostile holder: models an orphaned agent taking an advisory lock.
     if let Some(path) = flag(&args, "--fake-hold-lock") {
         let lock = std::fs::File::open(path).map_err(|error| error.to_string())?;

@@ -118,6 +118,7 @@ fn the_projects_test_command() -> DetectedCommand {
 /// The policy a test run adopts.
 fn a_policy(confine_agents: bool) -> kaisa_domain::PolicySnapshot {
     kaisa_domain::Policy {
+        allow_provisional_spec: false,
         revision_limit: DEFAULT_REVISION_LIMIT,
         allowed_egress_hosts: Vec::new(),
         confine_agents,
