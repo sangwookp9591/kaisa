@@ -8,8 +8,8 @@ use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, Instant};
 
 use kaisa_workspace::{
-    CandidateCheckout, IgnoredPolicy, PreservationReceipt, create_worktree, freeze_candidate,
-    remove_worktree,
+    CandidateCheckout, IgnoredPolicy, PreservationReceipt, branch_has_worktree, create_worktree,
+    freeze_candidate, remove_worktree,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -256,6 +256,77 @@ fn an_external_metadata_lock_blocks_both_removal_paths() {
         worker.join().expect("worker drained");
         assert!(blocked, "removal bypassed the metadata lock");
         repository.assert_clean();
+    }
+}
+
+#[test]
+fn recovery_branch_listing_waits_for_metadata_and_recognises_unavailable_worktrees() {
+    let repository = Arc::new(Repository::new());
+    let path = repository.0.join("unavailable");
+    create_worktree(&repository.path(), "main", "unavailable", &path).expect("checkout");
+    std::fs::remove_dir_all(path).expect("simulate a temporarily unavailable checkout");
+    let held = repository.metadata_lock();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker_repository = Arc::clone(&repository);
+    let worker = std::thread::spawn(move || {
+        ready_tx.send(()).expect("ready");
+        let registered = branch_has_worktree(&worker_repository.path(), "unavailable")
+            .expect("serialized listing");
+        done_tx.send(registered).expect("done");
+    });
+    ready_rx.recv_timeout(DEADLINE).expect("worker started");
+    let blocked = done_rx.recv_timeout(Duration::from_millis(200)).is_err();
+    drop(held);
+    worker.join().expect("worker drained");
+    assert!(blocked, "recovery listing bypassed the metadata lock");
+    assert!(done_rx.recv_timeout(DEADLINE).expect("registered branch"));
+    assert!(!branch_has_worktree(&repository.path(), "unavailable-prefix").expect("exact match"));
+    repository.git(&["worktree", "prune"]);
+    assert!(!branch_has_worktree(&repository.path(), "unavailable").expect("removed entry"));
+    repository.assert_clean();
+}
+
+#[cfg(unix)]
+#[test]
+fn internal_worktree_bookkeeping_never_executes_repository_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for detached in [true, false] {
+        let repository = Repository::new();
+        let hooks = repository.path().join("configured-hooks");
+        std::fs::create_dir(&hooks).expect("repository hooks directory");
+        let hook = hooks.join("post-checkout");
+        // A hook which reenters worktree bookkeeping must never run under Kaisa's lock.
+        // The marker catches execution even if Git ignores the hook's exit status.
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf executed > \"$(git rev-parse --git-common-dir)/kaisa-hook-ran\"\ngit worktree list --porcelain\nexit 1\n",
+        )
+        .expect("post-checkout hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("executable hook");
+        repository.git(&["config", "core.hooksPath", hooks.to_str().expect("UTF-8")]);
+        // Run in a bounded subprocess so a hook regression cannot hang the test suite.
+        let mut worker = Worker::start(&repository, "no-hooks", detached, 1);
+        worker.wait();
+        assert!(
+            !repository.path().join(".git/kaisa-hook-ran").exists(),
+            "internal worktree commands executed the repository post-checkout hook"
+        );
+        repository.assert_clean();
+        // Positive control: the same configured hook runs for a direct Git checkout.
+        let _ = Command::new("git")
+            .current_dir(repository.path())
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(repository.0.join("hook-control"))
+            .arg("main")
+            .output()
+            .expect("direct Git control");
+        assert!(
+            repository.path().join(".git/kaisa-hook-ran").exists(),
+            "the fixture must install a hook Git would actually execute"
+        );
     }
 }
 

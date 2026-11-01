@@ -31,5 +31,6 @@ pub use settings_risk::{
 pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
 pub use worktree::{
-    Worktree, WorktreeError, create_worktree, inventory, open_worktree, remove_worktree,
+    Worktree, WorktreeError, branch_has_worktree, create_worktree, inventory, open_worktree,
+    remove_worktree,
 };

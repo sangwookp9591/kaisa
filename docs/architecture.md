@@ -451,7 +451,9 @@ Workers keep running during a coordinator handoff, because the daemon and their 
   Lock order is attempt owner lock (when applicable), repository mutex, advisory file lock;
   the mutex registry is released before waiting. Only one Git worktree command runs in the
   critical section: no agent/check execution, preservation scans, ledger writes, or owner
-  lock acquisition. Recovery, verification, candidates and mission cleanup use these same
+  lock acquisition. Internal worktree commands disable repository hooks with a private empty
+  Kaisa-owned hooks directory, preventing hook execution and reentry into the non-reentrant
+  metadata lock. Recovery, verification, candidates and mission cleanup use these same
   workspace APIs. Unrelated repositories remain independent.
 
 **Source state (user-flows F31).** Worktrees are created from **committed** state by default.
