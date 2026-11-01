@@ -1,0 +1,68 @@
+{
+  "pass": {
+    "run_id": "run_dmjvasnqos740000czb0000000",
+    "final_tree": "16c6f87bcb32a8e867ae88a1d6673f6d5dec3382",
+    "requirements": [
+      {
+        "requirement_id": "R1",
+        "text": "Reject empty inputs.",
+        "criteria": [
+          {
+            "criterion_id": "AC-1",
+            "private_tests": [
+              {
+                "test_id": "empty-input",
+                "kind": "acceptance",
+                "passed": true,
+                "candidate_tree": "16c6f87bcb32a8e867ae88a1d6673f6d5dec3382",
+                "output_digest": "20d03f86146de300fb31f281df963da25ef1131ac65ffb01a025d07401911575"
+              },
+              {
+                "test_id": "empty-input",
+                "kind": "adversarial",
+                "passed": true,
+                "candidate_tree": "16c6f87bcb32a8e867ae88a1d6673f6d5dec3382",
+                "output_digest": "20d03f86146de300fb31f281df963da25ef1131ac65ffb01a025d07401911575"
+              }
+            ],
+            "development_tests": []
+          }
+        ]
+      }
+    ],
+    "gaps": []
+  },
+  "fail": {
+    "run_id": "run_dmjvav21lmu80000igt0000000",
+    "final_tree": "863a4fc6ae92984067f80285eb5de8faf69642b4",
+    "requirements": [
+      {
+        "requirement_id": "R1",
+        "text": "Reject empty inputs.",
+        "criteria": [
+          {
+            "criterion_id": "AC-1",
+            "private_tests": [
+              {
+                "test_id": "empty-input",
+                "kind": "acceptance",
+                "passed": false,
+                "candidate_tree": "863a4fc6ae92984067f80285eb5de8faf69642b4",
+                "output_digest": "d4b17e8ffe5a16e8bc3ee384fc7c191dec6c9acdcd445e9decd1b2fbefea51b0"
+              },
+              {
+                "test_id": "empty-input",
+                "kind": "adversarial",
+                "passed": false,
+                "candidate_tree": "863a4fc6ae92984067f80285eb5de8faf69642b4",
+                "output_digest": "9034d88359d9991dcf7c4e109dfd6dabf5b3b4da2f0de0891cba104d0388a65f"
+              }
+            ],
+            "development_tests": []
+          }
+        ]
+      }
+    ],
+    "gaps": []
+  }
+}

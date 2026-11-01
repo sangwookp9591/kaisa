@@ -1,4 +1,6 @@
-//! Pure domain types for Kaisa: identifiers, events and errors. No I/O.
+//! Domain types for Kaisa: identifiers, events and errors.
+//! The guarded spec-approval module owns the process terminal I/O boundary so callers
+//! cannot substitute an adapter that fabricates human presence.
 //!
 //! Design: `docs/architecture.md` §5.2, §5.4 and §7.
 
@@ -17,6 +19,8 @@ mod plan;
 mod policy;
 mod repo_path;
 mod sandbox;
+/// Specification model and guarded approval.
+pub mod spec;
 mod verdict;
 mod write_set;
 
@@ -41,8 +45,13 @@ pub use grader::{
 pub use id::{AttemptId, IdError, IntentId, MAX_SUFFIX_LEN, MissionId, RunId, TaskId};
 pub use knowledge::{ContentDigest, DIGEST_HEX_LEN, DigestError, KnowledgeKind};
 pub use plan::{Plan, PlanError, PlannedTask};
-pub use policy::{Policy, PolicyError, PolicySnapshot};
+pub use policy::{
+    OnFailure, Policy, PolicyError, PolicySnapshot, RoutingPolicy, default_max_parallel,
+};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use sandbox::{Network, Role, SandboxProfile, sandbox_profile};
+pub use spec::{
+    AcceptanceCriterion, Ambiguity, CriterionKind, Requirement, SpecApproval, SpecId, Specification,
+};
 pub use verdict::{Finding, ReviewVerdict, Severity};
 pub use write_set::WriteSet;

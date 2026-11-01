@@ -1,0 +1,46 @@
+{
+  "node-assert-deletion": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "skip": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "todo": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "should-panic": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "cfg-gating": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "catch-unwind": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "self-compare": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "legacy-cargo-config": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "exit-zero": {
+    "exit": 0,
+    "result": "delivered"
+  },
+  "cargo-runner": {
+    "exit": 3,
+    "result": "blocked"
+  },
+  "build-rs-private-swap": {
+    "exit": 3,
+    "result": "blocked"
+  }
+}

@@ -11,7 +11,10 @@ mod outbox;
 #[cfg(test)]
 mod outbox_tests;
 mod policy;
+mod routing;
 mod rows;
+/// Content-addressed specifications and approval receipts.
+pub mod spec;
 mod tasks;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -25,5 +28,6 @@ pub use event_store::EventStore;
 pub use knowledge::TrustedKnowledge;
 pub use outbox::{Completion, Intent, PendingIntent};
 pub use policy::AdoptedPolicy;
+pub use routing::RoutingObservation;
 pub use tasks::TaskProgress;
 pub use usage::AttemptUsage;

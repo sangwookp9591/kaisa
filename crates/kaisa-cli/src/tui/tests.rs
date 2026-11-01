@@ -737,6 +737,7 @@ fn more_than_three_waiting_goals_show_the_hidden_count_and_the_filter_lists_ever
     use super::model::RunCard;
     const WAITING_GOALS: usize = 5;
     let snapshot = Snapshot {
+        running_tasks: Vec::new(),
         runs: (0..WAITING_GOALS)
             .map(|index| RunCard {
                 goal: format!("Waiting goal {index}"),
@@ -804,4 +805,35 @@ fn korean_locale_prefixes_and_posix_precedence_select_the_documented_language() 
         "en",
         "an unset locale defaults to English"
     );
+}
+
+#[test]
+fn a_spec_result_receipt_exposes_its_published_branch_only_after_delivery() {
+    let bench = Workbench::recorded_home("spec-result-branch");
+    let mut ledger =
+        kaisa_ledger::EventStore::open(&bench.state().join("kaisa.db")).expect("ledger");
+    let run_id = "run_abcdef123456";
+    let branch = "kaisa/result/run_abcdef123456";
+    for decision in ["Deliver", "NeedsPerson"] {
+        ledger.append(kaisa_domain::Event {
+            kind: kaisa_domain::EventKind::GateDecided, subject:run_id.into(), payload_version:1,
+            payload:serde_json::json!({"run_id":run_id,"decision":decision,"result_branch":branch,"reason":"spec gate"}).to_string(),
+        }).expect("spec result receipt");
+        let snapshot = load(&bench.state()).expect("read receipt");
+        let run = snapshot
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .expect("spec run");
+        assert!(
+            run.candidate_attempt.is_none(),
+            "spec runs do not advertise recovery attempts"
+        );
+        let detail = details(run, None);
+        assert_eq!(
+            detail.contains(&format!("git merge --ff-only {branch}")),
+            decision == "Deliver",
+            "only the published PASS branch becomes a merge hint: {detail}"
+        );
+    }
 }

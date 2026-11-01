@@ -1,0 +1,22 @@
+FAIL (PROVISIONAL SPEC) (reduced: descendants)
+
+- Pass: all attempt containment admitted — all recorded attempt containment shortfalls admitted (evidence: ledger:29, ledger:38, ledger:47, ledger:53, ledger:63, ledger:72)
+- Pass: spec approval status — provisional spec; explicitly allowed by policy (evidence: frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c)
+- Pass: spec digest unchanged — approved specification and repository copies unchanged (evidence: spec-integrity-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:92a58073b0016ee00e33754bda9c8f6ca05b36c9a69b1e26073816609a8009c2)
+- Pass: traceability complete — all requirements and criteria mapped to final-tree acceptance tests (evidence: traceability-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:a3805e321fac7bf5ea58f0e7bf83a6b32777f447e1548729edc676e4b824d016)
+- Pass: deterministic checks — trusted checks, protected assets and deterministic lint passed (evidence: deterministic-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:e5058915ff4f411b29195aabe4cb7e9a949b708f638429acfc1f4a9254b2de5d)
+- Fail: private QA all passed on FINAL tree — acceptance + adversarial: 0/2 passed on final tree; qa_evidence: candidate-influenceable-in-process (evidence: qa-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:2f1decd2781d14f38e761155c103d8e8c96965756fe5139e0d2722e26d27af80)
+- Pass: domain test review no blocking — domain test review has no blocking finding (evidence: domain-test-review-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:52b14d3e39c49d3c13d64fe1cdd1077d7e70655588780b4733d6278d5ea703dc, test-review-transcript-ea81301c34e6391612691ddd942f623a0705cc2b.log:blake3:f0d88375b72c901545404a4f8d8c0168ce641effdad8410fc49c2d66cc87d57c)
+- Pass: staged review approved — PASS (reduced: descendants); staged review approved with no unresolved blocking finding; admitted on platform-limit (evidence: staged-review-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:9b12efceb6ed3fed8e84279d7dff9633be68fdc53fe12520b42ee4e6c4fa0968, staged-review-context-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:6353473aa61bb9e998bb570e0092f63758975a3b6f9460f94bda7339fc07216d, review-transcript-ea81301c34e6391612691ddd942f623a0705cc2b.log:blake3:df447f5e9ed2104afae9fb60a6e040e6349d7b52c058fd80be20a88fde058332)
+- Fail: characterization honoured — characterization evidence integrity unavailable or reduced (evidence: characterization-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:18abc68749b71329d1bc2a1f996ff8c6aa9bf2f926da1533ab1f8550ab7b0dd1)
+- Pass: evidence preserved — ledger chain, private manifests and final-tree evidence artifacts preserved (evidence: preservation-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:6b6f6d94cb286216cff13dc29e88483197cb4c020297307cc6e11fa6a5a2c334)
+- Pass: qa_isolation full or policy-accepted — qa_isolation: full; explicit acceptance: None (evidence: qa-ea81301c34e6391612691ddd942f623a0705cc2b.json:blake3:2f1decd2781d14f38e761155c103d8e8c96965756fe5139e0d2722e26d27af80)
+
+# Traceability: run_dmjv6idr5liw00022ox0000000
+
+Final tree: ea81301c34e6391612691ddd942f623a0705cc2b
+
+| Requirement | Criterion | Private tests (final-tree result) | Development tests (lint-mapped) |
+|---|---|---|---|
+| R1 | AC-1 | empty-input [acceptance]: FAIL/stale (ea81301c34e6391612691ddd942f623a0705cc2b); empty-input [adversarial]: FAIL/stale (ea81301c34e6391612691ddd942f623a0705cc2b) |  |
+

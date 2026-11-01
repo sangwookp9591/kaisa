@@ -155,6 +155,35 @@ pub fn open_worktree(repository: &Path, path: &Path) -> Result<Option<Worktree>,
     Ok(None)
 }
 
+/// Whether a branch is registered in any worktree, including an unavailable checkout.
+/// Recovery uses a listing serialized with Kaisa's worktree mutations so it cannot
+/// mistake an entry still being created for a completed manual removal.
+///
+/// # Errors
+///
+/// Returns [`GitError`] if listing or locking the shared metadata fails.
+pub fn branch_has_worktree(repository: &Path, branch: &str) -> Result<bool, GitError> {
+    let listing = run_git(repository, &["worktree", "list", "--porcelain"])?;
+    let expected = format!("branch refs/heads/{branch}");
+    Ok(String::from_utf8_lossy(&listing)
+        .lines()
+        .any(|line| line == expected))
+}
+
+/// Lists registered worktree paths while holding the shared metadata lock.
+/// Private QA uses this to exclude every developer checkout from its read grants.
+///
+/// # Errors
+///
+/// Returns [`GitError`] if listing or locking the shared metadata fails.
+pub fn worktree_paths(repository: &Path) -> Result<Vec<PathBuf>, GitError> {
+    let listing = run_git(repository, &["worktree", "list", "--porcelain", "-z"])?;
+    Ok(String::from_utf8_lossy(&listing)
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree ").map(PathBuf::from))
+        .collect())
+}
+
 /// What would have to be preserved before `worktree` is removed, according to git and
 /// `policy`. Untracked files are listed individually and ignored files are included, so
 /// nothing in the worktree is invisible to the preservation protocol.

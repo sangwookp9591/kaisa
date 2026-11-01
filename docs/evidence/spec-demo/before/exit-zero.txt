@@ -1,0 +1,9 @@
+Command: ["/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/before-target/debug/kaisa", "--agent-program", "/Users/psw/orca/workspaces/kaisa/kaisa-wp7/target/before-target/debug/kaisa-fake-agent", "--agent-arg", "--fake-write", "--agent-arg", "src/lib.rs", "--agent-arg", "--fake-content", "--agent-arg", "pub fn accept(_: &str) -> bool { std::process::exit(0) }\n#[test] fn value() { assert_eq!(accept(\"\"), false); }\n", "--reviewer-arg", "--fake-review-require", "--reviewer-arg", "src/lib.rs", "--check-program", "/Users/psw/.cargo/bin/cargo", "--check-arg", "test", "--check-arg", "--offline", "fix failing acceptance tests"]
+▶ fix failing acceptance tests
+att_dmjv7jx2n51k00011ai0000002 exited with code 0; work preserved on kaisa/att_dmjv7jx2n51k00011ai0000002 at a2adc86be7c7; context pack 5dc7baa13ccb; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+att_dmjv7kcs288000011ai0000006 exited with code 0; no changes to preserve; context pack a1aabeea23e1; reduced: the agent process ran without full OS confinement (missing descendants; admitted on documented platform limits (platform-limit))
+verified: trusted checks passed and the review approved
+If untracked files block the merge, run git status, move the conflicting files, and retry.
+Result: kaisa/att_dmjv7jx2n51k00011ai0000002 at a2adc86be7c7e9778980b9267e3b4e56eedf4157; retrieve with git merge --ff-only kaisa/att_dmjv7jx2n51k00011ai0000002
+
+CLI exit: 0

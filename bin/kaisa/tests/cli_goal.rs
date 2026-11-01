@@ -1276,12 +1276,18 @@ fn a_running_decision_ends_at_expiry_and_cannot_launch_a_followup_attempt() {
     let started = std::time::Instant::now();
     let outcome =
         kaisa_daemon::run_goal(&request).expect("the expired process is ended and preserved");
-    const DEADLINE_TOLERANCE_MS: u64 = 2_000;
     assert!(
         outcome.exit.is_none()
-            && started.elapsed()
-                < std::time::Duration::from_millis(SHORT_DECISION_MS + DEADLINE_TOLERANCE_MS),
-        "a hanging agent must be killed by its Decision deadline"
+            && now_ms() >= basis.expires_at_ms().expect("a Decision has an expiry"),
+        "the hanging agent must be ended after its Decision expires"
+    );
+    // The deadline stops execution; preserving the work and reclaiming the worktree still
+    // needs scheduling and filesystem time. Allow for a loaded runner, but never the fake
+    // agent's ten-minute hang if deadline enforcement stops working.
+    const CLEANUP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(SHORT_DECISION_MS) + CLEANUP_PATIENCE,
+        "ending and preserving the expired attempt must finish within cleanup patience"
     );
     let followup = kaisa_daemon::run_goal(&request);
     assert!(

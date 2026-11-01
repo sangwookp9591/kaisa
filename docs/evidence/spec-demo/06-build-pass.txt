@@ -1,0 +1,5 @@
+▶ spec_demo
+PASS (PROVISIONAL SPEC) (reduced: descendants)
+Run: run_dmjvasnqos740000czb0000000
+Traceability report: kaisa spec report run_dmjvasnqos740000czb0000000
+Result: kaisa/result/run_dmjvasnqos740000czb0000000; retrieve with git merge --ff-only kaisa/result/run_dmjvasnqos740000czb0000000

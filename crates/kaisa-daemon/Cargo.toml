@@ -21,7 +21,9 @@ kaisa-mcp.workspace = true
 kaisa-supervisor.workspace = true
 kaisa-sys.workspace = true
 kaisa-workspace.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

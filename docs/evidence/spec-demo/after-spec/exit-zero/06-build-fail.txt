@@ -1,0 +1,7 @@
+▶ spec_demo
+FAIL (PROVISIONAL SPEC) (reduced: descendants)
+Run: run_dmjv6idr5liw00022ox0000000
+Fail: private QA all passed on FINAL tree: acceptance + adversarial: 0/2 passed on final tree; qa_evidence: candidate-influenceable-in-process
+Fail: characterization honoured: characterization evidence integrity unavailable or reduced
+Traceability report: kaisa spec report run_dmjv6idr5liw00022ox0000000
+not delivered

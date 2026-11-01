@@ -790,9 +790,43 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
     #[cfg(not(windows))]
     let owner_directory = attempt_directory;
     std::fs::create_dir_all(&owner_directory).expect("owner directory prepared");
-    let owner = std::fs::File::create(owner_directory.join("owner.lock"))
-        .expect("the attempt has an owner lock before admission");
-    owner.lock().expect("the fixture owns its attempt");
+    let owner_lock = owner_directory.join("owner.lock");
+    std::fs::write(&owner_lock, "").expect("the attempt has an owner lock before admission");
+    // The lock must belong to a separate process. A handle in this test runner can be
+    // inherited by another test's fork and remain locked after the runner drops it.
+    struct Owner(std::process::Child);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let ready = bench.base.join("owner-ready");
+    let mut owner = Owner(
+        Command::new(the_fake_agent())
+            .arg("--fake-hold-lock")
+            .arg(&owner_lock)
+            .arg("--lock-ready")
+            .arg(&ready)
+            .spawn()
+            .expect("the owner starts"),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !ready.exists() {
+        assert!(
+            owner
+                .0
+                .try_wait()
+                .expect("the owner can be inspected")
+                .is_none(),
+            "the owner must stay alive until interrupted"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the owner must acquire its lock before admission"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let mut ledger =
         kaisa_ledger::EventStore::open(&state.join("kaisa.db")).expect("the ledger opens");
     ledger
@@ -812,7 +846,8 @@ fn an_attempt_interrupted_before_its_agent_started_is_tidied_on_the_next_run() {
         &state.join("worktrees").join(attempt),
     )
     .expect("the worktree is created");
-    drop(owner); // As when the OS releases a killed owner's handle.
+    owner.0.kill().expect("the owner is interrupted");
+    owner.0.wait().expect("the killed owner's lock is released");
 
     let recovered =
         kaisa_daemon::recover_abandoned(&bench.repository(), &state).expect("recovery runs");

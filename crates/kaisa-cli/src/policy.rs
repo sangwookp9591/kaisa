@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use kaisa_domain::{Grade, Policy};
+use kaisa_domain::{Grade, OnFailure, Policy};
 use serde_json::{Value, json};
 
 /// The personal policy file within the state directory.
@@ -16,11 +16,14 @@ static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 /// The command surface and accepted values.
 const USAGE: &str = "usage: kaisa policy show
        kaisa policy set <key> <value>
-keys: revision_limit (0..10), confine_agents (true|false),
+keys: accept_reduced_assurance_approval (true|false), allow_provisional_spec (true|false), max_parallel (positive integer), on_failure (stop|continue_independent), verify_each_task (true|false), revision_limit (0..10), confine_agents (true|false),
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true only; always enforced),
       require_person_when_tests_weaken (true only; always enforced),
-      min_grade_for_security_review (T0..T3; requires T3)";
+      min_grade_for_security_review (T0..T3; requires T3),
+      routing_window, routing_min_samples (positive integers; samples <= window),
+      routing_target_delivery_bps, routing_exploration_bps (0..10000),
+      routing_latency_budget_ms (positive milliseconds|none), routing_seed (unsigned integer)";
 
 fn grade_from(code: &str) -> Option<Grade> {
     match code {
@@ -34,6 +37,28 @@ fn grade_from(code: &str) -> Option<Grade> {
 
 fn policy_from_json(value: &Value) -> Option<Policy> {
     Some(Policy {
+        accept_reduced_assurance_approval: match value.get("accept_reduced_assurance_approval") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
+        allow_provisional_spec: match value.get("allow_provisional_spec") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
+        routing: routing_from_json(value)?,
+        max_parallel: match value.get("max_parallel") {
+            None => kaisa_domain::default_max_parallel(),
+            Some(value) => usize::try_from(value.as_u64()?).ok()?,
+        },
+        on_failure: match value.get("on_failure").map(Value::as_str) {
+            None | Some(Some("stop")) => OnFailure::Stop,
+            Some(Some("continue_independent")) => OnFailure::ContinueIndependent,
+            _ => return None,
+        },
+        verify_each_task: match value.get("verify_each_task") {
+            None => true,
+            Some(value) => value.as_bool()?,
+        },
         require_person_when_tests_weaken: match value.get("require_person_when_tests_weaken") {
             None => true,
             Some(value) => value.as_bool()?,
@@ -51,6 +76,29 @@ fn policy_from_json(value: &Value) -> Option<Policy> {
         require_person_when_check_definitions_change:
             value["require_person_when_check_definitions_change"].as_bool()?,
     })
+}
+
+fn routing_from_json(value: &Value) -> Option<kaisa_domain::RoutingPolicy> {
+    let mut routing = kaisa_domain::RoutingPolicy::default();
+    if let Some(v) = value.get("routing_window") {
+        routing.window = usize::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_min_samples") {
+        routing.min_samples = usize::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_target_delivery_bps") {
+        routing.target_delivery_bps = u16::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_exploration_bps") {
+        routing.exploration_bps = u16::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_seed") {
+        routing.seed = v.as_u64()?;
+    }
+    if let Some(v) = value.get("routing_latency_budget_ms") {
+        routing.latency_budget_ms = if v.is_null() { None } else { Some(v.as_u64()?) };
+    }
+    Some(routing)
 }
 
 /// Loads the personal policy from `state`, using the default only when the file is absent.
@@ -83,7 +131,18 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     kaisa_sys::ensure_private_directory(state)?;
     let value = json!({
+        "accept_reduced_assurance_approval": policy.accept_reduced_assurance_approval,
         "revision_limit": policy.revision_limit,
+        "allow_provisional_spec": policy.allow_provisional_spec,
+        "routing_window": policy.routing.window,
+        "routing_min_samples": policy.routing.min_samples,
+        "routing_target_delivery_bps": policy.routing.target_delivery_bps,
+        "routing_exploration_bps": policy.routing.exploration_bps,
+        "routing_latency_budget_ms": policy.routing.latency_budget_ms,
+        "routing_seed": policy.routing.seed,
+        "max_parallel": policy.max_parallel,
+        "on_failure": policy.on_failure.code(),
+        "verify_each_task": policy.verify_each_task,
         "require_person_when_tests_weaken": policy.require_person_when_tests_weaken,
         "allowed_egress_hosts": policy.allowed_egress_hosts,
         "confine_agents": policy.confine_agents,
@@ -111,6 +170,47 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
 /// Applies one CLI value without saving a partially valid policy.
 fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
     match key {
+        "routing_window" => {
+            policy.routing.window = value.parse().map_err(|_| "use a positive integer")?
+        }
+        "routing_min_samples" => {
+            policy.routing.min_samples = value.parse().map_err(|_| "use a positive integer")?
+        }
+        "routing_target_delivery_bps" => {
+            policy.routing.target_delivery_bps =
+                value.parse().map_err(|_| "use basis points, 0..10000")?
+        }
+        "routing_exploration_bps" => {
+            policy.routing.exploration_bps =
+                value.parse().map_err(|_| "use basis points, 0..10000")?
+        }
+        "routing_seed" => {
+            policy.routing.seed = value.parse().map_err(|_| "use an unsigned seed")?
+        }
+        "routing_latency_budget_ms" => {
+            policy.routing.latency_budget_ms = if value == "none" {
+                None
+            } else {
+                Some(value.parse().map_err(|_| "use milliseconds or none")?)
+            }
+        }
+        "max_parallel" => {
+            policy.max_parallel = value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or("max_parallel must be positive")?
+        }
+        "on_failure" => {
+            policy.on_failure = match value {
+                "stop" => OnFailure::Stop,
+                "continue_independent" => OnFailure::ContinueIndependent,
+                _ => return Err("on_failure is stop or continue_independent".into()),
+            }
+        }
+        "verify_each_task" => {
+            policy.verify_each_task = value.parse().map_err(|_| "use true or false")?
+        }
         "revision_limit" => {
             policy.revision_limit = value
                 .parse::<u32>()
@@ -119,6 +219,13 @@ fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
                 .ok_or(format!(
                     "revision_limit must be between 0 and {MAX_REVISION_LIMIT}"
                 ))?;
+        }
+        "accept_reduced_assurance_approval" => {
+            policy.accept_reduced_assurance_approval =
+                value.parse().map_err(|_| "use true or false")?;
+        }
+        "allow_provisional_spec" => {
+            policy.allow_provisional_spec = value.parse().map_err(|_| "use true or false")?;
         }
         "confine_agents" => {
             policy.confine_agents = value.parse().map_err(|_| "use true or false")?;
@@ -261,6 +368,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reduced_approval_acceptance_defaults_off_and_can_be_explicitly_saved() {
+        let state = PersonalState::new();
+        assert!(
+            !load(&state.0)
+                .expect("default")
+                .accept_reduced_assurance_approval
+        );
+        let (code, _, diagnostic) =
+            state.command(&["set", "accept_reduced_assurance_approval", "true"]);
+        assert_eq!(code, crate::EXIT_SUCCESS, "{diagnostic}");
+        assert!(
+            load(&state.0)
+                .expect("saved")
+                .accept_reduced_assurance_approval
+        );
+        let (code, output, _) = state.command(&["show"]);
+        assert_eq!(code, crate::EXIT_SUCCESS);
+        assert!(output.contains("accept_reduced_assurance_approval=true"));
+    }
     #[test]
     fn a_policy_change_is_kept_for_the_next_run() {
         let state = PersonalState::new();
@@ -500,5 +627,102 @@ mod tests {
                 .confine_agents,
             "future runs receive the person's confinement choice"
         );
+    }
+    #[test]
+    fn routing_policy_keys_round_trip_and_invalid_windows_are_rejected() {
+        let state = PersonalState::new();
+        let chosen_samples = 7;
+        let chosen_seed = 42;
+        for (key, value) in [
+            ("routing_min_samples", "7"),
+            ("routing_window", "20"),
+            ("routing_target_delivery_bps", "9000"),
+            ("routing_exploration_bps", "100"),
+            ("routing_latency_budget_ms", "5000"),
+            ("routing_seed", "42"),
+        ] {
+            assert_eq!(
+                state.command(&["set", key, value]).0,
+                crate::EXIT_SUCCESS,
+                "valid routing key {key} is saved"
+            );
+        }
+        let loaded = load(&state.0).expect("saved routing policy");
+        assert_eq!(
+            loaded.routing.min_samples, chosen_samples,
+            "the run loads the configured sample threshold"
+        );
+        assert_eq!(
+            loaded.routing.seed, chosen_seed,
+            "the exploration seed persists"
+        );
+        for (key, value) in [
+            ("routing_min_samples", "0"),
+            ("routing_window", "1"),
+            ("routing_target_delivery_bps", "10001"),
+            ("routing_exploration_bps", "10001"),
+            ("routing_latency_budget_ms", "0"),
+        ] {
+            assert_eq!(
+                state.command(&["set", key, value]).0,
+                crate::EXIT_USAGE,
+                "invalid routing key {key} is rejected"
+            );
+        }
+        assert_eq!(
+            load(&state.0).expect("still valid"),
+            loaded,
+            "failed edits do not corrupt saved policy"
+        );
+    }
+
+    #[test]
+    fn scheduler_keys_round_trip_and_invalid_values_never_replace_the_policy() {
+        let state = PersonalState::new();
+        for (key, value) in [
+            ("max_parallel", "3"),
+            ("on_failure", "continue_independent"),
+            ("verify_each_task", "false"),
+        ] {
+            let (status, _, diagnostic) = state.command(&["set", key, value]);
+            assert_eq!(
+                status,
+                crate::EXIT_SUCCESS,
+                "valid scheduler key is saved: {diagnostic}"
+            );
+        }
+        let policy = load(&state.0).expect("saved policy");
+        let expected_slots = 3;
+        assert_eq!(
+            policy.max_parallel, expected_slots,
+            "parallel limit persists"
+        );
+        assert_eq!(
+            policy.on_failure,
+            kaisa_domain::OnFailure::ContinueIndependent,
+            "failure policy persists"
+        );
+        assert!(
+            !policy.verify_each_task,
+            "the explicit per-task verification choice persists"
+        );
+        let before = std::fs::read(state.0.join(POLICY_FILE)).expect("saved bytes");
+        for (key, value) in [
+            ("max_parallel", "0"),
+            ("on_failure", "guess"),
+            ("verify_each_task", "maybe"),
+        ] {
+            let (status, _, _) = state.command(&["set", key, value]);
+            assert_eq!(
+                status,
+                crate::EXIT_USAGE,
+                "invalid scheduler values are usage failures"
+            );
+            assert_eq!(
+                std::fs::read(state.0.join(POLICY_FILE)).expect("unchanged file"),
+                before,
+                "invalid configuration never overwrites the active policy"
+            );
+        }
     }
 }

@@ -15,7 +15,10 @@ mod home;
 mod init;
 mod local_agent;
 mod mcp_serve;
+mod mission;
 mod policy;
+mod routing;
+mod spec;
 mod tui;
 mod verified;
 mod watch;
@@ -49,7 +52,7 @@ pub const EXIT_RUN_FAILED: u8 = 4;
 /// them as literal `kaisa <verb>`, in the command tables of user-flows §7 and architecture §4
 /// (`handoff`, `handback`, `wrap`, `console`, `memory` appear only there), and in process-model
 /// rows.
-const PLANNED_COMMANDS: [&str; 25] = [
+const PLANNED_COMMANDS: [&str; 24] = [
     "review",
     "ask",
     "attach",
@@ -59,7 +62,6 @@ const PLANNED_COMMANDS: [&str; 25] = [
     "cancel",
     "undo",
     "restore",
-    "status",
     "console",
     "memory",
     "team",
@@ -86,6 +88,7 @@ Kaisa — run coding agents safely
 Usage:
   kaisa \"<goal>\"           a developer agent works on the goal, your checks and a reviewer judge
                            the result, and only a verified candidate is delivered
+  kaisa status             running mission tasks and attempt states from the ledger
   kaisa watch              attempts, their state, tokens and cost, from the ledger
   kaisa tui [--plain]      terminal home: needs you, goals, attempts and evidence
   kaisa review             approve results       (planned)
@@ -96,10 +99,21 @@ More commands:
   kaisa doctor             read-only setup diagnosis
   kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
+  kaisa build --spec <id> [--version n] [goal options]
+                           build and independently verify a frozen specification
+  kaisa spec <command>     draft, show, list, approve or report versioned requirements
   kaisa policy show|set    view or change your personal policy
+  kaisa route explain <task|last>  recorded route and candidate constraints
+  kaisa stats routing      measured routing cells; unknown costs stay labelled
 
 Goal options:
+  --candidates <N>         independent verified attempts; comparative review selects one
+  --plan <file.json>       execute a declared task DAG, then verify its integration
+  --max-parallel <N>       maximum concurrent tasks or candidates (positive integer)
+  --on-failure <policy>    stop or continue_independent; admitted siblings drain
+  --verify-each-task <bool> verify each task before its dependents (default true)
   --agent codex            Codex develops (observed); Claude Code reviews
+  --model <id>             pin a model; automatic routing leaves pins unchanged
   --check-program <path> [--check-arg <arg>]...
                            your own trusted check instead of the project's tests
   --confine-claude         try a confined Claude Code run (T16.0 trial)
@@ -131,11 +145,23 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
             writeln!(out, "kaisa {VERSION}")?;
             Ok(EXIT_SUCCESS)
         }
+        Some("status") => {
+            let status = home::run(out, err)?;
+            if status == EXIT_SUCCESS {
+                watch::run(out, err)
+            } else {
+                Ok(status)
+            }
+        }
         Some("watch") => watch::run(out, err),
         Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
+        Some("spec") => spec::run(&args[1..], out, err),
+        Some("build") => goal::build(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
+        Some("route") => routing::run(&args[1..], false, out, err),
+        Some("stats") => routing::run(&args[1..], true, out, err),
         Some("mcp") => mcp_serve::run(&args[1..], out, err),
         Some(command) if PLANNED_COMMANDS.contains(&command) => {
             writeln!(
@@ -264,7 +290,7 @@ mod tests {
     /// Every verb the docs name as a command: the planned ones answer "not implemented", the
     /// others work today. Collected from literal `kaisa <verb>` text and from the command tables
     /// in docs/user-flows.md §7 and docs/architecture.md §4.
-    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 25] = [
+    const DOCUMENTED_UNIMPLEMENTED_VERBS: [&str; 24] = [
         "review",
         "ask",
         "attach",
@@ -274,7 +300,6 @@ mod tests {
         "cancel",
         "undo",
         "restore",
-        "status",
         "console",
         "memory",
         "team",

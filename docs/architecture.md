@@ -4,7 +4,7 @@
 |---|---|
 | Status | v0.6.1 — **M0 and M1 partly implemented.** A goal runs end to end, but several designed parts are not on the run path and some differ from this text; §17 lists them, and [`tasks/M0.md`](tasks/M0.md) and [`tasks/M1.md`](tasks/M1.md) mark each with ◐. This document stays the target design. Open: T16.0 (confined Claude Code on Linux and Windows) |
 | User flows | [`user-flows.md`](user-flows.md) — the contract this architecture serves |
-| Date | 2026-10-30 (status updated 2026-10-31) |
+| Date | 2026-10-30 (spec workflow evidence updated 2026-11-01) |
 | Platforms | macOS, Linux, Windows (all three are release blockers) |
 | Core language | Rust (stable 1.99.1, edition 2024) |
 | Evidence | [`research/prior-art-rea.md`](research/prior-art-rea.md) (REA analysis of Orca, LearnHarness, ruflo) · [`research/ruflo-control.md`](research/ruflo-control.md) (how ruflo enforces, or only records, its capabilities) |
@@ -72,6 +72,65 @@ preservation) is unchanged: it is the execution path every new capability depend
   - project-settings risk refusal, the context-footprint budget and the deterministic tier 0;
   - no self-promotion of learned changes.
 - **Milestones reordered.** Minimum safety moves into M0. Knowledge, best-of-N, the desktop app and remote work are deferred.
+
+---
+
+## Implemented specification workflow (WP7 evidence update)
+
+This section describes the implemented path; the older milestone text below remains
+a target design. The [workflow design](design/spec-driven-workflow.md) and
+[recorded macOS regressions](evidence/isolation.md) define the current evidence boundary.
+
+| Artifact / decision | Owner | Enforced boundary |
+|---|---|---|
+| Original requirements and criterion IDs | Kaisa + human | Source splitting is deterministic; agent proposals cannot reassign source text |
+| Approved specification | Human, or explicit provisional policy | Versioned private store; digest checked again before delivery |
+| Implementation and development tests | Developer | Attempt worktree, broker write set, platform sandbox |
+| Legacy baseline | Characterization agent / Kaisa | Baseline executes on base tree before developer admission |
+| Acceptance / adversarial tests | Separate QA authors | Read-only context repositories; private suites created after development |
+| Test quality | Deterministic lint + domain test reviewer | Spec/test context; blocking findings enter the gate |
+| Review | Staged reviewer | Ordered structured stages and ledger-bound evidence |
+| Delivery and result branch | Kaisa | Pure acceptance gate; branch publication only after PASS |
+
+Flow: requirements → read-only draft → missing-criteria validation → terminal or
+labelled provisional approval → freeze → legacy characterization → developer →
+frozen candidate → acceptance and blind QA → trusted private runner → domain test
+review → staged review → final-tree acceptance gate → result branch only on PASS.
+A bounded revision gets observable failures, not private suite source; every revision
+reruns both suites on its final tree. The demo intentionally disables revisions.
+
+The gate lines are `all attempt containment admitted`, `spec approval status`,
+`spec digest unchanged`, `traceability complete`, `deterministic checks`,
+`private QA all passed on FINAL tree`, `domain test review no blocking`,
+`staged review approved`, `characterization honoured`, `evidence preserved`, and
+`qa_isolation full or policy-accepted`. A failed line cannot be repaired by a reviewer
+approval; missing receipts remain INCONCLUSIVE. Their recorded decisions are in
+[evidence/spec-demo/traceability.md](evidence/spec-demo/traceability.md).
+
+| Platform | Isolation mechanisms | Labelled / unverified limits |
+|---|---|---|
+| macOS | Seatbelt state/read/write denial, separate context repos, immutable private inputs, process groups and descendant observation | `descendants` reduction; runtime tests here only; candidate-influenceable in-process QA |
+| Linux | Landlock filesystem grants, seccomp/network controls where available, separate contexts and private inputs | Capability probing and explicit reduced admission; native runtime not verified by WP7 |
+| Windows | Restricted process / filesystem policy and separate contexts where available | Native runtime not verified by WP7; human spec approval refused |
+
+Spec digests and temporal separation are not a same-user security boundary against an
+unconfined actor rewriting private state. Lexical detectors and in-process output
+checks are bounded defenses. See [all labelled limits](evidence/limitations.md).
+
+Explicit mission DAGs use deterministic ready waves bounded by `max_parallel`, reject
+unordered overlapping write sets, integrate dependencies, and verify the final merged
+result. Shared Git worktree commands and listings take an in-process mutex plus a
+common-directory advisory lock. Slow siblings delay the next wave; admitted failures
+drain under existing deadlines. Best-of-N compares verified alternatives and delivers
+one. Regression evidence: mission tests listed in [isolation.md](evidence/isolation.md).
+
+Measured routing is wired into unpinned Claude verified goals. It selects eligible
+role/grade/model/effort cells using completed, delivered task episodes, known cost and
+latency, minimum samples, deterministic exploration and escalation. Explicit fake or
+model launches bypass selection; cold-start order is a proxy, not measured pricing.
+Legacy rows without route identity are unattributable. The scoring contract is in
+[ADR-0032](adr/0032-addendum-measured-routing.md); the regressions rerun for this update
+are included in [isolation.md](evidence/isolation.md). No real model cost was measured.
 
 ---
 
@@ -306,6 +365,45 @@ globs, proposed by the coordinator and checked by Kaisa against the repository i
 - **Pipelines advance on events, not on hints.** When an Attempt settles and passes its gate, the Scheduler starts the dependent Tasks itself. This takes ruflo's `SubagentStop` → `team_on_stop` idea and removes the step where "the lead must spawn the next one".
 - **Retries and failover follow policy.** A start or effect in `Unknown` is never retried automatically.
 
+**Implemented parallel path (WP8).** `scheduler.rs` revalidates the task DAG and actual write
+sets before admission. `max_parallel` defaults to half the available CPUs, capped at four with at
+least one slot. Tasks start in plan order in deterministic waves; a wave drains before the next
+one starts, trading immediate slot refill for reproducible admission order. `on_failure=stop`
+prevents new admission after a failed wave; `continue_independent` releases only branches whose
+parents succeeded. Both let admitted siblings settle under the existing per-attempt process-tree
+supervisor and deadlines, and record failed/blocked task stops. An error never returns while a
+sibling worker remains unjoined. Execution progress is local to the mission, so historical task IDs
+cannot release a new mission's dependencies. Ledger task progress distinguishes failure from
+successful finish and scopes live owners by mission.
+
+`integrate.rs` uses Git's three-way `merge-tree` and preserved commit parents to build dependency
+bases containing every parent result. Integration writes host-owned commits and refs without
+changing the user's checkout. Task changes are rechecked against their own base and write set.
+Textual/structural conflicts and outside writes are typed blocking outcomes with file lists;
+Git union and registered external merge drivers are disabled, and there is no implicit agent resolver. Successfully gated results are merged in deterministic
+admission/dependency order. The final frozen candidate receives trusted checks on fresh checkouts
+and the same independent read-only reviewer and delivery gate as `team.rs`. `verify_each_task=true`
+is the default and runs each writing role through the complete developer/check/review/revision
+pipeline from its merged dependency base. Child task/alternative gates record eligibility, not
+mission delivery, and cannot promote learning before the final gate; an explicit false policy is reported and leaves only
+final integrated verification enabled.
+
+The CLI accepts a human-authored JSON DAG with `--plan` and independent alternatives with
+`--candidates N`. Alternatives have separate worktrees and the normal verified pipeline; their
+write sets describe competing versions, so they are not co-integrated or treated as contributors
+to one DAG. Passing alternatives are compared through the independent reviewer, with bounded
+peer diffs and recorded check command/exit/digest receipts, followed by fresh checks of the selected
+tree. Comparison runs in candidate-index order and the first comparative approval wins; equivalent
+alternatives prefer the lowest index. Exactly one final `mission.verified` receipt is emitted,
+or none. Routes are shared across attempts; automatic provider/model diversity and automatic DAG
+decomposition remain unimplemented.
+
+Ledger events `task.scheduled`, `task.started`, `task.finished`, `task.integrated`,
+`integration.conflict` and `mission.verified` carry wall-clock timestamps; task finish and final
+verification also carry elapsed durations. `status`/`watch` and the TUI read running task IDs
+through the existing ledger data path. These tests use scripted agents; this is not a real-model
+scale benchmark or a claim of full containment on platforms that remain labelled reduced.
+
 **Correctness mechanisms (internal)**
 - **Epoch fencing at every mutation.** Every mutating call carries `(run, coordinator_epoch)` or `(attempt, generation)`. A call with a stale epoch is rejected and recorded.
 - **Outbox (review M2).** A mutation that causes an external effect commits its intent, its event and the projection in **one SQLite transaction**. The effect types are spawn, merge, push, branch delete and file archive. An effect executor then performs the effect and records an **effect receipt**.
@@ -405,6 +503,17 @@ Workers keep running during a coordinator handoff, because the daemon and their 
 - A conformance suite checks that `gix` agrees with `git` on submodules, symlinks, long paths and sparse checkouts (review M9).
 - On Windows, worktrees use `\\?\` paths and `core.longpaths=true`.
 - Shared `.git` metadata is mounted read-only into sandboxes, except for the attempt's own worktree refs.
+- Kaisa serializes Git worktree commands (add, remove, prune, move, repair and listing) by
+  canonical common Git directory. Both workspace Git runners take a repository mutex, then
+  an advisory file lock at `<common-git-dir>/kaisa-worktree.lock`; linked worktrees and
+  independent Kaisa processes share it. The persistent lock file is never unlinked.
+  Lock order is attempt owner lock (when applicable), repository mutex, advisory file lock;
+  the mutex registry is released before waiting. Only one Git worktree command runs in the
+  critical section: no agent/check execution, preservation scans, ledger writes, or owner
+  lock acquisition. Internal worktree commands disable repository hooks with a private empty
+  Kaisa-owned hooks directory, preventing hook execution and reentry into the non-reentrant
+  metadata lock. Recovery, verification, candidates and mission cleanup use these same
+  workspace APIs. Unrelated repositories remain independent.
 
 **Source state (user-flows F31).** Worktrees are created from **committed** state by default.
 - **Dirty tree.** If the user's tree is dirty, the run request records one of three choices:
@@ -1534,14 +1643,14 @@ design above.
 - **Index, impact and route.** The repository index and impact sets are built but a run does not use
   them; packs carry an empty impact set. Model routing is used by a run, but `route.decided` is not
   recorded and the task signals are approximate.
-  `run_mission` is not called from the CLI.
+  Explicit plans now run through `--plan`; automatic goal decomposition is not implemented.
 - **Messages.** English only. There is no `ko`/`en` message catalog and no `--json` yet (§5.11).
 - **Retrieval.** BM25 over lessons only. There is no vector index and no "vector search off" label.
 - **Containment.** See the current-state note in §5.7: platform-limit admission, `state-read`, a
   process-tree walk instead of cgroups, and Claude Code unconfined by default (T16.0).
 - **Exit codes.** 0, 3, 4 and 64 work, with 2 for a reserved command word and 1 for infrastructure or configuration failure. 5 and 6 do not exist. `--agent-program` without `--reviewer-arg` runs no checks or review and can exit 0.
-- **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`, several
-  candidates, the TUI and console.
+- **Not started.** Decisions as cards (FR-15), the GitHub connector (FR-17), `kaisa review`,
+  automatic goal decomposition and console. Candidate alternatives run with `--candidates`.
 
 *Decisions made while building.* Light work (F37) is a first-pass review on a registered T0 local model,
 advisory except for blocking findings. An observed agent (Codex) is checked against its write set after

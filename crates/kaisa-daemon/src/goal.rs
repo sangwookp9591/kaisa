@@ -45,6 +45,9 @@ pub(crate) const BUILD_OUTPUT: [&str; 3] = ["target", "node_modules", ".venv"];
 /// Builds the agent's command from the path of its MCP config.
 pub type AgentLauncher<'launcher> = &'launcher dyn Fn(&Path) -> ProcessSpec;
 
+/// A launcher that can safely be shared by concurrent mission or candidate workers.
+pub type ParallelAgentLauncher<'launcher> = &'launcher (dyn Fn(&Path) -> ProcessSpec + Sync);
+
 /// What to run.
 #[derive(Clone, Copy)]
 pub struct GoalRequest<'request> {
@@ -273,6 +276,13 @@ pub(crate) fn at<E: fmt::Display>(step: &'static str) -> impl Fn(E) -> GoalError
     }
 }
 
+pub(crate) fn check_cancellation() -> Result<(), GoalError> {
+    if let Some(token) = kaisa_sys::Cancellation::current() {
+        token.check().map_err(at("mission cancellation"))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn record(
     ledger: &mut EventStore,
     kind: EventKind,
@@ -371,6 +381,9 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
 /// Additional context supplied by verification, never inferred from agent-written text.
 #[derive(Default)]
 pub(crate) struct AttemptContext<'a> {
+    /// Enclosing specification run, recorded at admission before any agent executes.
+    pub spec_run_id: Option<&'a str>,
+    pub route: Option<&'a crate::RouteDecision>,
     pub findings: &'a [String],
     pub diff: &'a str,
     pub diff_remainder: &'a str,
@@ -398,6 +411,7 @@ fn run_goal_inner(
     context: &AttemptContext<'_>,
     reduced_notice: &mut Option<String>,
 ) -> Result<GoalOutcome, GoalError> {
+    check_cancellation()?;
     // An observed agent writes directly, which Kaisa's confinement would forbid.
     let confine_agent: bool = request.confine_agent && !request.observed;
     kaisa_sys::ensure_private_directory(request.state_directory)
@@ -464,12 +478,17 @@ fn run_goal_inner(
         run.as_str(),
         json!({"mission": mission.as_str()}),
     )?;
+    let approval_guard = kaisa_ledger::spec::SpecStore::new(request.state_directory)
+        .attempt_admission_guard()
+        .map_err(at("serializing attempt admission with spec approval"))?;
     record(
         &mut ledger,
         EventKind::AttemptAdmitted,
         attempt.as_str(),
         json!({
             "task": task.as_str(),
+            "role": request.role.code(),
+            "run_id": context.spec_run_id,
             "containment": {
                 "admission": admission.code(),
                 "missing": admission.missing().iter().map(|capability| capability.code()).collect::<Vec<_>>(),
@@ -478,6 +497,8 @@ fn run_goal_inner(
             },
         }),
     )?;
+
+    drop(approval_guard);
 
     let profile: ProjectProfile =
         derive_profile(request.repository).map_err(at("deriving the project profile"))?;
@@ -554,7 +575,14 @@ fn run_goal_inner(
         let endpoint = kaisa_mcp::BrokerEndpoint::bind(&attempt_directory)
             .map_err(at("binding the attempt's broker"))?;
         let socket: PathBuf = endpoint.socket().to_owned();
-        (std::thread::spawn(move || endpoint.serve_one()), socket)
+        let cancellation = kaisa_sys::Cancellation::current();
+        (
+            std::thread::spawn(move || match cancellation {
+                Some(token) => token.scope(|| endpoint.serve_one()),
+                None => endpoint.serve_one(),
+            }),
+            socket,
+        )
     };
     let scratch: PathBuf = attempt_directory.join("scratch");
     std::fs::create_dir_all(&scratch).map_err(at("preparing the agent's scratch"))?;
@@ -572,7 +600,14 @@ fn run_goal_inner(
 
     let mut state: AttemptState = AttemptState::admitted();
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
+    if let Some(route) = context.route {
+        crate::record_route(&mut ledger, &task, route).map_err(at("recording the route"))?;
+        crate::route::apply_route(&mut agent, route)?;
+    }
     agent.working_directory = worktree.path().to_owned();
+    agent
+        .env
+        .push(("KAISA_ATTEMPT".into(), attempt.as_str().into()));
     let egress: Option<kaisa_egress::EgressBroker> = if request.egress_hosts.is_empty() {
         None
     } else {
@@ -665,6 +700,10 @@ fn run_goal_inner(
         EventKind::AttemptStateChanged,
         attempt.as_str(),
         json!({"execution": Execution::Starting.code(),
+            "run_id": context.spec_run_id,
+            "containment": {"missing": missing.iter().map(|c| c.code()).collect::<Vec<_>>(),
+                "admitted": !matches!(spawn_admission, Admission::Refused { .. }),
+                "observed": request.observed},
             "login_keychain_access": login_keychain_access,
             "notice": login_keychain_access.then_some(
                 "This confined Claude agent can reach the login keychain for its own credential; checks and broker exec cannot.")}),
@@ -673,6 +712,7 @@ fn run_goal_inner(
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
     let mut process_started = false;
+    let route_started = Instant::now();
     let captured = run_captured_reporting(
         &agent,
         &sandbox.confinement(),
@@ -682,6 +722,12 @@ fn run_goal_inner(
         &mut process_started,
         &mut |identity| record_identity(&identity_file, identity),
     );
+    record(
+        &mut ledger,
+        EventKind::AttemptStateChanged,
+        attempt.as_str(),
+        json!({"elapsed_ms": u64::try_from(route_started.elapsed().as_millis()).unwrap_or(u64::MAX), "execution": Execution::Running.code()}),
+    )?;
     let finished: CapturedRun = match captured {
         Ok(finished) => finished,
         Err(error) => {
@@ -722,6 +768,14 @@ fn run_goal_inner(
             });
         }
     };
+    if kaisa_sys::Cancellation::current().is_some_and(|token| token.is_cancelled()) {
+        record(
+            &mut ledger,
+            EventKind::AttemptStateChanged,
+            attempt.as_str(),
+            json!({"reason": "mission cancelled"}),
+        )?;
+    }
     if finished.exit.is_none() && deadline.is_some_and(|budget| budget < AGENT_DEADLINE) {
         record(
             &mut ledger,

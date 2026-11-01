@@ -443,13 +443,20 @@ dependencies = [
  "kaisa-supervisor",
  "kaisa-sys",
  "kaisa-workspace",
+ "serde",
  "serde_json",
  "shell-words",
+ "toml",
 ]
 
 [[package]]
 name = "kaisa-domain"
 version = "0.0.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "kaisa-egress"
@@ -476,7 +483,9 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "kaisa-domain",
+ "kaisa-sys",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 
@@ -520,6 +529,11 @@ dependencies = [
 [[package]]
 name = "kaisa-workspace"
 version = "0.0.0"
+dependencies = [
+ "blake3",
+ "kaisa-domain",
+ "serde_json",
+]
 
 [[package]]
 name = "kasuari"

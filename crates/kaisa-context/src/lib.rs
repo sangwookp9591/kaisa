@@ -8,6 +8,7 @@ mod index;
 mod pack;
 mod profile;
 mod retrieve;
+mod test_lint;
 #[cfg(test)]
 mod test_support;
 
@@ -24,3 +25,8 @@ pub use profile::{
     Confirmation, DetectedCommand, InstructionExcerpt, Language, ProjectProfile, Purpose,
 };
 pub use retrieve::{B, Hit, K1, LessonIndex, MIN_TOKEN_CHARS, SCOPE_MATCH_BOOST};
+pub use test_lint::{
+    CoverageReport, CriterionKind, CriterionRef, DEFAULT_MIN_NAME_WORDS, LintFinding, LintPolicy,
+    LintRule, LintSeverity, ManifestEntry, RuleSetting, SourceFile, TestLanguage, check_coverage,
+    has_blocking, lint_tests,
+};

@@ -1,0 +1,21 @@
+WP7 recorded run provenance
+Date: 2026-11-01
+Source before: 46539fd2e59291a54e50e2f11fa564d7780fea3d
+Source after production: f3a00c25a12d5d8c2fd654262e5f332a20e66cc2
+Demo commit: 5a5528ef7692971996ef12b0294f880f66535e9c
+Platform:
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Darwin arm64
+
+All Cargo commands used CARGO_NET_OFFLINE=true or --offline.
+Only explicit kaisa-fake-agent programs were launched.
+Full local check: CARGO_NET_OFFLINE=true RUST_TEST_THREADS=1 scripts/check.sh, exit 0.
+
+Measurement command:
+python3 examples/spec-demo/run.py --measure-agent --output docs/evidence/spec-demo
+
+Comparison commands are in ../before-after.md.
+The timed launcher invokes /usr/bin/time -l with output redirected into authorized agent scratch.
+Internal private-QA/gate peak RSS is not measured; no production profiling hooks were added.

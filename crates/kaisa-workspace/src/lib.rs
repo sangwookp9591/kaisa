@@ -6,6 +6,7 @@ mod candidate;
 mod git;
 mod inventory;
 mod preserve;
+mod qa_store;
 mod receipt;
 mod secrets;
 mod settings_risk;
@@ -14,6 +15,7 @@ mod status;
 #[cfg(test)]
 mod test_support;
 mod worktree;
+mod worktree_lock;
 
 pub use candidate::{
     Candidate, CandidateCheckout, candidate_diff, changed_check_definitions, changed_paths,
@@ -22,6 +24,7 @@ pub use candidate::{
 pub use git::{GitError, git_cli_path};
 pub use inventory::{IgnoredPolicy, Inventory, plan_inventory};
 pub use preserve::{Preservation, preserve_as_commit};
+pub use qa_store::{QaKind, QaManifestEntry, QaSuite, QaTestFile, record_qa_suite};
 pub use receipt::{PreservationReceipt, UncoveredDeletion, check_deletion};
 pub use secrets::{SecretKind, scan as scan_for_secrets, scan_bytes};
 pub use settings_risk::{
@@ -30,5 +33,6 @@ pub use settings_risk::{
 pub use source::{SourceChoice, SourceDecision, decide_source};
 pub use status::{EntryKind, StatusEntry, StatusParseError, parse_status};
 pub use worktree::{
-    Worktree, WorktreeError, create_worktree, inventory, open_worktree, remove_worktree,
+    Worktree, WorktreeError, branch_has_worktree, create_worktree, inventory, open_worktree,
+    remove_worktree, worktree_paths,
 };

@@ -1,0 +1,23 @@
+FAIL (PROVISIONAL SPEC) (reduced: descendants)
+
+- Pass: all attempt containment admitted — all recorded attempt containment shortfalls admitted (evidence: ledger:29, ledger:38)
+- Pass: spec approval status — provisional spec; explicitly allowed by policy (evidence: frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c)
+- Pass: spec digest unchanged — frozen digest and approval receipt verified (evidence: frozen-spec.json:blake3:beb5bed0593d4b67aa47eb519d684826409f7227c275ce0188169808bddb0a5c)
+- Inconclusive: traceability complete — stage has not produced evidence (evidence: )
+- Fail: deterministic checks — developer attempt failed, was denied protected writes, or produced no preserved candidate (evidence: developer-failed-base.json:blake3:607206228d0c4279ce60836f51eb419d1bef195a3a0f9b5b724699baa5f85bd8)
+- Inconclusive: private QA all passed on FINAL tree — stage has not produced evidence (evidence: )
+- Inconclusive: domain test review no blocking — stage has not produced evidence (evidence: )
+- Inconclusive: staged review approved — stage has not produced evidence (evidence: )
+- Inconclusive: characterization honoured — stage has not produced evidence (evidence: )
+- Inconclusive: evidence preserved — stage has not produced evidence (evidence: )
+- Inconclusive: qa_isolation full or policy-accepted — stage has not produced evidence (evidence: )
+
+# Traceability: run_dmjv6qbkdm3400002pq0000000
+
+Final tree: not produced
+
+| Requirement | Criterion | Private tests (final-tree result) | Development tests (lint-mapped) |
+|---|---|---|---|
+| R1 | AC-1 |  |  |
+
+- Gap: AC-1 has no private acceptance test on the final tree

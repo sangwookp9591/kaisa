@@ -1,0 +1,17 @@
+[
+  {
+    "attempt": "att_dmjv6ir4ieps00023640000000",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6ir4ieps00023640000000\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6iubryz400023ez0000000",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6iubryz400023ez0000000\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6jf63rcw00023tk0000007",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"developer\",\"run_id\":\"run_dmjv6iyim8y000023tk0000000\",\"task\":\"task_dmjv6jf63rcw00023tk0000007\"}",
+    "time_l": []
+  }
+]

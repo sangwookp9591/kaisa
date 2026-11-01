@@ -1,0 +1,27 @@
+[
+  {
+    "attempt": "att_dmjv6i6qrkaw000229r0000000",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6i6qrkaw000229r0000000\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6i9s3l2800022e80000000",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":null,\"task\":\"task_dmjv6i9s3l2800022e80000000\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6iv0ad6g00022ox0000007",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"developer\",\"run_id\":\"run_dmjv6idr5liw00022ox0000000\",\"task\":\"task_dmjv6iv0ad6g00022ox0000007\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6jlrubds00022ox000000h",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":\"run_dmjv6idr5liw00022ox0000000\",\"task\":\"task_dmjv6jlrubds00022ox000000h\"}",
+    "time_l": []
+  },
+  {
+    "attempt": "att_dmjv6jopz3zs00022ox000000i",
+    "payload": "{\"containment\":{\"admission\":\"reduced\",\"basis\":\"platform-limit\",\"expires_at_ms\":null,\"missing\":[\"descendants\"]},\"role\":\"reviewer\",\"run_id\":\"run_dmjv6idr5liw00022ox0000000\",\"task\":\"task_dmjv6jopz3zs00022ox000000i\"}",
+    "time_l": []
+  }
+]

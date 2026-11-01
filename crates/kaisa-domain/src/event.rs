@@ -55,6 +55,14 @@ impl fmt::Display for Sequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EventKind {
+    /// Current observable behaviour was checked on the frozen base before development.
+    CharacterizationBaseline,
+    /// A provisional specification version was drafted.
+    SpecDrafted,
+    /// A specification version received approval.
+    SpecApproved,
+    /// Approved specification bytes were frozen.
+    SpecFrozen,
     /// A mission was created from what the user asked for.
     MissionCreated,
     /// A run started inside a mission: the root run, or a sub-run whose parent is named in the
@@ -71,10 +79,16 @@ pub enum EventKind {
     CandidateFrozen,
     /// A trusted check produced evidence on a frozen tree.
     CheckEvidence,
+    /// Private acceptance or adversarial tests were sealed outside worktrees.
+    QaSuiteRecorded,
+    /// One private QA scenario ran on a frozen candidate.
+    QaResult,
     /// A reviewer returned a verdict (or no valid verdict) on a frozen tree.
     ReviewVerdict,
     /// The delivery gate decided what happens next.
     GateDecided,
+    /// Specification workflow acceptance receipt with every requirement and evidence id.
+    GateAcceptance,
     /// A bounded revision began from a frozen candidate.
     RevisionStarted,
     /// A knowledge item was proposed (not yet trusted).
@@ -93,6 +107,14 @@ pub enum EventKind {
     IntentCompleted,
     /// A planned task was handed to an attempt (the subject is the task).
     TaskStarted,
+    /// A task was admitted to a deterministic scheduler wave.
+    TaskScheduled,
+    /// A preserved task result was merged into the mission integration.
+    TaskIntegrated,
+    /// Integration stopped at a textual conflict or ownership violation.
+    IntegrationConflict,
+    /// The integrated mission candidate passed its checks and independent review.
+    MissionVerified,
     /// A planned task is done; tasks waiting on it may start (the subject is the task).
     TaskFinished,
     /// The tokens (and cost, when the agent reports one) an attempt used (T30b).
@@ -103,7 +125,11 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 32] = [
+        Self::CharacterizationBaseline,
+        Self::SpecDrafted,
+        Self::SpecApproved,
+        Self::SpecFrozen,
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -111,8 +137,11 @@ impl EventKind {
         Self::ContextPackRecorded,
         Self::CandidateFrozen,
         Self::CheckEvidence,
+        Self::QaSuiteRecorded,
+        Self::QaResult,
         Self::ReviewVerdict,
         Self::GateDecided,
+        Self::GateAcceptance,
         Self::RevisionStarted,
         Self::KnowledgeProposed,
         Self::KnowledgePromoted,
@@ -122,6 +151,10 @@ impl EventKind {
         Self::IntentRecorded,
         Self::IntentCompleted,
         Self::TaskStarted,
+        Self::TaskScheduled,
+        Self::TaskIntegrated,
+        Self::IntegrationConflict,
+        Self::MissionVerified,
         Self::TaskFinished,
         Self::UsageRecorded,
         Self::PolicyAdopted,
@@ -131,6 +164,10 @@ impl EventKind {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::CharacterizationBaseline => "characterization.baseline",
+            Self::SpecDrafted => "spec.drafted",
+            Self::SpecApproved => "spec.approved",
+            Self::SpecFrozen => "spec.frozen",
             Self::MissionCreated => "mission.created",
             Self::RunStarted => "run.started",
             Self::WriteSetDeclared => "task.write_set_declared",
@@ -138,8 +175,11 @@ impl EventKind {
             Self::ContextPackRecorded => "context_pack.recorded",
             Self::CandidateFrozen => "candidate.frozen",
             Self::CheckEvidence => "check.evidence",
+            Self::QaSuiteRecorded => "qa.suite_recorded",
+            Self::QaResult => "qa.result",
             Self::ReviewVerdict => "review.verdict",
             Self::GateDecided => "gate.decided",
+            Self::GateAcceptance => "gate.acceptance",
             Self::RevisionStarted => "revision.started",
             Self::KnowledgeProposed => "knowledge.proposed",
             Self::KnowledgePromoted => "knowledge.promoted",
@@ -148,6 +188,10 @@ impl EventKind {
             Self::AttemptStateChanged => "attempt.state_changed",
             Self::IntentRecorded => "outbox.intent_recorded",
             Self::IntentCompleted => "outbox.intent_completed",
+            Self::TaskScheduled => "task.scheduled",
+            Self::TaskIntegrated => "task.integrated",
+            Self::IntegrationConflict => "integration.conflict",
+            Self::MissionVerified => "mission.verified",
             Self::TaskStarted => "task.started",
             Self::TaskFinished => "task.finished",
             Self::UsageRecorded => "attempt.usage_recorded",

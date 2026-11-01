@@ -5,6 +5,7 @@
 
 #[cfg(windows)]
 mod appcontainer;
+mod cancellation;
 mod capture;
 #[cfg(windows)]
 mod conpty;
@@ -38,6 +39,7 @@ mod windows_command_line;
 
 #[cfg(windows)]
 pub use appcontainer::{AppContainerProfile, CapabilitySid, ContainerAccess};
+pub use cancellation::Cancellation;
 pub use capture::{CapturedRun, Confinement, run_captured, run_captured_reporting};
 #[cfg(windows)]
 pub use control_pipe::ControlPipe;
@@ -45,7 +47,9 @@ pub use control_pipe::ControlPipe;
 pub use hard_links::hard_link_count;
 pub use identity::ProcessIdentity;
 #[cfg(target_os = "linux")]
-pub use landlock::{LandlockRuleset, landlock_abi, udp_filter_supported, write_ruleset};
+pub use landlock::{
+    LandlockRuleset, landlock_abi, read_write_ruleset, udp_filter_supported, write_ruleset,
+};
 #[cfg(unix)]
 pub use peer::{ForeignPeer, current_uid, peer_uid, require_same_user};
 pub use process::{OwnedProcess, ProcessExit, ProcessSpec, base_environment};

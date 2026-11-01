@@ -77,6 +77,27 @@ uses only scripted fake agents; unavailable provider usage and cost are shown as
 
 ---
 
+## Spec-driven workflow
+
+```sh
+kaisa spec draft --file requirements.txt
+kaisa spec show <id>
+kaisa spec approve <id>                 # terminal review and digest confirmation
+kaisa build --spec <id>
+kaisa spec report <run>
+```
+
+Spec builds characterize untested legacy behavior before development, author private
+acceptance and adversarial tests, review test quality and the candidate, and publish
+only after the orchestrator's final-tree gate passes. Provisional approval requires
+`kaisa policy set allow_provisional_spec true` and
+`kaisa spec approve <id> --provisional`; it never counts as human approval.
+Plain `kaisa "<goal>"` has no private QA and can still deliver the recorded
+premature-`exit(0)` candidate; that attack is blocked by `build --spec`.
+See the [offline fake-agent demo](examples/spec-demo/),
+[recorded results](docs/evidence/spec-demo/traceability.md), and
+[platform and trust limits](docs/evidence/limitations.md).
+
 ## ✨ Why Kaisa
 
 | | Without Kaisa | With Kaisa |
@@ -84,7 +105,7 @@ uses only scripted fake agents; unavailable provider usage and cost are shown as
 | 🧹 | You babysit agents, switch branches and clean up terminals | Every attempt runs in its own copy, and cleanup happens on its own |
 | 🛡️ | Agents ask for permission all the time, or you turn permissions off | Agent effects go through a broker that enforces a write set; real decisions come to you |
 | ✅ | You review every attempt, including the broken ones | You see only candidates that passed your checks and an independent review |
-| 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context (planned multi-task runs are not on the run path yet) |
+| 🧠 | A single agent loses track of a long task | A reviewer, bounded revisions and project memory carry the context; explicit DAG plans run verified tasks in parallel |
 | 📊 | Cost and progress are invisible until the end | `kaisa watch` shows every attempt with its state, tokens and cost |
 
 <a id="kaisa-vs-ruflo-and-orca"></a>
@@ -111,7 +132,7 @@ a narrower question with evidence: **can you trust what an agent hands back?**
 with `/kaisa`, and keep your swarm or workspace tool for everything else. What comes back through
 Kaisa has passed your checks and a review.
 
-**What Kaisa does not do yet:** several candidates or a swarm per goal, a plugin ecosystem, a web
+**What Kaisa does not do yet:** automatic goal decomposition into a swarm, a plugin ecosystem, a web
 console, packaged releases, and real-agent runs on Linux and Windows. See
 [Planned](#planned) and [Current differences from the design](#current-differences-from-the-design).
 
@@ -305,6 +326,43 @@ list) never start a run. `kaisa review the parser` exits `2` and prints the quot
 that must contain `--word` can follow `--`: `kaisa -- fix the --verbose bug`. Run `kaisa` from a
 subdirectory and it uses the enclosing git repository and says so in one line:
 `using the git repository at <root>`. `kaisa watch` only reads the ledger: it does not append events, migrate the database or rebuild projections. A closed ledger is read without any file change; reading a live WAL database can create or update SQLite shared-memory sidecar files (`-shm`).
+
+### Parallel tasks and candidate alternatives
+
+`kaisa "<goal>" --candidates 3` runs independent developer attempts in separate worktrees,
+with the normal trusted checks, review and bounded revision for each. A reviewer compares the
+passing alternatives with bounded peer patches and recorded check receipts. Only one
+comparison-approved candidate is printed as the result; equivalent alternatives prefer the
+lowest candidate index. If none passes, nothing is delivered. Alternatives currently use the same
+configured developer/reviewer routes; automatic model diversity is not implemented.
+
+For tasks that should contribute to one result, supply an explicit plan:
+
+```json
+{"tasks":[
+  {"id":"task_api","instruction":"Implement the API change","write_set":["src/api"]},
+  {"id":"task_web","instruction":"Update the web client","write_set":["src/web"]},
+  {"id":"task_docs","instruction":"Document both changes","role":"documentation",
+   "write_set":["docs"],"depends_on":["task_api","task_web"]}
+]}
+```
+
+Run `kaisa "Update the API and client" --plan mission.json`. Task roles are `developer` (default),
+`tester` or `documentation`. Task starts follow plan order within deterministic concurrent waves.
+Each dependent starts from a three-way merge of **all** its parents' preserved commits. Every task
+passes its own checks and review by default; the integrated tree then gets fresh checks and an
+independent review before delivery. Merge conflicts and writes outside declared ownership block
+the mission and name the files. Git union and external merge drivers are disabled during
+integration; Kaisa does not automatically resolve conflicts.
+
+Policy keys `max_parallel`, `on_failure` (`stop` or `continue_independent`) and `verify_each_task`
+can be set with `kaisa policy set`. Their CLI overrides are `--max-parallel`, `--on-failure` and
+`--verify-each-task true|false`. Default concurrency is half the available CPUs, capped at four,
+with at least one slot; per-task verification defaults to true. `stop` admits no new wave after
+failure; `continue_independent` runs unaffected branches. Both drain admitted siblings through
+existing process-tree supervision and deadlines. Turning per-task verification off is explicitly
+reported: only the final integrated candidate receives checks and review. `kaisa status`,
+`kaisa watch` and the TUI show running mission task IDs from the ledger.
 
 <a id="use-kaisa-from-claude-code"></a>
 
@@ -507,14 +565,15 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
   next `kaisa` start; a still-running agent is ended, not reattached.
 - **Captured output, not a PTY.** Agents run with captured stdio. `kaisa wrap`, attach and steer do not
   exist.
-- **Small ledger.** The SQLite ledger has four tables (`events`, `attempts`, `context_packs`,
-  `outbox`); everything else is folded from events. The outbox is built and tested but not on the run
-  path. There is no single OS-level ledger writer.
-- **Index and impact sets** are built but a run does not use them. Model routing is used (a run grades the task and picks the model), but `route.decided` is not recorded and the task signals are approximate.
+- **Event-sourced ledger.** SQLite stores attempts, context packs and events. Immutable specs
+  are content-addressed JSON files under the state directory (`specs/<id>/v<n>.json`),
+  with ledger events; most state is folded from events. The outbox is built and tested
+  but not on the run path. There is no single OS-level ledger writer.
+- **Index and impact sets** are built but a run does not use them. Unpinned Claude verified goals record measured routing decisions; task impact signals remain approximate. Explicit agent/model launches keep their selections.
 - **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
   off" label yet.
-- **Messages are English only.** There is no `ko`/`en` message catalog yet.
-- **Missions** (`run_mission`) are not reachable from the CLI.
+- **Localization is partial.** The TUI selects Korean or English labels; engine codes, recorded text and most CLI output retain their original language.
+- **Missions** run explicit JSON DAGs through `--plan`; decomposition into tasks is supplied by the user. Dispatch uses deterministic waves, so a slow admitted sibling delays the next wave. Failure drains admitted siblings under their existing process deadlines; there is no interactive cancellation command.
 - **Trusted checks** are derived from the repository's working tree when the run starts, not from the
   base revision.
 - **Concurrent goals.** Several `kaisa` goals can run at once on one state directory: owner locks keep
@@ -530,11 +589,10 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 
 - Packaged, signed releases per OS (FR-01), so installing does not need a Rust toolchain.
 - `kaisa review` to approve a verified candidate and see exactly what approving will do.
-- Several candidates per goal (`--n 3`), provider failover (for example Claude to GPT when a quota runs
-  out), budgets per run, user and team.
-- A full-screen TUI and `kaisa console` in the browser; `/kaisa` from inside your agent.
+- Provider failover (for example Claude to GPT when a quota runs out), budgets per run, user and team.
+- `kaisa console` in the browser (the terminal TUI and `/kaisa` MCP goal launcher are implemented).
 - Team policy packs, approval delegation and an audit log.
-- Korean and English UI.
+- Complete Korean and English coverage beyond the existing TUI labels.
 
 ## 💻 Platforms
 
@@ -598,3 +656,34 @@ Kaisa is released under the [MIT License](LICENSE).
   <br>
   <sub>Only verified work reaches you.</sub>
 </div>
+
+
+### Measured routing
+
+Unpinned Claude verified goals start with the existing grade-based catalog order
+at medium effort. Once a cell has enough completed task episodes, routing compares
+measured cost per delivered result, including same-cell revisions, subject to the
+delivery-rate target and optional p90 latency budget. Grade and declared floors
+always apply. Failed measured attempts escalate model before effort; high requires
+qualifying evidence, and maximum effort is never selected. Security-sensitive
+tasks never explore. Explicit `--agent`, `--model` (developer) and scripted launches
+keep their selections.
+
+```sh
+kaisa route explain last
+kaisa route explain task_<id>
+kaisa stats routing
+kaisa policy set routing_min_samples 5
+kaisa policy set routing_target_delivery_bps 8000
+kaisa policy set routing_exploration_bps 500
+kaisa policy set routing_latency_budget_ms none
+kaisa policy set routing_window 100
+kaisa policy set routing_seed 0
+```
+
+The numbers above are configurable policy defaults, not measured performance.
+Statistics come from attributable ledger receipts. Unknown cost and latency stay
+unknown; tokens are compared separately from USD. Cross-model escalation costs
+are attributed to their own cells. Legacy attempts without route identity cannot
+supply model statistics. See the [ADR-0032 addendum](docs/adr/0032-addendum-measured-routing.md)
+for the exact scoring, deterministic exploration and current limits.

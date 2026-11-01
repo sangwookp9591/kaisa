@@ -1,6 +1,6 @@
 [package]
 name = "kaisa-domain"
-description = "Pure domain types for Kaisa: identifiers, events and errors. No I/O."
+description = "Domain types and the guarded specification approval terminal boundary."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
