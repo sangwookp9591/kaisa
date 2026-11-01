@@ -4,11 +4,43 @@ use std::fmt;
 
 use crate::grade::Grade;
 
+/// Window and constraints for measured routing. Rates are basis points (10,000 = one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingPolicy {
+    /// Last completed task episodes retained per cell.
+    pub window: usize,
+    /// Completed task episodes required before trusting a cell.
+    pub min_samples: usize,
+    /// Minimum delivered rate in basis points.
+    pub target_delivery_bps: u16,
+    /// Exploration probability in basis points.
+    pub exploration_bps: u16,
+    /// Optional p90 attempt latency ceiling in milliseconds.
+    pub latency_budget_ms: Option<u64>,
+    /// Seed combined with task identity for reproducible exploration.
+    pub seed: u64,
+}
+
+impl Default for RoutingPolicy {
+    fn default() -> Self {
+        Self {
+            window: 100,
+            min_samples: 5,
+            target_delivery_bps: 8000,
+            exploration_bps: 500,
+            latency_budget_ms: None,
+            seed: 0,
+        }
+    }
+}
+
 /// The user's policy for newly started runs; changes apply to future snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     /// Allows explicitly labelled provisional specification approval.
     pub allow_provisional_spec: bool,
+    /// Measured routing constraints captured with the run.
+    pub routing: RoutingPolicy,
     /// How many revisions may follow a failed review.
     pub revision_limit: u32,
     /// Hosts that agents may reach through the egress broker.
@@ -28,6 +60,8 @@ pub struct Policy {
 /// Why a policy cannot be admitted for a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyError {
+    /// Invalid routing window, sample count, probability or latency budget.
+    InvalidRoutingPolicy,
     /// Security review was assigned a grade below T3.
     SecurityReviewFloorBelowT3,
     /// The egress allow-list contains an empty host.
@@ -41,6 +75,7 @@ pub enum PolicyError {
 impl fmt::Display for PolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidRoutingPolicy => f.write_str("routing requires 1 <= min_samples <= window, rates <= 10000, and a positive latency budget"),
             Self::SecurityReviewFloorBelowT3 => {
                 f.write_str("security review requires a grade of at least T3")
             }
@@ -67,6 +102,7 @@ impl Policy {
     pub fn personal_default() -> Self {
         Self {
             allow_provisional_spec: false,
+            routing: RoutingPolicy::default(),
             revision_limit: 2,
             allowed_egress_hosts: vec!["api.anthropic.com".into(), "api.openai.com".into()],
             confine_agents: true,
@@ -83,6 +119,14 @@ impl Policy {
     /// Returns [`PolicyError`] if security review is below T3, an egress host is empty, or a
     /// rule that keeps tampered candidates from passing is switched off.
     pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.routing.min_samples == 0
+            || self.routing.window < self.routing.min_samples
+            || self.routing.target_delivery_bps > 10000
+            || self.routing.exploration_bps > 10000
+            || self.routing.latency_budget_ms == Some(0)
+        {
+            return Err(PolicyError::InvalidRoutingPolicy);
+        }
         if self.min_grade_for_security_review < Grade::T3 {
             return Err(PolicyError::SecurityReviewFloorBelowT3);
         }
@@ -127,12 +171,20 @@ impl Policy {
             Grade::T3 => "T3",
         };
         format!(
-            "allow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
+            "allow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\nrouting_exploration_bps={}\nrouting_latency_budget_ms={}\nrouting_min_samples={}\nrouting_seed={}\nrouting_target_delivery_bps={}\nrouting_window={}\n",
             self.allow_provisional_spec,
             self.confine_agents,
             self.require_person_when_check_definitions_change,
             self.require_person_when_tests_weaken,
             self.revision_limit,
+            self.routing.exploration_bps,
+            self.routing
+                .latency_budget_ms
+                .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+            self.routing.min_samples,
+            self.routing.seed,
+            self.routing.target_delivery_bps,
+            self.routing.window,
         )
     }
 
@@ -254,6 +306,7 @@ mod tests {
             "require_person_when_check_definitions_change=true\n",
             "require_person_when_tests_weaken=true\n",
             "revision_limit=2\n",
+            "routing_exploration_bps=500\nrouting_latency_budget_ms=none\nrouting_min_samples=5\nrouting_seed=0\nrouting_target_delivery_bps=8000\nrouting_window=100\n",
         );
 
         assert_eq!(

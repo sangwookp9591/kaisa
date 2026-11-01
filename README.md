@@ -515,7 +515,7 @@ today where the two differ; the full list is in [`docs/tasks/`](docs/tasks/).
 - **Small ledger.** The SQLite ledger has four tables (`events`, `attempts`, `context_packs`,
   `outbox`); everything else is folded from events. The outbox is built and tested but not on the run
   path. There is no single OS-level ledger writer.
-- **Index and impact sets** are built but a run does not use them. Model routing is used (a run grades the task and picks the model), but `route.decided` is not recorded and the task signals are approximate.
+- **Index and impact sets** are built but a run does not use them. Unpinned Claude verified goals record measured routing decisions; task impact signals remain approximate. Explicit agent/model launches keep their selections.
 - **No hybrid retrieval.** Recall is lexical (BM25); there is no vector index and no "vector search
   off" label yet.
 - **Messages are English only.** There is no `ko`/`en` message catalog yet.
@@ -603,3 +603,34 @@ Kaisa is released under the [MIT License](LICENSE).
   <br>
   <sub>Only verified work reaches you.</sub>
 </div>
+
+
+### Measured routing
+
+Unpinned Claude verified goals start with the existing grade-based catalog order
+at medium effort. Once a cell has enough completed task episodes, routing compares
+measured cost per delivered result, including same-cell revisions, subject to the
+delivery-rate target and optional p90 latency budget. Grade and declared floors
+always apply. Failed measured attempts escalate model before effort; high requires
+qualifying evidence, and maximum effort is never selected. Security-sensitive
+tasks never explore. Explicit `--agent`, `--model` (developer) and scripted launches
+keep their selections.
+
+```sh
+kaisa route explain last
+kaisa route explain task_<id>
+kaisa stats routing
+kaisa policy set routing_min_samples 5
+kaisa policy set routing_target_delivery_bps 8000
+kaisa policy set routing_exploration_bps 500
+kaisa policy set routing_latency_budget_ms none
+kaisa policy set routing_window 100
+kaisa policy set routing_seed 0
+```
+
+The numbers above are configurable policy defaults, not measured performance.
+Statistics come from attributable ledger receipts. Unknown cost and latency stay
+unknown; tokens are compared separately from USD. Cross-model escalation costs
+are attributed to their own cells. Legacy attempts without route identity cannot
+supply model statistics. See the [ADR-0032 addendum](docs/adr/0032-addendum-measured-routing.md)
+for the exact scoring, deterministic exploration and current limits.

@@ -20,7 +20,10 @@ keys: allow_provisional_spec (true|false), revision_limit (0..10), confine_agent
       allowed_egress_hosts (comma-separated; empty clears),
       require_person_when_check_definitions_change (true only; always enforced),
       require_person_when_tests_weaken (true only; always enforced),
-      min_grade_for_security_review (T0..T3; requires T3)";
+      min_grade_for_security_review (T0..T3; requires T3),
+      routing_window, routing_min_samples (positive integers; samples <= window),
+      routing_target_delivery_bps, routing_exploration_bps (0..10000),
+      routing_latency_budget_ms (positive milliseconds|none), routing_seed (unsigned integer)";
 
 fn grade_from(code: &str) -> Option<Grade> {
     match code {
@@ -38,6 +41,7 @@ fn policy_from_json(value: &Value) -> Option<Policy> {
             None => false,
             Some(value) => value.as_bool()?,
         },
+        routing: routing_from_json(value)?,
         require_person_when_tests_weaken: match value.get("require_person_when_tests_weaken") {
             None => true,
             Some(value) => value.as_bool()?,
@@ -55,6 +59,29 @@ fn policy_from_json(value: &Value) -> Option<Policy> {
         require_person_when_check_definitions_change:
             value["require_person_when_check_definitions_change"].as_bool()?,
     })
+}
+
+fn routing_from_json(value: &Value) -> Option<kaisa_domain::RoutingPolicy> {
+    let mut routing = kaisa_domain::RoutingPolicy::default();
+    if let Some(v) = value.get("routing_window") {
+        routing.window = usize::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_min_samples") {
+        routing.min_samples = usize::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_target_delivery_bps") {
+        routing.target_delivery_bps = u16::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_exploration_bps") {
+        routing.exploration_bps = u16::try_from(v.as_u64()?).ok()?;
+    }
+    if let Some(v) = value.get("routing_seed") {
+        routing.seed = v.as_u64()?;
+    }
+    if let Some(v) = value.get("routing_latency_budget_ms") {
+        routing.latency_budget_ms = if v.is_null() { None } else { Some(v.as_u64()?) };
+    }
+    Some(routing)
 }
 
 /// Loads the personal policy from `state`, using the default only when the file is absent.
@@ -89,6 +116,12 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
     let value = json!({
         "revision_limit": policy.revision_limit,
         "allow_provisional_spec": policy.allow_provisional_spec,
+        "routing_window": policy.routing.window,
+        "routing_min_samples": policy.routing.min_samples,
+        "routing_target_delivery_bps": policy.routing.target_delivery_bps,
+        "routing_exploration_bps": policy.routing.exploration_bps,
+        "routing_latency_budget_ms": policy.routing.latency_budget_ms,
+        "routing_seed": policy.routing.seed,
         "require_person_when_tests_weaken": policy.require_person_when_tests_weaken,
         "allowed_egress_hosts": policy.allowed_egress_hosts,
         "confine_agents": policy.confine_agents,
@@ -116,6 +149,30 @@ fn save(state: &Path, policy: &Policy) -> io::Result<()> {
 /// Applies one CLI value without saving a partially valid policy.
 fn change(policy: &mut Policy, key: &str, value: &str) -> Result<(), String> {
     match key {
+        "routing_window" => {
+            policy.routing.window = value.parse().map_err(|_| "use a positive integer")?
+        }
+        "routing_min_samples" => {
+            policy.routing.min_samples = value.parse().map_err(|_| "use a positive integer")?
+        }
+        "routing_target_delivery_bps" => {
+            policy.routing.target_delivery_bps =
+                value.parse().map_err(|_| "use basis points, 0..10000")?
+        }
+        "routing_exploration_bps" => {
+            policy.routing.exploration_bps =
+                value.parse().map_err(|_| "use basis points, 0..10000")?
+        }
+        "routing_seed" => {
+            policy.routing.seed = value.parse().map_err(|_| "use an unsigned seed")?
+        }
+        "routing_latency_budget_ms" => {
+            policy.routing.latency_budget_ms = if value == "none" {
+                None
+            } else {
+                Some(value.parse().map_err(|_| "use milliseconds or none")?)
+            }
+        }
         "revision_limit" => {
             policy.revision_limit = value
                 .parse::<u32>()
@@ -507,6 +564,53 @@ mod tests {
                 .expect("the confinement choice is persisted")
                 .confine_agents,
             "future runs receive the person's confinement choice"
+        );
+    }
+    #[test]
+    fn routing_policy_keys_round_trip_and_invalid_windows_are_rejected() {
+        let state = PersonalState::new();
+        let chosen_samples = 7;
+        let chosen_seed = 42;
+        for (key, value) in [
+            ("routing_min_samples", "7"),
+            ("routing_window", "20"),
+            ("routing_target_delivery_bps", "9000"),
+            ("routing_exploration_bps", "100"),
+            ("routing_latency_budget_ms", "5000"),
+            ("routing_seed", "42"),
+        ] {
+            assert_eq!(
+                state.command(&["set", key, value]).0,
+                crate::EXIT_SUCCESS,
+                "valid routing key {key} is saved"
+            );
+        }
+        let loaded = load(&state.0).expect("saved routing policy");
+        assert_eq!(
+            loaded.routing.min_samples, chosen_samples,
+            "the run loads the configured sample threshold"
+        );
+        assert_eq!(
+            loaded.routing.seed, chosen_seed,
+            "the exploration seed persists"
+        );
+        for (key, value) in [
+            ("routing_min_samples", "0"),
+            ("routing_window", "1"),
+            ("routing_target_delivery_bps", "10001"),
+            ("routing_exploration_bps", "10001"),
+            ("routing_latency_budget_ms", "0"),
+        ] {
+            assert_eq!(
+                state.command(&["set", key, value]).0,
+                crate::EXIT_USAGE,
+                "invalid routing key {key} is rejected"
+            );
+        }
+        assert_eq!(
+            load(&state.0).expect("still valid"),
+            loaded,
+            "failed edits do not corrupt saved policy"
         );
     }
 }

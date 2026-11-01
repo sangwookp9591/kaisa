@@ -15,6 +15,7 @@ mod recover;
 mod review;
 mod revision;
 mod route;
+mod route_stats;
 mod sandbox;
 /// Read-only specification agent and strict final-answer parser.
 pub mod spec_agent;
@@ -33,11 +34,15 @@ pub use recall::{MAX_LESSONS_PER_PACK, relevant_lessons};
 pub use recover::{Recovered, recover_abandoned};
 pub use review::{VerdictError, parse_verdict, verdict_in_answer};
 pub use revision::{DEFAULT_REVISION_LIMIT, RevisionBudget, revision_goal};
-pub use route::{ROUTE_EFFORT, RouteDecision, decide_route, record_route};
+pub use route::{
+    ROUTE_EFFORT, RouteDecision, RoutingRequest, decide_measured_route, decide_route, record_route,
+};
+pub use route_stats::{RoutingCell, routing_cells};
 /// Read-only prediction of missing sandbox capabilities before admission.
 pub use sandbox::expected_missing as expected_sandbox_missing;
 pub use team::{
     CANDIDATE_TREE_LABEL, FirstPass, VerifiedOutcome, VerifiedRequest, run_verified_goal,
+    run_verified_goal_with_routing,
 };
 pub use test_review::{
     Coverage, CriterionAssessment, LabelledTest, REVIEW_FENCE, REVIEW_SCHEMA, ReviewIssue,

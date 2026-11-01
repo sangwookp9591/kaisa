@@ -237,7 +237,21 @@ fn candidate_settings_risks(
 /// Returns [`GoalError`] if a step cannot run; a failing agent or check is an outcome.
 pub fn run_verified_goal(request: &VerifiedRequest<'_>) -> Result<VerifiedOutcome, GoalError> {
     let mut attempts = Vec::new();
-    run_verified_goal_inner(request, &mut attempts)
+    run_verified_goal_inner(request, &mut attempts, None)
+        .map_err(|error| preservation_error(error, &attempts))
+}
+
+/// Runs the verified loop with measured routing for unpinned Claude launch adapters.
+/// Explicit agent or model selections must use `run_verified_goal` instead.
+///
+/// # Errors
+/// Returns the same errors as `run_verified_goal`, including exhausted safe routes.
+pub fn run_verified_goal_with_routing(
+    request: &VerifiedRequest<'_>,
+    catalog: &kaisa_domain::Catalog,
+) -> Result<VerifiedOutcome, GoalError> {
+    let mut attempts = Vec::new();
+    run_verified_goal_inner(request, &mut attempts, Some(catalog))
         .map_err(|error| preservation_error(error, &attempts))
 }
 
@@ -276,6 +290,7 @@ struct VerificationContext<'a, 'request> {
 fn run_verified_goal_inner(
     request: &VerifiedRequest<'_>,
     attempts: &mut Vec<GoalOutcome>,
+    routing_catalog: Option<&kaisa_domain::Catalog>,
 ) -> Result<VerifiedOutcome, GoalError> {
     std::fs::create_dir_all(request.state_directory)
         .map_err(at("preparing the state directory"))?;
@@ -322,6 +337,17 @@ fn run_verified_goal_inner(
     let mut findings: Vec<String> = Vec::new();
     let no_paths = WriteSet::default();
     loop {
+        let route_task = crate::route::routing_task_id(&context.run_id, "developer");
+        let developer_route = crate::route::route_for_attempt(
+            &EventStore::open(&request.state_directory.join("kaisa.db"))
+                .map_err(at("opening routing ledger"))?,
+            routing_catalog,
+            &request.policy.policy().routing,
+            &route_task,
+            Role::Developer,
+            request.write_set,
+            budget.used(),
+        )?;
         let developed: GoalOutcome = with_admission_gate(
             &context,
             run_goal_with_context(
@@ -342,6 +368,7 @@ fn run_verified_goal_inner(
                     reduced_mode: request.reduced_mode,
                 },
                 &AttemptContext {
+                    route: developer_route.as_ref(),
                     findings: &findings,
                     ..AttemptContext::default()
                 },
@@ -445,7 +472,20 @@ fn run_verified_goal_inner(
             original_base.commit, candidate.tree
         );
         let check_receipts = review_check_receipts(&candidate, &evidence);
+        let review_task = crate::route::routing_task_id(&context.run_id, "reviewer");
+        let reviewer_route = crate::route::route_for_attempt(
+            &EventStore::open(&request.state_directory.join("kaisa.db"))
+                .map_err(at("opening routing ledger"))?,
+            routing_catalog,
+            &request.policy.policy().routing,
+            &review_task,
+            Role::Reviewer,
+            // Routing impact is distinct from the reviewer's empty write authority.
+            request.write_set,
+            0,
+        )?;
         let review_context = AttemptContext {
+            route: reviewer_route.as_ref(),
             findings: &[],
             diff: &diff,
             diff_remainder: &diff_remainder,
@@ -481,7 +521,10 @@ fn run_verified_goal_inner(
                         observed: false,
                         reduced_mode: &local_basis,
                     },
-                    &review_context,
+                    &AttemptContext {
+                        route: None,
+                        ..review_context
+                    },
                 ),
             )?;
             record_review(&context, &candidate, &glanced, true)?;

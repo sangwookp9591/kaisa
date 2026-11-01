@@ -371,6 +371,7 @@ pub fn run_goal(request: &GoalRequest<'_>) -> Result<GoalOutcome, GoalError> {
 /// Additional context supplied by verification, never inferred from agent-written text.
 #[derive(Default)]
 pub(crate) struct AttemptContext<'a> {
+    pub route: Option<&'a crate::RouteDecision>,
     pub findings: &'a [String],
     pub diff: &'a str,
     pub diff_remainder: &'a str,
@@ -577,6 +578,10 @@ fn run_goal_inner(
 
     let mut state: AttemptState = AttemptState::admitted();
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
+    if let Some(route) = context.route {
+        crate::record_route(&mut ledger, &task, route).map_err(at("recording the route"))?;
+        crate::route::apply_route(&mut agent, route)?;
+    }
     agent.working_directory = worktree.path().to_owned();
     agent
         .env
@@ -681,6 +686,7 @@ fn run_goal_inner(
     record_execution(&mut ledger, &attempt, Execution::Running)?;
     let identity_file: PathBuf = attempt_directory.join(AGENT_IDENTITY_FILE);
     let mut process_started = false;
+    let route_started = Instant::now();
     let captured = run_captured_reporting(
         &agent,
         &sandbox.confinement(),
@@ -690,6 +696,12 @@ fn run_goal_inner(
         &mut process_started,
         &mut |identity| record_identity(&identity_file, identity),
     );
+    record(
+        &mut ledger,
+        EventKind::AttemptStateChanged,
+        attempt.as_str(),
+        json!({"elapsed_ms": u64::try_from(route_started.elapsed().as_millis()).unwrap_or(u64::MAX), "execution": Execution::Running.code()}),
+    )?;
     let finished: CapturedRun = match captured {
         Ok(finished) => finished,
         Err(error) => {

@@ -27,6 +27,8 @@ struct AgentChoice {
     codex: bool,
     /// An `--agent` value Kaisa does not know.
     unknown: Option<String>,
+    pinned: bool,
+    model: Option<String>,
 }
 
 /// The Codex model a developer runs on, and its reasoning effort.
@@ -146,6 +148,8 @@ impl GoalCommand {
             args: Vec::new(),
             codex: false,
             unknown: None,
+            pinned: false,
+            model: None,
         };
         let mut goal: Vec<&str> = Vec::new();
         let mut reviewer_args: Vec<String> = Vec::new();
@@ -159,11 +163,33 @@ impl GoalCommand {
                     goal.extend(words.by_ref().map(String::as_str));
                     break;
                 }
-                "--agent" => match words.next().map(String::as_str) {
-                    Some("codex") => agent.codex = true,
-                    Some("claude") => {}
-                    other => agent.unknown = Some(other.unwrap_or_default().to_owned()),
-                },
+                "--agent" => {
+                    agent.pinned = true;
+                    match words.next().map(String::as_str) {
+                        Some("codex") => agent.codex = true,
+                        Some("claude") => {}
+                        other => agent.unknown = Some(other.unwrap_or_default().to_owned()),
+                    }
+                }
+                "--model" => {
+                    agent.model = Some(
+                        words
+                            .next()
+                            .cloned()
+                            .filter(|value| {
+                                kaisa_agents::CodexLaunch::try_new(
+                                    value,
+                                    kaisa_daemon::ROUTE_EFFORT,
+                                )
+                                .is_ok()
+                            })
+                            .ok_or_else(|| {
+                                GoalParseError::UnknownFlag(
+                                    "--model requires a safe identifier".to_owned(),
+                                )
+                            })?,
+                    );
+                }
                 "--agent-program" => agent.program = words.next().map(PathBuf::from),
                 "--agent-arg" => agent.args.extend(words.next().cloned()),
                 "--reviewer-arg" => reviewer_args.extend(words.next().cloned()),
@@ -220,7 +246,15 @@ impl GoalCommand {
                 .program
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("codex")),
-            args: codex_args(),
+            args: self
+                .agent
+                .model
+                .as_deref()
+                .map_or_else(codex_args, |model| {
+                    kaisa_agents::CodexLaunch::try_new(model, kaisa_daemon::ROUTE_EFFORT)
+                        .map(|launch| kaisa_agents::codex_observed_argv(&launch))
+                        .unwrap_or_default()
+                }),
             working_directory: std::env::temp_dir(),
             env: kaisa_agents::codex_environment(),
         }
@@ -288,7 +322,12 @@ impl GoalCommand {
                 }
             }
             None => crate::verified::claude_spec(
-                &crate::verified::routed_model(role, write_set),
+                &self
+                    .agent
+                    .model
+                    .clone()
+                    .filter(|_| role == Role::Developer)
+                    .unwrap_or_else(|| crate::verified::routed_model(role, write_set)),
                 mcp_config,
             ),
         }
@@ -381,7 +420,7 @@ impl GoalCommand {
                     .join(", ")
             )?;
         }
-        match run_verified_goal(&VerifiedRequest {
+        let request = VerifiedRequest {
             repository,
             state_directory: state,
             goal: &self.goal,
@@ -401,7 +440,17 @@ impl GoalCommand {
                 .as_ref()
                 .map_or(&[][..], |trial| trial.writable.as_slice()),
             reduced_mode,
-        }) {
+        };
+        let result =
+            if self.agent.pinned || self.agent.model.is_some() || self.agent.program.is_some() {
+                run_verified_goal(&request)
+            } else {
+                kaisa_daemon::run_verified_goal_with_routing(
+                    &request,
+                    &crate::verified::claude_catalog(),
+                )
+            };
+        match result {
             Ok(outcome) => {
                 for attempt in &outcome.attempts {
                     writeln!(out, "{}", attempt.summary())?;
@@ -707,5 +756,47 @@ mod tests {
             !codex_args().is_empty(),
             "the built-in Codex model and effort pass launch validation, so Codex gets its argv"
         );
+    }
+    #[test]
+    fn explicit_agent_and_model_options_remain_pinned_in_the_launch() {
+        const OPTION_AND_VALUE: usize = 2;
+        let command = a_goal_with(&["--agent", "claude", "--model", "opus"]);
+        assert!(
+            command.agent.pinned,
+            "an explicit agent must bypass automatic routing"
+        );
+        let spec = command.role_spec(
+            kaisa_domain::Role::Developer,
+            &kaisa_domain::WriteSet::default(),
+            std::path::Path::new("mcp.json"),
+        );
+        assert!(
+            spec.args
+                .windows(OPTION_AND_VALUE)
+                .any(|pair| pair == ["--model", "opus"]),
+            "the developer receives the user's pinned model"
+        );
+        let reviewer = command.role_spec(
+            kaisa_domain::Role::Reviewer,
+            &kaisa_domain::WriteSet::default(),
+            std::path::Path::new("mcp.json"),
+        );
+        assert!(
+            reviewer
+                .args
+                .windows(OPTION_AND_VALUE)
+                .any(|pair| pair == ["--model", "sonnet"]),
+            "the developer pin does not silently replace the reviewer's separate model"
+        );
+    }
+    #[test]
+    fn an_option_shaped_or_unsafe_model_pin_is_rejected_before_launch() {
+        for value in ["--dangerous", "two models", "model\"value"] {
+            let words = ["--model", value, "write notes"].map(str::to_owned);
+            assert!(
+                super::GoalCommand::parse(&words).is_err(),
+                "a model identifier cannot become an option or malformed adapter input: {value}"
+            );
+        }
     }
 }

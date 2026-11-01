@@ -11,5 +11,5 @@ pub use chain::{BreakReason, ChainBreak, ChainHash, ChainedEvent, build_chain, v
 pub use store::spec;
 pub use store::{
     AdoptedPolicy, AttemptRow, AttemptUsage, Completion, CorruptReason, EventStore, Intent,
-    PendingIntent, StoreError, TaskProgress, TrustedKnowledge,
+    PendingIntent, RoutingObservation, StoreError, TaskProgress, TrustedKnowledge,
 };
