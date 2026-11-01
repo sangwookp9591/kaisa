@@ -12,6 +12,8 @@ mod outbox;
 mod outbox_tests;
 mod policy;
 mod rows;
+/// Content-addressed specifications and approval receipts.
+pub mod spec;
 mod tasks;
 #[cfg(test)]
 pub(crate) mod test_support;

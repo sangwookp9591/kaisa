@@ -14,6 +14,8 @@ mod review;
 mod revision;
 mod route;
 mod sandbox;
+/// Read-only specification agent and strict final-answer parser.
+pub mod spec_agent;
 mod team;
 mod verify;
 

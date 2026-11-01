@@ -16,6 +16,7 @@ mod init;
 mod local_agent;
 mod mcp_serve;
 mod policy;
+mod spec;
 mod tui;
 mod verified;
 mod watch;
@@ -96,7 +97,7 @@ More commands:
   kaisa doctor             read-only setup diagnosis
   kaisa init [--yes]        preview project checks; confirm to save kaisa.toml
   kaisa agent add|list     register a personal agent or a local model server
-  kaisa policy show|set    view or change your personal policy
+  kaisa spec draft|show|list|approve  draft and approve versioned requirements\n  kaisa policy show|set    view or change your personal policy
 
 Goal options:
   --agent codex            Codex develops (observed); Claude Code reviews
@@ -135,6 +136,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> io::Res
         Some("tui") => tui::run(&args[1..], out, err),
         Some("local-agent") => local_agent::run(&args[1..], out, err),
         Some("agent") => agent::run(&args[1..], out, err),
+        Some("spec") => spec::run(&args[1..], out, err),
         Some("policy") => policy::run(&args[1..], out, err),
         Some("mcp") => mcp_serve::run(&args[1..], out, err),
         Some(command) if PLANNED_COMMANDS.contains(&command) => {

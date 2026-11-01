@@ -7,6 +7,8 @@ use crate::grade::Grade;
 /// The user's policy for newly started runs; changes apply to future snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
+    /// Allows explicitly labelled provisional specification approval.
+    pub allow_provisional_spec: bool,
     /// How many revisions may follow a failed review.
     pub revision_limit: u32,
     /// Hosts that agents may reach through the egress broker.
@@ -64,6 +66,7 @@ impl Policy {
     #[must_use]
     pub fn personal_default() -> Self {
         Self {
+            allow_provisional_spec: false,
             revision_limit: 2,
             allowed_egress_hosts: vec!["api.anthropic.com".into(), "api.openai.com".into()],
             confine_agents: true,
@@ -124,7 +127,8 @@ impl Policy {
             Grade::T3 => "T3",
         };
         format!(
-            "allowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
+            "allow_provisional_spec={}\nallowed_egress_hosts={hosts}\nconfine_agents={}\nmin_grade_for_security_review={grade}\nrequire_person_when_check_definitions_change={}\nrequire_person_when_tests_weaken={}\nrevision_limit={}\n",
+            self.allow_provisional_spec,
             self.confine_agents,
             self.require_person_when_check_definitions_change,
             self.require_person_when_tests_weaken,
@@ -243,6 +247,7 @@ mod tests {
     #[test]
     fn the_canonical_text_contains_every_rule_in_key_order() {
         let expected: &str = concat!(
+            "allow_provisional_spec=false\n",
             "allowed_egress_hosts=api.anthropic.com,api.openai.com\n",
             "confine_agents=true\n",
             "min_grade_for_security_review=T3\n",
@@ -273,7 +278,8 @@ mod tests {
         assert!(
             one_host
                 .canonical_text()
-                .starts_with("allowed_egress_hosts=a%2Cb%0A%25\n"),
+                .lines()
+                .any(|line| line == "allowed_egress_hosts=a%2Cb%0A%25"),
             "escaped host bytes preserve one key-value line per field"
         );
     }

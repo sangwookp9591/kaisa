@@ -443,6 +443,7 @@ dependencies = [
  "kaisa-supervisor",
  "kaisa-sys",
  "kaisa-workspace",
+ "serde",
  "serde_json",
  "shell-words",
 ]
@@ -450,6 +451,11 @@ dependencies = [
 [[package]]
 name = "kaisa-domain"
 version = "0.0.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "kaisa-egress"
@@ -477,6 +483,7 @@ dependencies = [
  "blake3",
  "kaisa-domain",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

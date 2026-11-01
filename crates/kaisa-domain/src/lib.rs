@@ -17,6 +17,8 @@ mod plan;
 mod policy;
 mod repo_path;
 mod sandbox;
+/// Specification model and guarded approval.
+pub mod spec;
 mod verdict;
 mod write_set;
 
@@ -44,5 +46,8 @@ pub use plan::{Plan, PlanError, PlannedTask};
 pub use policy::{Policy, PolicyError, PolicySnapshot};
 pub use repo_path::{RepoPath, RepoPathError};
 pub use sandbox::{Network, Role, SandboxProfile, sandbox_profile};
+pub use spec::{
+    AcceptanceCriterion, Ambiguity, CriterionKind, Requirement, SpecApproval, SpecId, Specification,
+};
 pub use verdict::{Finding, ReviewVerdict, Severity};
 pub use write_set::WriteSet;

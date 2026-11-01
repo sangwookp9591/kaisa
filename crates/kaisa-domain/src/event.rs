@@ -55,6 +55,12 @@ impl fmt::Display for Sequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EventKind {
+    /// A provisional specification version was drafted.
+    SpecDrafted,
+    /// A specification version received approval.
+    SpecApproved,
+    /// Approved specification bytes were frozen.
+    SpecFrozen,
     /// A mission was created from what the user asked for.
     MissionCreated,
     /// A run started inside a mission: the root run, or a sub-run whose parent is named in the
@@ -103,7 +109,10 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every event kind, for exhaustive lookups.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 24] = [
+        Self::SpecDrafted,
+        Self::SpecApproved,
+        Self::SpecFrozen,
         Self::MissionCreated,
         Self::RunStarted,
         Self::WriteSetDeclared,
@@ -131,6 +140,9 @@ impl EventKind {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::SpecDrafted => "spec.drafted",
+            Self::SpecApproved => "spec.approved",
+            Self::SpecFrozen => "spec.frozen",
             Self::MissionCreated => "mission.created",
             Self::RunStarted => "run.started",
             Self::WriteSetDeclared => "task.write_set_declared",

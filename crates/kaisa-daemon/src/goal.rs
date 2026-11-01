@@ -573,6 +573,9 @@ fn run_goal_inner(
     let mut state: AttemptState = AttemptState::admitted();
     let mut agent: ProcessSpec = (request.launch)(&mcp_config);
     agent.working_directory = worktree.path().to_owned();
+    agent
+        .env
+        .push(("KAISA_ATTEMPT".into(), attempt.as_str().into()));
     let egress: Option<kaisa_egress::EgressBroker> = if request.egress_hosts.is_empty() {
         None
     } else {
